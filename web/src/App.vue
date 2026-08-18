@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { apiRequest } from './api'
+import homtechLogo from './assets/homtech-logo.png'
 
 const mode = ref('login')
 const loading = ref(false)
@@ -62,9 +63,9 @@ onMounted(async () => {
     <div class="auth-shell__glow auth-shell__glow--left"></div>
     <div class="auth-shell__glow auth-shell__glow--right"></div>
 
-    <header class="auth-brand" aria-label="HomTech API Seller">
-      <span class="auth-brand__mark" aria-hidden="true">H</span>
-      <span>HomTech API Seller</span>
+    <header class="auth-brand">
+      <img :src="homtechLogo" alt="HomTech" />
+      <span class="auth-brand__subtitle">API Seller</span>
     </header>
 
     <section v-if="user" class="welcome-card" aria-live="polite">
@@ -122,8 +123,9 @@ button { cursor: pointer; }
 .auth-shell__glow { position: absolute; width: 44vw; aspect-ratio: 1; border: 1px solid rgba(114, 135, 185, .18); border-radius: 50%; pointer-events: none; }
 .auth-shell__glow--left { bottom: -27vw; left: -17vw; }
 .auth-shell__glow--right { top: -34vw; right: -11vw; }
-.auth-brand { position: relative; z-index: 1; display: flex; align-items: center; gap: 13px; align-self: start; font-size: clamp(20px, 2.1vw, 30px); font-weight: 780; letter-spacing: -.045em; }
-.auth-brand__mark { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid rgba(93, 231, 197, .7); border-radius: 14px; color: #061221; background: linear-gradient(140deg, #60efd0, #5686f6 80%); font-family: Georgia, serif; font-size: 26px; font-weight: 700; box-shadow: 0 10px 30px rgba(31, 218, 184, .2); }
+.auth-brand { position: relative; z-index: 1; display: flex; align-items: center; gap: clamp(10px, 1.3vw, 18px); align-self: start; }
+.auth-brand img { display: block; width: clamp(164px, 17vw, 252px); height: auto; max-height: 56px; object-fit: contain; }
+.auth-brand__subtitle { padding-left: clamp(10px, 1.3vw, 18px); border-left: 1px solid rgba(144, 160, 204, .33); color: #aeb9d4; font-size: clamp(13px, 1.25vw, 17px); font-weight: 720; letter-spacing: -.025em; }
 .auth-card, .welcome-card { position: relative; z-index: 1; width: min(100%, 870px); align-self: center; justify-self: center; display: grid; grid-template-columns: minmax(250px, .9fr) minmax(280px, 1fr); gap: clamp(30px, 6vw, 85px); padding: clamp(30px, 5vw, 66px); border: 1px solid rgba(144, 160, 204, .25); border-radius: 30px; background: linear-gradient(140deg, rgba(22, 33, 62, .97), rgba(10, 15, 34, .97)); box-shadow: 0 30px 90px rgba(0, 0, 0, .32); }
 .auth-card__intro h1, .welcome-card h1 { margin: 12px 0 18px; white-space: pre-line; font-size: clamp(36px, 4.3vw, 65px); line-height: .95; letter-spacing: -.075em; }
 .auth-card__intro h1 em, .welcome-card h1 em { color: #50e6c1; font-family: Georgia, serif; font-weight: 600; }
@@ -145,5 +147,5 @@ button { cursor: pointer; }
 .welcome-card__rule { height: 1px; margin-bottom: 24px; background: rgba(147, 164, 207, .25); }
 .welcome-card .auth-button { width: 100%; margin-top: 30px; }
 .auth-button--ghost { border: 1px solid rgba(145, 162, 205, .34); color: #d7def0; background: transparent; box-shadow: none; }
-@media (max-width: 720px) { .auth-shell { padding: 22px; } .auth-card { grid-template-columns: 1fr; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } }
+@media (max-width: 720px) { .auth-shell { padding: 22px; } .auth-brand img { width: 160px; } .auth-brand__subtitle { font-size: 13px; } .auth-card { grid-template-columns: 1fr; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } }
 </style>
