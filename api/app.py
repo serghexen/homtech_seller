@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from domains.local_auth import AuthenticatedUser, create_access_token, decode_access_token, hash_password, normalize_email, verify_password
 from domains.marketplace_connections_api import mount_marketplace_connection_routes
+from domains.marketplace_read_api import mount_marketplace_read_routes
 
 
 app = FastAPI(title="HomTech Seller API", version="0.1.0")
@@ -245,6 +246,15 @@ def logout(response: Response) -> Response:
 
 # Подключает изолированный модуль магазинов после определения локальной авторизации и workspace-прав.
 mount_marketplace_connection_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+# Подключает снимки каталога и заказов после авторизации, сохраняя их внутри отдельного Seller workspace.
+mount_marketplace_read_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

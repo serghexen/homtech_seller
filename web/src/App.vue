@@ -9,6 +9,20 @@ const error = ref('')
 const user = ref(null)
 const connections = ref([])
 const connectionsLoading = ref(false)
+const activeSection = ref('stores')
+const catalogItems = ref([])
+const catalogTotal = ref(0)
+const catalogPage = ref(1)
+const catalogLoading = ref(false)
+const orders = ref([])
+const ordersTotal = ref(0)
+const ordersPage = ref(1)
+const ordersLoading = ref(false)
+const selectedConnectionId = ref(null)
+const catalogSearch = ref('')
+const orderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
+const appliedOrderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
+const isSyncing = ref(false)
 const isConnectionModalOpen = ref(false)
 const isSavingConnection = ref(false)
 const isDiscoveringStores = ref(false)
@@ -19,6 +33,9 @@ const form = reactive({ email: '', password: '', display_name: '', workspace_nam
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 
 const isYandex = computed(() => connectionForm.provider_code === 'yandex_market')
+const pageSize = 24
+const catalogPageCount = computed(() => Math.max(1, Math.ceil(catalogTotal.value / pageSize)))
+const ordersPageCount = computed(() => Math.max(1, Math.ceil(ordersTotal.value / pageSize)))
 
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
@@ -41,6 +58,32 @@ function connectionStatus(status) {
   return status === 'active' ? 'Активен' : status === 'disabled' ? 'Отключён' : 'Требует проверки'
 }
 
+function orderStatus(status) {
+  // Отображает короткий единый справочник статусов, чтобы интерфейс не зависел от кодов разных маркетплейсов.
+  return {
+    processing: 'В процессе',
+    in_delivery: 'Доставляется',
+    delivered: 'Доставлен',
+    cancelled: 'Отменён',
+    problem: 'Проблема',
+  }[status] || 'Проблема'
+}
+
+function formatDate(value) {
+  // Показывает дату снимка в локальном времени оператора и не выводит технический ISO-формат API.
+  if (!value) return '—'
+  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+}
+
+function queryString(params) {
+  // Собирает только заполненные фильтры, чтобы API получал простой и воспроизводимый запрос списка.
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== '' && value !== null && value !== undefined) search.set(key, String(value))
+  })
+  return search.toString()
+}
+
 async function loadConnections() {
   // Загружает только магазины рабочей области текущей сессии, а не общий список системы.
   if (!user.value) return
@@ -53,6 +96,113 @@ async function loadConnections() {
     error.value = requestError.message || 'Не удалось загрузить магазины'
   } finally {
     connectionsLoading.value = false
+  }
+}
+
+async function loadCatalog() {
+  // Загружает страницу сохранённого каталога без нового обращения к маркетплейсу на каждый поиск.
+  if (!user.value) return
+  catalogLoading.value = true
+  try {
+    const query = queryString({ connection_id: selectedConnectionId.value, query: catalogSearch.value, page: catalogPage.value, page_size: pageSize })
+    const result = await apiRequest(`/marketplaces/catalog?${query}`)
+    catalogItems.value = result.items
+    catalogTotal.value = result.total
+  } catch (requestError) {
+    error.value = requestError.message || 'Не удалось загрузить каталог'
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+async function loadOrders() {
+  // Загружает постраничный локальный снимок заказов с уже применёнными фильтрами.
+  if (!user.value) return
+  ordersLoading.value = true
+  try {
+    const query = queryString({ connection_id: selectedConnectionId.value, ...appliedOrderFilters, page: ordersPage.value, page_size: pageSize })
+    const result = await apiRequest(`/marketplaces/orders?${query}`)
+    orders.value = result.items
+    ordersTotal.value = result.total
+  } catch (requestError) {
+    error.value = requestError.message || 'Не удалось загрузить заказы'
+  } finally {
+    ordersLoading.value = false
+  }
+}
+
+async function changeSection(section) {
+  // Переключает рабочий раздел и загружает его локальный снимок только при первом открытии или возврате.
+  activeSection.value = section
+  error.value = ''
+  if (section === 'catalog') await loadCatalog()
+  if (section === 'orders') await loadOrders()
+}
+
+async function selectConnection(connectionId) {
+  // Меняет фильтр магазина для текущего раздела и возвращает пользователя на первую страницу списка.
+  selectedConnectionId.value = connectionId
+  if (activeSection.value === 'catalog') {
+    catalogPage.value = 1
+    await loadCatalog()
+  }
+  if (activeSection.value === 'orders') {
+    ordersPage.value = 1
+    await loadOrders()
+  }
+}
+
+async function syncCurrentSnapshot() {
+  // Обновляет только выбранный магазин или все активные и затем перечитывает локальный снимок из БД.
+  const kind = activeSection.value === 'catalog' ? 'catalog' : 'orders'
+  isSyncing.value = true
+  error.value = ''
+  try {
+    const result = await apiRequest(`/marketplaces/${kind}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ connection_id: selectedConnectionId.value }),
+    })
+    const errors = result.items.filter((item) => item.error)
+    if (errors.length) error.value = errors.map((item) => `${item.store_name}: ${item.error}`).join(' ')
+    if (kind === 'catalog') await loadCatalog()
+    else await loadOrders()
+  } catch (requestError) {
+    error.value = requestError.message || 'Не удалось обновить снимок'
+  } finally {
+    isSyncing.value = false
+  }
+}
+
+async function applyCatalogSearch() {
+  // Применяет поиск каталога отдельным действием, чтобы не отправлять запрос при каждом символе.
+  catalogPage.value = 1
+  await loadCatalog()
+}
+
+async function applyOrderFilters() {
+  // Копирует черновик фильтров после нажатия «Применить» и только затем обновляет список заказов.
+  Object.assign(appliedOrderFilters, orderFilters)
+  ordersPage.value = 1
+  await loadOrders()
+}
+
+async function resetOrderFilters() {
+  // Сбрасывает и черновик, и применённые условия, чтобы вернуть полный снимок заказов одной кнопкой.
+  Object.assign(orderFilters, { query: '', status: '', date_from: '', date_to: '' })
+  Object.assign(appliedOrderFilters, orderFilters)
+  ordersPage.value = 1
+  await loadOrders()
+}
+
+async function changePage(nextPage) {
+  // Переключает страницу активного раздела в допустимых границах без изменения выбранных фильтров.
+  if (activeSection.value === 'catalog') {
+    catalogPage.value = Math.min(Math.max(1, nextPage), catalogPageCount.value)
+    await loadCatalog()
+  }
+  if (activeSection.value === 'orders') {
+    ordersPage.value = Math.min(Math.max(1, nextPage), ordersPageCount.value)
+    await loadOrders()
   }
 }
 
@@ -79,6 +229,10 @@ async function logout() {
   await apiRequest('/auth/logout', { method: 'POST' }).catch(() => null)
   user.value = null
   connections.value = []
+  catalogItems.value = []
+  orders.value = []
+  selectedConnectionId.value = null
+  activeSection.value = 'stores'
   form.password = ''
   mode.value = 'login'
 }
@@ -211,21 +365,22 @@ onMounted(async () => {
 
     <section v-if="user" class="seller-dashboard" aria-live="polite">
       <nav class="seller-nav" aria-label="Разделы Seller">
-        <button class="seller-nav__item seller-nav__item--active" type="button">Магазины</button>
-        <button class="seller-nav__item" type="button" disabled>Каталог <small>скоро</small></button>
-        <button class="seller-nav__item" type="button" disabled>Заказы <small>скоро</small></button>
+        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'stores' }" type="button" @click="changeSection('stores')">Магазины</button>
+        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'catalog' }" type="button" @click="changeSection('catalog')">Каталог</button>
+        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'orders' }" type="button" @click="changeSection('orders')">Заказы</button>
       </nav>
-      <div class="dashboard-heading">
+
+      <div v-if="activeSection === 'stores'" class="dashboard-heading">
         <div>
           <p class="kicker">{{ user.workspace_name }}</p>
           <h1>Магазины</h1>
-          <p>Подключите кабинеты, чтобы позже получать единый каталог и заказы. Действий на стороне маркетплейсов Seller не выполняет.</p>
+          <p>Подключите кабинеты, чтобы получать единый каталог и заказы. Seller пока работает с маркетплейсами только в режиме чтения.</p>
         </div>
         <button class="primary-button" type="button" @click="openConnectionModal">+ Подключить магазин</button>
       </div>
       <p v-if="error" class="form-error">{{ error }}</p>
-      <div v-if="connectionsLoading" class="empty-state">Загружаем подключённые магазины…</div>
-      <div v-else class="connection-grid">
+      <div v-if="activeSection === 'stores' && connectionsLoading" class="empty-state">Загружаем подключённые магазины…</div>
+      <div v-else-if="activeSection === 'stores'" class="connection-grid">
         <article v-for="connection in connections" :key="connection.id" class="connection-card" :class="{ 'connection-card--disabled': connection.status === 'disabled' }">
           <div class="connection-card__head">
             <div class="market-mark" :class="`market-mark--${connection.provider_code}`">{{ providerMark(connection.provider_code) }}</div>
@@ -241,6 +396,71 @@ onMounted(async () => {
         </article>
         <button class="connection-add-card" type="button" @click="openConnectionModal"><strong>+</strong><span>Подключить магазин</span></button>
       </div>
+
+      <section v-if="activeSection === 'catalog' || activeSection === 'orders'" class="snapshot-view">
+        <div class="snapshot-toolbar">
+          <div class="snapshot-search">
+            <label>{{ activeSection === 'catalog' ? 'Поиск' : 'Поиск по заказам' }}</label>
+            <input
+              v-if="activeSection === 'catalog'"
+              v-model.trim="catalogSearch"
+              type="search"
+              placeholder="Название, артикул или SKU"
+              @keyup.enter="applyCatalogSearch"
+            />
+            <input
+              v-else
+              v-model.trim="orderFilters.query"
+              type="search"
+              placeholder="Номер заказа, товар или SKU"
+              @keyup.enter="applyOrderFilters"
+            />
+          </div>
+          <div class="store-filters" aria-label="Фильтр по магазину">
+            <button :class="{ active: selectedConnectionId === null }" type="button" @click="selectConnection(null)">Все магазины</button>
+            <button v-for="connection in connections" :key="connection.id" :class="{ active: selectedConnectionId === connection.id }" type="button" @click="selectConnection(connection.id)">
+              <span class="market-mark" :class="`market-mark--${connection.provider_code}`">{{ providerMark(connection.provider_code) }}</span>{{ connection.display_name }}
+            </button>
+          </div>
+          <button class="sync-button" type="button" :disabled="isSyncing" :title="selectedConnectionId ? 'Обновить выбранный магазин' : 'Обновить все активные магазины'" @click="syncCurrentSnapshot">
+            <span :class="{ spinning: isSyncing }">↻</span><span class="sync-button__text">{{ isSyncing ? 'Обновляем…' : 'Обновить' }}</span>
+          </button>
+        </div>
+
+        <div v-if="activeSection === 'orders'" class="orders-filter-row">
+          <label><span>Период</span><input v-model="orderFilters.date_from" type="date" /></label>
+          <span class="date-divider">—</span>
+          <label><span class="sr-only">Дата окончания</span><input v-model="orderFilters.date_to" type="date" /></label>
+          <label class="status-select"><span>Статус</span><select v-model="orderFilters.status"><option value="">Все статусы</option><option value="processing">В процессе</option><option value="in_delivery">Доставляется</option><option value="delivered">Доставлен</option><option value="cancelled">Отменён</option><option value="problem">Проблема</option></select></label>
+          <button class="primary-button filter-apply" type="button" @click="applyOrderFilters">Применить</button>
+          <button class="filter-reset" type="button" @click="resetOrderFilters">Сбросить</button>
+        </div>
+        <div v-else class="catalog-search-actions"><button class="primary-button filter-apply" type="button" @click="applyCatalogSearch">Найти</button></div>
+
+        <p class="snapshot-count">Найдено: {{ activeSection === 'catalog' ? catalogTotal : ordersTotal }}</p>
+        <div v-if="(activeSection === 'catalog' && catalogLoading) || (activeSection === 'orders' && ordersLoading)" class="empty-state">Загружаем локальный снимок…</div>
+        <div v-else-if="activeSection === 'catalog' && !catalogItems.length" class="empty-state">Каталог пока пуст. Нажмите «Обновить», чтобы прочитать товары из выбранного магазина.</div>
+        <div v-else-if="activeSection === 'orders' && !orders.length" class="empty-state">Заказов пока нет в снимке. Нажмите «Обновить», чтобы прочитать свежие заказы.</div>
+
+        <div v-else-if="activeSection === 'catalog'" class="snapshot-grid">
+          <article v-for="item in catalogItems" :key="`${item.connection_id}-${item.external_product_id}`" class="snapshot-card catalog-card">
+            <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`">{{ providerMark(item.provider_code) }}</span><div><h2>{{ item.title || 'Без названия' }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}</p></div></div>
+            <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.synced_at">{{ formatDate(item.synced_at) }}</time></div>
+          </article>
+        </div>
+        <div v-else class="snapshot-grid">
+          <article v-for="item in orders" :key="`${item.connection_id}-${item.external_order_id}-${item.external_item_id}`" class="snapshot-card order-card">
+            <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`">{{ providerMark(item.provider_code) }}</span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}</p></div></div>
+            <div class="order-card__body"><strong>{{ item.title || 'Товар без названия' }}</strong><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span></div>
+            <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.updated_at || item.created_at || item.synced_at">{{ formatDate(item.updated_at || item.created_at || item.synced_at) }}</time></div>
+          </article>
+        </div>
+        <div v-if="(activeSection === 'catalog' ? catalogPageCount : ordersPageCount) > 1" class="pagination">
+          <button type="button" :disabled="(activeSection === 'catalog' ? catalogPage : ordersPage) === 1" @click="changePage((activeSection === 'catalog' ? catalogPage : ordersPage) - 1)">← Назад</button>
+          <span>Страница {{ activeSection === 'catalog' ? catalogPage : ordersPage }} из {{ activeSection === 'catalog' ? catalogPageCount : ordersPageCount }}</span>
+          <button type="button" :disabled="(activeSection === 'catalog' ? catalogPage : ordersPage) === (activeSection === 'catalog' ? catalogPageCount : ordersPageCount)" @click="changePage((activeSection === 'catalog' ? catalogPage : ordersPage) + 1)">Далее →</button>
+        </div>
+      </section>
     </section>
 
     <section v-else class="auth-card">
@@ -307,5 +527,8 @@ onMounted(async () => {
 .modal-backdrop { position: fixed; z-index: 5; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2,6,19,.7); backdrop-filter: blur(9px); } .connection-modal { position: relative; width: min(100%,670px); max-height: calc(100vh - 48px); overflow: auto; padding: clamp(28px,4vw,46px); border: 1px solid rgba(146,164,205,.3); border-radius: 26px; background: linear-gradient(145deg,#14203d,#0b1128); box-shadow: 0 30px 100px rgba(0,0,0,.45); } .modal-close { position: absolute; top: 18px; right: 22px; padding: 0; border: 0; color: #bac4dc; background: transparent; font-size: 38px; line-height: 1; }
 .provider-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 26px 0; } .provider-picker button { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 800; } .provider-picker button.active { border-color: #57e6c4; background: linear-gradient(115deg,rgba(73,226,186,.36),rgba(183,142,69,.35)); } .provider-picker .market-mark { width: 35px; height: 35px; border-radius: 10px; }
 .yandex-discovery { display: grid; gap: 13px; } .secondary-button { min-height: 48px; padding: 0 16px; } .store-choice { display: grid; gap: 8px; } .store-choice > span { color: #b7c2da; font-size: 13px; font-weight: 750; } .store-choice button { display: flex; justify-content: space-between; padding: 12px; border: 1px solid rgba(149,164,203,.25); border-radius: 12px; color: #edf1ff; background: rgba(24,34,61,.7); text-align: left; } .store-choice button.active { border-color: #55e4c0; background: rgba(56,170,147,.18); } .store-choice small { color: #aeb9d4; } .connection-form__actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 9px; } .connection-form__actions .primary-button { min-width: 190px; }
+.snapshot-view { display: grid; gap: 18px; margin-top: 46px; } .snapshot-toolbar { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(0, 1.6fr) auto; align-items: end; gap: 14px; } .snapshot-search { display: grid; gap: 7px; } .snapshot-search label, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .snapshot-search input, .orders-filter-row input, .orders-filter-row select { width: 100%; min-height: 50px; padding: 0 15px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); } .store-filters { display: flex; min-width: 0; gap: 8px; overflow-x: auto; padding-bottom: 1px; } .store-filters button { display: inline-flex; min-height: 50px; align-items: center; gap: 8px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; color: #cbd5eb; background: rgba(31,40,70,.72); font-weight: 800; } .store-filters button.active { color: #071827; border-color: rgba(88,230,192,.54); background: linear-gradient(115deg, rgba(70,221,184,.76), rgba(183,142,69,.5)); } .store-filters .market-mark { width: 25px; height: 25px; border-radius: 8px; font-size: 8px; } .store-filters .market-mark--yandex_market { font-size: 16px; } .sync-button { display: inline-flex; min-width: 142px; min-height: 52px; align-items: center; justify-content: center; gap: 9px; padding: 0 17px; border: 1px solid #ee6cb5; border-radius: 50px; color: #fff; background: linear-gradient(140deg,#f13b9e,#cf206e); box-shadow: 0 12px 28px rgba(242,52,152,.27); font-weight: 850; } .sync-button > span:first-child { font-size: 25px; line-height: 1; } .spinning { animation: snapshot-spin .8s linear infinite; } @keyframes snapshot-spin { to { transform: rotate(360deg); } }
+.orders-filter-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 14px; border: 1px solid rgba(144,160,204,.17); border-radius: 18px; background: rgba(14,22,48,.56); } .orders-filter-row label { display: grid; gap: 7px; min-width: 150px; } .orders-filter-row .status-select { min-width: 175px; } .date-divider { align-self: end; padding-bottom: 15px; color: #9daaca; } .filter-apply { min-height: 50px; } .filter-reset { min-height: 50px; padding: 0 13px; border: 0; color: #ffaaa8; background: transparent; font-weight: 800; } .catalog-search-actions { display: flex; justify-content: flex-start; } .snapshot-count { margin: 3px 0 0; color: #b7c2da; font-size: 14px; font-weight: 750; }
+.snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div { min-width: 0; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { display: flex; align-items: center; justify-content: space-between; gap: 18px; } .order-card__body > strong { overflow: hidden; color: #eef2fc; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; } .order-status { flex: 0 0 auto; font-size: 12px; font-weight: 900; letter-spacing: .04em; text-transform: uppercase; } .order-status--processing { color: #ffc75a; } .order-status--in_delivery { color: #65b5ff; } .order-status--delivered { color: #4ee6bd; } .order-status--cancelled, .order-status--problem { color: #ff969b; } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (max-width:900px) { .connection-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-header { min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 147px; } .app-brand span { display: none; } .profile-button { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .seller-dashboard { margin-top: 26px; } .seller-nav { width: 100%; gap: 4px; } .seller-nav__item { flex: 1; padding: 0 9px; font-size: 13px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .connection-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 </style>
