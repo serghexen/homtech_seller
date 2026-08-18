@@ -32,6 +32,19 @@ services:
     mem_limit: 350m
     cpus: "0.50"
 
+  web:
+    build:
+      context: ./web
+      args:
+        VITE_API_BASE: /api
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:18081:80"
+    mem_limit: 120m
+    cpus: "0.20"
+
   migrate:
     build: ./api
     profiles: ["maintenance"]
