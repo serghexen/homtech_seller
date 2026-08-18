@@ -19,11 +19,13 @@
 cp .env.example .env
 docker compose up -d postgres
 docker compose --profile maintenance run --rm migrate
-docker compose up -d api
+docker compose up -d api web
 curl http://127.0.0.1:18080/health
 ```
 
-PostgreSQL намеренно не публикуется на хост. В production API также будет доступен только через reverse proxy.
+PostgreSQL намеренно не публикуется в интернет: он слушает только loopback-порт VM для SSH-туннеля. В production API также будет доступен только через reverse proxy.
+
+Для локального запуска API и Vue с PostgreSQL на VM используйте [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md). База на VM открывается только в SSH-туннеле.
 
 ## Авторизация
 

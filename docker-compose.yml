@@ -9,6 +9,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - seller_pgdata:/var/lib/postgresql/data
+    ports:
+      # База не доступна извне: локальная разработка подключается только через SSH-туннель к loopback-порту VM.
+      - "127.0.0.1:${SELLER_POSTGRES_TUNNEL_PORT:-5434}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s

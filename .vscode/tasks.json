@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Seller: открыть SSH-туннель PostgreSQL",
+      "type": "shell",
+      "command": "ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:5434:127.0.0.1:5434 adminops@89.110.88.203",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Seller: запустить API локально",
+      "type": "shell",
+      "command": "set -a && . ../.env.dev && set +a && .venv/bin/uvicorn app:app --reload --host 127.0.0.1 --port 8000",
+      "options": {
+        "cwd": "${workspaceFolder}/api"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Seller: запустить web локально",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
