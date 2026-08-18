@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from domains.local_auth import AuthenticatedUser, create_access_token, decode_access_token, hash_password, normalize_email, verify_password
+from domains.marketplace_connections_api import mount_marketplace_connection_routes
 
 
 app = FastAPI(title="HomTech Seller API", version="0.1.0")
@@ -240,3 +241,13 @@ def logout(response: Response) -> Response:
     # Удаляет только локальную сессию Seller, не затрагивая будущую общую SSO-сессию.
     response.delete_cookie(key="seller_session", path="/")
     return response
+
+
+# Подключает изолированный модуль магазинов после определения локальной авторизации и workspace-прав.
+mount_marketplace_connection_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
