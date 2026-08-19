@@ -238,9 +238,16 @@ def me(user: AuthenticatedUser = Depends(current_user)) -> AuthOut:
 
 
 @app.post("/auth/logout", status_code=204)
-def logout(response: Response) -> Response:
+def logout() -> Response:
     # Удаляет только локальную сессию Seller, не затрагивая будущую общую SSO-сессию.
-    response.delete_cookie(key="seller_session", path="/")
+    response = Response(status_code=204)
+    response.delete_cookie(
+        key="seller_session",
+        path="/",
+        secure=cookie_is_secure(),
+        httponly=True,
+        samesite="lax",
+    )
     return response
 
 
