@@ -18,6 +18,19 @@ import psycopg
 
 ALLOWED_STATUSES = {"free", "reserved", "sending", "delivered", "expired", "disabled"}
 
+INSERT_IMPORTED_KEY_SQL = """
+    INSERT INTO seller.marketplace_keys (
+      pool_id, code_ciphertext, code_hash, code_suffix, status, expires_at,
+      issued_order_ref, reserved_at, issued_at, source_system, source_key_id,
+      created_at, updated_at
+    ) VALUES (
+      %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256, compress-algo=0'), %s, %s, %s, %s,
+      %s, %s, %s, 'crm', %s, %s, %s
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id
+"""
+
 
 @dataclass(frozen=True)
 class SourceKey:
@@ -239,18 +252,7 @@ def import_batch(
                 continue
             pool_id = ensure_target_pool(cursor, connection_id, external_product_id)
             cursor.execute(
-                """
-                INSERT INTO seller.marketplace_keys (
-                  pool_id, code_ciphertext, code_hash, code_suffix, status, expires_at,
-                  issued_order_ref, reserved_at, issued_at, source_system, source_key_id,
-                  created_at, updated_at
-                ) VALUES (
-                  %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256, compress-algo=0'), %s, %s, %s,
-                  %s, %s, %s, 'crm', %s, %s, %s
-                )
-                ON CONFLICT DO NOTHING
-                RETURNING id
-                """,
+                INSERT_IMPORTED_KEY_SQL,
                 (
                     pool_id, row.code, secret, fingerprint, row.code[-4:], row.status, row.expires_at,
                     row.issued_order_ref, row.reserved_at, row.issued_at, row.source_key_id,

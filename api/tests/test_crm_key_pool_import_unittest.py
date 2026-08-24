@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from scripts.import_crm_key_pools import normalized_source_key, seller_key_hash
+from scripts.import_crm_key_pools import INSERT_IMPORTED_KEY_SQL, normalized_source_key, seller_key_hash
 
 
 class CrmKeyPoolImportTests(unittest.TestCase):
@@ -37,6 +37,9 @@ class CrmKeyPoolImportTests(unittest.TestCase):
         first = seller_key_hash("AAAA-BBBB-CCCC")
         self.assertEqual(first, seller_key_hash("AAAA-BBBB-CCCC"))
         self.assertNotIn("AAAA", first)
+
+    def test_import_insert_has_placeholder_for_every_parameter(self):
+        self.assertEqual(INSERT_IMPORTED_KEY_SQL.count("%s"), 13)
 
 
 if __name__ == "__main__":
