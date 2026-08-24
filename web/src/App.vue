@@ -42,6 +42,10 @@ const selectedYandexStore = ref(null)
 const selectedCatalogItem = ref(null)
 const selectedStockLoading = ref(false)
 const selectedStockError = ref('')
+const selectedProductOrders = ref([])
+const selectedProductOrdersTotal = ref(0)
+const selectedProductOrdersLoading = ref(false)
+const selectedProductOrdersError = ref('')
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 
@@ -70,16 +74,54 @@ function providerLogo(providerCode) {
 }
 
 async function openProductCard(item) {
-  // Сразу показывает сохранённую карточку, затем отдельно проверяет актуальный остаток Яндекс Маркета.
+  // Сразу показывает карточку, затем параллельно читает её локальные заказы и актуальный остаток Яндекс Маркета.
   selectedCatalogItem.value = item
   selectedStockError.value = ''
-  if (item.provider_code === 'yandex_market') await refreshSelectedProductStock()
+  selectedProductOrders.value = []
+  selectedProductOrdersTotal.value = 0
+  selectedProductOrdersError.value = ''
+  const requests = [loadSelectedProductOrders()]
+  if (item.provider_code === 'yandex_market') requests.push(refreshSelectedProductStock())
+  await Promise.allSettled(requests)
 }
 
 function closeProductCard() {
   selectedCatalogItem.value = null
   selectedStockLoading.value = false
   selectedStockError.value = ''
+  selectedProductOrders.value = []
+  selectedProductOrdersTotal.value = 0
+  selectedProductOrdersLoading.value = false
+  selectedProductOrdersError.value = ''
+}
+
+async function loadSelectedProductOrders() {
+  // Берёт только позиции этой карточки из локального снимка Seller, не обращаясь к маркетплейсу.
+  const item = selectedCatalogItem.value
+  if (!item || selectedProductOrdersLoading.value) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedProductOrdersLoading.value = true
+  selectedProductOrdersError.value = ''
+  try {
+    const query = queryString({
+      connection_id: item.connection_id,
+      external_product_id: item.external_product_id,
+      page: 1,
+      page_size: 20,
+    })
+    const result = await apiRequest(`/marketplaces/catalog/orders?${query}`)
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    selectedProductOrders.value = result.items
+    selectedProductOrdersTotal.value = result.total
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductOrdersError.value = requestError.message || 'Не удалось загрузить заказы карточки'
+    }
+  } finally {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductOrdersLoading.value = false
+    }
+  }
 }
 
 async function refreshSelectedProductStock() {
@@ -682,6 +724,10 @@ onMounted(async () => {
       :stock-synced-label="formatDate(selectedCatalogItem.stock_synced_at)"
       :stock-loading="selectedStockLoading"
       :stock-error="selectedStockError"
+      :orders="selectedProductOrders"
+      :orders-total="selectedProductOrdersTotal"
+      :orders-loading="selectedProductOrdersLoading"
+      :orders-error="selectedProductOrdersError"
       @refresh-stock="refreshSelectedProductStock"
       @close="closeProductCard"
     />

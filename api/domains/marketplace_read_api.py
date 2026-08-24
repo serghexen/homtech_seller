@@ -92,6 +92,16 @@ class MarketplaceOrderListOut(BaseModel):
     page_size: int
 
 
+def marketplace_order_from_row(row: tuple[Any, ...]) -> MarketplaceOrderItemOut:
+    return MarketplaceOrderItemOut(
+        connection_id=int(row[0]), provider_code=str(row[1]), store_name=str(row[2]),
+        external_order_id=str(row[3]), external_item_id=str(row[4]), offer_id=str(row[5] or ""),
+        sku=str(row[6] or ""), title=str(row[7] or ""), quantity=int(row[8] or 0), status=str(row[9]),
+        provider_status=str(row[10] or ""), delivery_type=str(row[11] or ""), created_at=row[12],
+        updated_at=row[13], synced_at=row[14],
+    )
+
+
 def first_text(*values: Any) -> str:
     # Берёт первое непустое значение из разных версий ответов Ozon и Яндекс Маркета.
     for value in values:
@@ -464,6 +474,82 @@ def mount_marketplace_read_routes(
             provider_updated_at=provider_updated_at,
         )
 
+    @app.get("/marketplaces/catalog/orders", response_model=MarketplaceOrderListOut)
+    def list_catalog_item_orders(
+        connection_id: int = Query(gt=0),
+        external_product_id: str = Query(min_length=1, max_length=256),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceOrderListOut:
+        # Использует только локальный снимок и точные идентификаторы товара внутри одного подключения.
+        product_id = str(external_product_id).strip()
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT item.offer_id, item.sku
+                    FROM seller.catalog_items AS item
+                    JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    WHERE item.connection_id=%s AND item.external_product_id=%s
+                      AND connection.workspace_id=%s
+                    LIMIT 1
+                    """,
+                    (connection_id, product_id, seller_user.workspace_id),
+                )
+                product = cursor.fetchone()
+                if not product:
+                    raise HTTPException(status_code=404, detail="Карточка товара не найдена")
+
+                offer_id = str(product[0] or "").strip()
+                sku = str(product[1] or "").strip()
+                identity_conditions: list[str] = []
+                identity_params: list[Any] = []
+                if offer_id:
+                    identity_conditions.append("item.offer_id=%s")
+                    identity_params.append(offer_id)
+                if sku and sku != offer_id:
+                    identity_conditions.append("item.sku=%s")
+                    identity_params.append(sku)
+                if not identity_conditions:
+                    return MarketplaceOrderListOut(items=[], total=0, page=page, page_size=page_size)
+
+                identity_where = " OR ".join(identity_conditions)
+                base_params = [seller_user.workspace_id, connection_id, *identity_params]
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM seller.order_items AS item
+                    JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    WHERE connection.workspace_id=%s AND item.connection_id=%s
+                      AND ({identity_where})
+                    """,
+                    base_params,
+                )
+                total = int(cursor.fetchone()[0])
+                cursor.execute(
+                    f"""
+                    SELECT item.connection_id, connection.provider_code, connection.display_name,
+                           item.external_order_id, item.external_item_id, item.offer_id, item.sku, item.title,
+                           item.quantity, item.normalized_status, item.provider_status, item.delivery_type,
+                           item.created_at, item.updated_at, item.synced_at
+                    FROM seller.order_items AS item
+                    JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    WHERE connection.workspace_id=%s AND item.connection_id=%s
+                      AND ({identity_where})
+                    ORDER BY COALESCE(item.updated_at, item.created_at, item.synced_at) DESC,
+                             item.external_order_id DESC, item.external_item_id ASC
+                    LIMIT %s OFFSET %s
+                    """,
+                    [*base_params, page_size, (page - 1) * page_size],
+                )
+                rows = cursor.fetchall()
+        return MarketplaceOrderListOut(
+            items=[marketplace_order_from_row(row) for row in rows],
+            total=total, page=page, page_size=page_size,
+        )
+
     @app.get("/marketplaces/orders", response_model=MarketplaceOrderListOut)
     def list_orders(
         connection_id: int | None = Query(default=None, gt=0),
@@ -526,12 +612,6 @@ def mount_marketplace_read_routes(
                 )
                 rows = cursor.fetchall()
         return MarketplaceOrderListOut(
-            items=[MarketplaceOrderItemOut(
-                connection_id=int(row[0]), provider_code=str(row[1]), store_name=str(row[2]),
-                external_order_id=str(row[3]), external_item_id=str(row[4]), offer_id=str(row[5] or ""),
-                sku=str(row[6] or ""), title=str(row[7] or ""), quantity=int(row[8] or 0), status=str(row[9]),
-                provider_status=str(row[10] or ""), delivery_type=str(row[11] or ""), created_at=row[12],
-                updated_at=row[13], synced_at=row[14],
-            ) for row in rows],
+            items=[marketplace_order_from_row(row) for row in rows],
             total=total, page=page, page_size=page_size,
         )

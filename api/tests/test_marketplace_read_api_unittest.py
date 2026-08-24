@@ -118,6 +118,18 @@ class MarketplaceReadApiTests(unittest.TestCase):
         route = next(route for route in app.routes if route.path == "/marketplaces/catalog/stock/refresh")
         self.assertEqual(route.methods, {"POST"})
 
+    def test_mounts_readonly_catalog_orders_route(self) -> None:
+        app = FastAPI()
+        mount_marketplace_read_routes(
+            app,
+            database_url=lambda: "",
+            psycopg=None,
+            current_user=lambda: None,
+            user_with_workspace=lambda *_args: None,
+        )
+        route = next(route for route in app.routes if route.path == "/marketplaces/catalog/orders")
+        self.assertEqual(route.methods, {"GET"})
+
     def test_ozon_order_expands_products_without_delivery_action(self) -> None:
         # Проверяет, что снимок Ozon содержит позицию, но не добавляет никаких команд выдачи.
         items = normalize_order_items(

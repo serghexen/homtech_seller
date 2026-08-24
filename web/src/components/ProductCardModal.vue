@@ -11,6 +11,10 @@ const props = defineProps({
   stockSyncedLabel: { type: String, default: '' },
   stockLoading: { type: Boolean, default: false },
   stockError: { type: String, default: '' },
+  orders: { type: Array, default: () => [] },
+  ordersTotal: { type: Number, default: 0 },
+  ordersLoading: { type: Boolean, default: false },
+  ordersError: { type: String, default: '' },
 })
 
 const emit = defineEmits(['close', 'refresh-stock'])
@@ -51,7 +55,7 @@ const detailFields = computed(() => [
   { key: 'stock', label: 'Остаток', value: Number.isInteger(props.item.available_stock) ? props.item.available_stock : '—' },
 ])
 
-const workSections = [
+const workSections = computed(() => [
   {
     id: 'stock',
     number: '01',
@@ -62,10 +66,40 @@ const workSections = [
     id: 'orders',
     number: '02',
     title: 'Заказы',
-    description: 'История продаж именно этой карточки товара',
-    placeholder: 'Заказы будут связаны с карточкой на следующем этапе. Сейчас Seller показывает их только в общем разделе.',
+    description: props.ordersLoading
+      ? 'Загружаем историю продаж этой карточки'
+      : props.ordersTotal
+        ? `${orderCountLabel(props.ordersTotal)} в локальном снимке`
+        : 'История продаж именно этой карточки товара',
   },
-]
+])
+
+function orderCountLabel(value) {
+  const count = Math.max(0, Number(value) || 0)
+  const mod100 = count % 100
+  const mod10 = count % 10
+  const word = mod100 >= 11 && mod100 <= 14 ? 'заказов' : mod10 === 1 ? 'заказ' : mod10 >= 2 && mod10 <= 4 ? 'заказа' : 'заказов'
+  return `${count} ${word}`
+}
+
+function orderStatusLabel(status) {
+  return {
+    processing: 'В процессе',
+    in_delivery: 'Доставляется',
+    delivered: 'Доставлен',
+    cancelled: 'Отменён',
+    problem: 'Проблема',
+  }[status] || 'Неизвестно'
+}
+
+function formatOrderDate(value) {
+  if (!value) return 'Дата не указана'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return 'Дата не указана'
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(parsed)
+}
 
 function toggleSection(sectionId) {
   openSection.value = openSection.value === sectionId ? '' : sectionId
@@ -180,9 +214,38 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                       Seller только показывает сохранённые параметры. Изменение и отправка данных в маркетплейс отключены.
                     </p>
                   </div>
-                  <div v-else class="product-work-block__placeholder">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
-                    <div><strong>Следующий этап переноса</strong><p>{{ section.placeholder }}</p></div>
+                  <div v-else class="product-orders">
+                    <div v-if="ordersLoading" class="product-orders__state" aria-live="polite" aria-busy="true">
+                      <span class="product-orders__spinner" aria-hidden="true"></span>
+                      <div><strong>Загружаем заказы</strong><p>Читаем сохранённые позиции этой карточки.</p></div>
+                    </div>
+                    <div v-else-if="ordersError" class="product-orders__state product-orders__state--error" role="alert">
+                      <div><strong>Не удалось загрузить заказы</strong><p>{{ ordersError }}</p></div>
+                    </div>
+                    <div v-else-if="!orders.length" class="product-orders__state product-orders__state--empty">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v16H7z" /><path d="M9.5 8h5M9.5 12h5M9.5 16h3" /></svg>
+                      <div><strong>Заказов пока нет</strong><p>В локальном снимке не найдено продаж этой карточки.</p></div>
+                    </div>
+                    <template v-else>
+                      <header class="product-orders__summary">
+                        <strong>{{ orderCountLabel(ordersTotal) }}</strong>
+                        <span v-if="ordersTotal > orders.length">Показаны последние {{ orders.length }}</span>
+                        <span v-else>Все найденные заказы</span>
+                      </header>
+                      <div class="product-orders__list">
+                        <article v-for="order in orders" :key="`${order.external_order_id}-${order.external_item_id}`" class="product-order">
+                          <div class="product-order__head">
+                            <strong>Заказ №{{ order.external_order_id }}</strong>
+                            <span class="product-order__status" :class="`product-order__status--${order.status}`">{{ orderStatusLabel(order.status) }}</span>
+                          </div>
+                          <div class="product-order__meta">
+                            <time :datetime="order.updated_at || order.created_at || order.synced_at">{{ formatOrderDate(order.updated_at || order.created_at || order.synced_at) }}</time>
+                            <span>Количество: <strong>{{ order.quantity }}</strong></span>
+                          </div>
+                        </article>
+                      </div>
+                    </template>
+                    <p class="product-orders__notice">Seller показывает заказы из локального снимка. Новых запросов к маркетплейсу при открытии карточки нет.</p>
                   </div>
                 </div>
               </section>
@@ -552,6 +615,169 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   line-height: 1.5;
 }
 
+.product-orders {
+  display: grid;
+  gap: 10px;
+}
+
+.product-orders__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 2px 2px;
+}
+
+.product-orders__summary > strong {
+  color: #edf2ff;
+  font-size: 13px;
+}
+
+.product-orders__summary > span {
+  color: #8191b3;
+  font-size: 10px;
+}
+
+.product-orders__list {
+  display: grid;
+  max-height: 340px;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 3px;
+  scrollbar-color: rgba(113, 138, 201, .42) transparent;
+  scrollbar-width: thin;
+}
+
+.product-order {
+  display: grid;
+  gap: 9px;
+  padding: 12px 13px;
+  border: 1px solid rgba(126, 151, 217, .2);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(23, 37, 72, .76), rgba(8, 15, 34, .55));
+}
+
+.product-order__head,
+.product-order__meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.product-order__head > strong {
+  overflow: hidden;
+  color: #e8edfb;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-order__status {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: #ffc75a;
+  background: rgba(255, 199, 90, .07);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+
+.product-order__status--in_delivery {
+  color: #65b5ff;
+  background: rgba(101, 181, 255, .07);
+}
+
+.product-order__status--delivered {
+  color: #4ee6bd;
+  background: rgba(78, 230, 189, .07);
+}
+
+.product-order__status--cancelled,
+.product-order__status--problem {
+  color: #ff969b;
+  background: rgba(255, 150, 155, .07);
+}
+
+.product-order__meta {
+  padding-top: 8px;
+  border-top: 1px dashed rgba(150, 171, 217, .15);
+  color: #8f9fbe;
+  font-size: 10px;
+}
+
+.product-order__meta strong {
+  color: #dbe4f8;
+}
+
+.product-orders__state {
+  display: flex;
+  min-height: 82px;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px dashed rgba(126, 151, 217, .26);
+  border-radius: 13px;
+  background: rgba(8, 15, 34, .4);
+}
+
+.product-orders__state > svg {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: #7f91bd;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.product-orders__state strong {
+  color: #cbd5eb;
+  font-size: 12px;
+}
+
+.product-orders__state p {
+  margin: 3px 0 0;
+  color: #8998b9;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.product-orders__state--error {
+  border-color: rgba(255, 150, 155, .3);
+  background: rgba(255, 150, 155, .06);
+}
+
+.product-orders__state--error strong,
+.product-orders__state--error p {
+  color: #ffaaa8;
+}
+
+.product-orders__spinner {
+  width: 21px;
+  height: 21px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(105, 135, 212, .25);
+  border-top-color: #6f91ff;
+  border-radius: 50%;
+  animation: product-stock-spin .8s linear infinite;
+}
+
+.product-orders__notice {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: 9px;
+  color: #7183aa;
+  background: rgba(126, 151, 217, .045);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .stock-readonly {
   display: grid;
   gap: 12px;
@@ -817,6 +1043,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
   .product-overview.has-image {
     grid-template-columns: 1fr;
+  }
+
+  .product-orders__summary,
+  .product-order__head,
+  .product-order__meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .product-overview__image-wrap {
