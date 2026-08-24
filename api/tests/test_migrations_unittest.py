@@ -31,6 +31,18 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("activation_instruction", statements[0])
         self.assertIn("idx_product_card_settings_updated", statements[1])
 
+    def test_key_pool_migration_encrypts_values_and_has_no_delivery_tables(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260824_06_marketplace_key_pools.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+
+        joined = "\n".join(statements)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.marketplace_key_pools", joined)
+        self.assertIn("code_ciphertext bytea NOT NULL", joined)
+        self.assertIn("code_hash text NOT NULL UNIQUE", joined)
+        self.assertNotIn("fulfillment", joined.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

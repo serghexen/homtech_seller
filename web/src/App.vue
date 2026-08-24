@@ -60,6 +60,14 @@ const selectedProductOrdersTotal = ref(0)
 const selectedProductOrdersLoading = ref(false)
 const selectedProductOrdersError = ref('')
 const selectedProductOrdersRefreshing = ref(false)
+const selectedProductKeyPool = ref({
+  free_count: 0, reserved_count: 0, delivered_count: 0, expired_count: 0,
+  disabled_count: 0, total: 0, page: 1, page_size: 20, items: [],
+})
+const selectedProductKeyPoolLoading = ref(false)
+const selectedProductKeyPoolSaving = ref(false)
+const selectedProductKeyPoolError = ref('')
+const selectedProductKeyPoolNotice = ref('')
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 let catalogRequestSequence = 0
@@ -118,7 +126,13 @@ async function openProductCard(item) {
   selectedProductOrders.value = []
   selectedProductOrdersTotal.value = 0
   selectedProductOrdersError.value = ''
-  const requests = [loadSelectedProductOrders()]
+  selectedProductKeyPool.value = {
+    free_count: 0, reserved_count: 0, delivered_count: 0, expired_count: 0,
+    disabled_count: 0, total: 0, page: 1, page_size: 20, items: [],
+  }
+  selectedProductKeyPoolError.value = ''
+  selectedProductKeyPoolNotice.value = ''
+  const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool()]
   if (item.provider_code === 'yandex_market' && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
   await Promise.allSettled(requests)
 }
@@ -135,6 +149,71 @@ function closeProductCard() {
   selectedProductOrdersLoading.value = false
   selectedProductOrdersError.value = ''
   selectedProductOrdersRefreshing.value = false
+  selectedProductKeyPool.value = {
+    free_count: 0, reserved_count: 0, delivered_count: 0, expired_count: 0,
+    disabled_count: 0, total: 0, page: 1, page_size: 20, items: [],
+  }
+  selectedProductKeyPoolLoading.value = false
+  selectedProductKeyPoolSaving.value = false
+  selectedProductKeyPoolError.value = ''
+  selectedProductKeyPoolNotice.value = ''
+}
+
+async function loadSelectedProductKeyPool(page = 1) {
+  // Читает только маскированный список ключей выбранной карточки из собственной БД Seller.
+  const item = selectedCatalogItem.value
+  if (!item || selectedProductKeyPoolLoading.value) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedProductKeyPoolLoading.value = true
+  selectedProductKeyPoolError.value = ''
+  try {
+    const query = queryString({
+      connection_id: item.connection_id,
+      external_product_id: item.external_product_id,
+      page,
+      page_size: 20,
+    })
+    const result = await apiRequest(`/marketplaces/catalog/key-pool?${query}`)
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    selectedProductKeyPool.value = result
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductKeyPoolError.value = requestError.message || 'Не удалось загрузить пул ключей'
+    }
+  } finally {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductKeyPoolLoading.value = false
+    }
+  }
+}
+
+async function addSelectedProductKeys(payload) {
+  // Сохраняет новую пачку в зашифрованном пуле Seller и не запускает выдачу или отправку ключей.
+  const item = selectedCatalogItem.value
+  if (!item || selectedProductKeyPoolSaving.value) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedProductKeyPoolSaving.value = true
+  selectedProductKeyPoolError.value = ''
+  selectedProductKeyPoolNotice.value = ''
+  try {
+    const query = queryString({ connection_id: item.connection_id, external_product_id: item.external_product_id })
+    const result = await apiRequest(`/marketplaces/catalog/key-pool/keys?${query}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    await loadSelectedProductKeyPool(1)
+    const duplicateSuffix = result.duplicates ? `, пропущено повторов: ${result.duplicates}` : ''
+    selectedProductKeyPoolNotice.value = `Добавлено ключей: ${result.added}${duplicateSuffix}`
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductKeyPoolError.value = requestError.message || 'Не удалось добавить ключи'
+    }
+  } finally {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductKeyPoolSaving.value = false
+    }
+  }
 }
 
 async function loadSelectedProductOrders() {
@@ -1015,8 +1094,16 @@ onMounted(async () => {
       :orders-error="selectedProductOrdersError"
       :orders-refreshing="selectedProductOrdersRefreshing"
       :orders-refresh-enabled="!isConnectionDisabled(selectedCatalogItem.connection_id) && !isSyncing"
+      :key-pool="selectedProductKeyPool"
+      :key-pool-loading="selectedProductKeyPoolLoading"
+      :key-pool-saving="selectedProductKeyPoolSaving"
+      :key-pool-error="selectedProductKeyPoolError"
+      :key-pool-notice="selectedProductKeyPoolNotice"
+      :key-pool-can-manage="user?.role_code === 'owner' || user?.role_code === 'operator'"
       @refresh-stock="refreshSelectedProductStock"
       @refresh-orders="refreshSelectedProductOrders"
+      @load-key-pool="loadSelectedProductKeyPool"
+      @add-keys="addSelectedProductKeys"
       @save-settings="saveSelectedProductSettings"
       @close="closeProductCard"
     />

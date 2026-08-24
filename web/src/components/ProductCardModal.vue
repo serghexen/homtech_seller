@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
+import { keyCountLabel, parseKeyLines } from '../utils/keyPool.js'
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
 import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
 
@@ -22,9 +23,15 @@ const props = defineProps({
   ordersError: { type: String, default: '' },
   ordersRefreshing: { type: Boolean, default: false },
   ordersRefreshEnabled: { type: Boolean, default: true },
+  keyPool: { type: Object, default: () => ({ free_count: 0, total: 0, items: [] }) },
+  keyPoolLoading: { type: Boolean, default: false },
+  keyPoolSaving: { type: Boolean, default: false },
+  keyPoolError: { type: String, default: '' },
+  keyPoolNotice: { type: String, default: '' },
+  keyPoolCanManage: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings'])
+const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys'])
 const openSection = ref('')
 const imageFailed = ref(false)
 const settingsFormError = ref('')
@@ -35,6 +42,8 @@ const settingsForm = reactive({
   sales_limit_daily_extra: Math.max(0, Number(props.item.sales_limit_daily_extra) || 0),
   activation_instruction: normalizeEscapedLineBreaks(props.item.activation_instruction).trim(),
 })
+const keyPoolForm = reactive({ codes_raw: '', expires_at: '' })
+const keyPoolFormError = ref('')
 const showProductImage = computed(() => Boolean(props.item.primary_image) && !imageFailed.value)
 const canRefreshStock = computed(() => props.item.provider_code === 'yandex_market' && props.stockRefreshEnabled)
 const currentStock = computed(() => Number.isInteger(props.item.available_stock) ? props.item.available_stock : '—')
@@ -63,6 +72,9 @@ const savedSettings = computed(() => normalizeProductSettings({
 }))
 const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.value, savedSettings.value))
 const instructionLength = computed(() => settingsForm.activation_instruction.length)
+const keyPoolDraftCodes = computed(() => parseKeyLines(keyPoolForm.codes_raw))
+const keyPoolDraftDirty = computed(() => Boolean(keyPoolForm.codes_raw.trim() || keyPoolForm.expires_at))
+const keyPoolPageCount = computed(() => Math.max(1, Math.ceil((Number(props.keyPool.total) || 0) / (Number(props.keyPool.page_size) || 20))))
 
 const detailFields = computed(() => [
   { label: 'Артикул продавца', value: props.item.market_sku || props.item.offer_id || props.item.external_product_id || '—' },
@@ -84,8 +96,18 @@ const workSections = computed(() => [
     description: activationInstructionDescription.value,
   },
   {
-    id: 'orders',
+    id: 'key_pool',
     number: '03',
+    title: 'Ключи',
+    description: props.keyPoolLoading
+      ? 'Загружаем сохранённый пул'
+      : props.keyPool.total
+        ? `${keyCountLabel(props.keyPool.free_count)} доступно, ${keyCountLabel(props.keyPool.total)} всего`
+        : 'Пул пока пуст',
+  },
+  {
+    id: 'orders',
+    number: '04',
     title: 'Заказы',
     description: props.ordersLoading
       ? 'Загружаем историю продаж этой карточки'
@@ -143,8 +165,45 @@ function saveSettings() {
   emit('save-settings', values)
 }
 
+function keyStatusLabel(status) {
+  return {
+    free: 'Свободен',
+    reserved: 'В резерве',
+    sending: 'Отправляется',
+    delivered: 'Выдан',
+    expired: 'Истёк',
+    disabled: 'Отключён',
+  }[status] || 'Неизвестно'
+}
+
+function submitKeyPool() {
+  // Проверяет форму до отправки и передаёт API только уникальные непустые строки.
+  keyPoolFormError.value = ''
+  if (!keyPoolDraftCodes.value.length) {
+    keyPoolFormError.value = 'Добавьте хотя бы один ключ — по одному на строку'
+    return
+  }
+  if (keyPoolDraftCodes.value.length > 1000) {
+    keyPoolFormError.value = 'За один раз можно добавить не более 1000 ключей'
+    return
+  }
+  emit('add-keys', {
+    codes: keyPoolDraftCodes.value,
+    expires_at: keyPoolForm.expires_at || null,
+  })
+}
+
+watch(() => props.keyPoolNotice, (notice) => {
+  // После подтверждённого сохранения удаляет открытые коды из памяти формы.
+  if (!notice) return
+  keyPoolForm.codes_raw = ''
+  keyPoolForm.expires_at = ''
+  keyPoolFormError.value = ''
+})
+
 function close() {
-  if (settingsDirty.value && !props.settingsSaving && !window.confirm('Закрыть карточку без сохранения изменений?')) return
+  if ((settingsDirty.value || keyPoolDraftDirty.value) && !props.settingsSaving && !props.keyPoolSaving
+    && !window.confirm('Закрыть карточку без сохранения изменений?')) return
   emit('close')
 }
 
@@ -267,6 +326,80 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         <small>{{ instructionLength.toLocaleString('ru-RU') }} / 10 000</small>
                       </label>
                     </section>
+                  </div>
+                  <div v-else-if="section.id === 'key_pool'" class="product-key-pool">
+                    <div class="product-key-pool__stats" aria-label="Состояние пула ключей">
+                      <section class="product-key-pool__stat product-key-pool__stat--free">
+                        <span>Доступно</span><strong>{{ keyPool.free_count || 0 }}</strong><small>готовы к будущей выдаче</small>
+                      </section>
+                      <section class="product-key-pool__stat">
+                        <span>В резерве</span><strong>{{ keyPool.reserved_count || 0 }}</strong><small>включая отправляемые</small>
+                      </section>
+                      <section class="product-key-pool__stat">
+                        <span>Выдано</span><strong>{{ keyPool.delivered_count || 0 }}</strong><small>история пула</small>
+                      </section>
+                      <section class="product-key-pool__stat">
+                        <span>Всего</span><strong>{{ keyPool.total || 0 }}</strong><small>сохранено в Seller</small>
+                      </section>
+                    </div>
+
+                    <form v-if="keyPoolCanManage" class="product-key-pool__form" @submit.prevent="submitKeyPool">
+                      <div class="product-key-pool__form-copy">
+                        <span class="product-key-pool__form-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24"><path d="M7 10a5 5 0 1 1 4.6 5" /><path d="m9 14-6 6M5 18l2 2M8 15l2 2" /></svg>
+                        </span>
+                        <div><strong>Добавить ключи</strong><p>По одному ключу на строку. Повторы будут пропущены.</p></div>
+                      </div>
+                      <label class="product-key-pool__codes">
+                        <span>Ключи</span>
+                        <textarea v-model="keyPoolForm.codes_raw" :disabled="keyPoolSaving" spellcheck="false" autocomplete="off" placeholder="AAAA-BBBB-CCCC&#10;DDDD-EEEE-FFFF" />
+                        <small>{{ keyCountLabel(keyPoolDraftCodes.length) }} подготовлено</small>
+                      </label>
+                      <label class="product-key-pool__expiry">
+                        <span>Срок действия</span>
+                        <input v-model="keyPoolForm.expires_at" :disabled="keyPoolSaving" type="date" />
+                        <small>Можно оставить пустым</small>
+                      </label>
+                      <button class="product-key-pool__submit" type="submit" :disabled="keyPoolSaving || !keyPoolDraftCodes.length">
+                        <span v-if="keyPoolSaving" class="product-settings-save__spinner" aria-hidden="true"></span>
+                        <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                        {{ keyPoolSaving ? 'Сохраняем…' : 'Добавить в пул' }}
+                      </button>
+                    </form>
+                    <p v-else class="product-key-pool__readonly">Ваша роль позволяет просматривать пул, но не добавлять ключи.</p>
+
+                    <p v-if="keyPoolFormError || keyPoolError" class="product-key-pool__message product-key-pool__message--error" role="alert">{{ keyPoolFormError || keyPoolError }}</p>
+                    <p v-else-if="keyPoolNotice" class="product-key-pool__message product-key-pool__message--ok" role="status">{{ keyPoolNotice }}</p>
+
+                    <div v-if="keyPoolLoading && !keyPool.items?.length" class="product-key-pool__state" aria-live="polite">
+                      <span class="product-orders__spinner" aria-hidden="true"></span><span>Загружаем пул…</span>
+                    </div>
+                    <div v-else-if="!keyPool.items?.length" class="product-key-pool__state product-key-pool__state--empty">
+                      <span>Пока нет сохранённых ключей</span><small>Добавьте первую пачку или перенесите свободный пул из CRM.</small>
+                    </div>
+                    <template v-else>
+                      <div class="product-key-pool__list-head">
+                        <strong>Сохранённые ключи</strong><span>Открытые значения не загружаются в браузер</span>
+                      </div>
+                      <div class="product-key-pool__list">
+                        <article v-for="key in keyPool.items" :key="key.id" class="product-key-pool__item">
+                          <code>{{ key.masked_code }}</code>
+                          <span class="product-key-pool__status" :class="`product-key-pool__status--${key.status}`">{{ keyStatusLabel(key.status) }}</span>
+                          <time :datetime="key.created_at">{{ formatOrderDate(key.created_at) }}</time>
+                          <small>{{ key.expires_at ? `Действует до ${key.expires_at}` : 'Без срока действия' }}</small>
+                        </article>
+                      </div>
+                      <div v-if="keyPoolPageCount > 1" class="product-key-pool__pager">
+                        <button type="button" :disabled="keyPoolLoading || keyPool.page <= 1" @click="emit('load-key-pool', keyPool.page - 1)">Назад</button>
+                        <span>{{ keyPool.page }} / {{ keyPoolPageCount }}</span>
+                        <button type="button" :disabled="keyPoolLoading || keyPool.page >= keyPoolPageCount" @click="emit('load-key-pool', keyPool.page + 1)">Вперёд</button>
+                      </div>
+                    </template>
+
+                    <p class="stock-readonly__notice">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
+                      Seller пока только хранит пул. Автоматическая и ручная выдача ключей отключены.
+                    </p>
                   </div>
                   <div v-else class="product-orders">
                     <div class="product-orders__toolbar">
@@ -1454,6 +1587,322 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   transform: translateY(10px) scale(.985);
 }
 
+.product-key-pool {
+  display: grid;
+  gap: 12px;
+}
+
+.product-key-pool__stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid rgba(126, 151, 217, .2);
+  border-radius: 13px;
+  background: rgba(8, 15, 34, .42);
+}
+
+.product-key-pool__stat {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 13px 14px;
+  border-right: 1px solid rgba(126, 151, 217, .14);
+}
+
+.product-key-pool__stat:last-child {
+  border-right: 0;
+}
+
+.product-key-pool__stat > span {
+  color: #8292b4;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: .075em;
+  text-transform: uppercase;
+}
+
+.product-key-pool__stat > strong {
+  color: #edf2ff;
+  font-size: 23px;
+  line-height: 1.05;
+}
+
+.product-key-pool__stat--free > strong {
+  color: #58e3bd;
+}
+
+.product-key-pool__stat > small {
+  overflow: hidden;
+  color: #7081a5;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-key-pool__form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 170px auto;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(79, 119, 255, .34);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(48, 91, 239, .1), rgba(8, 15, 34, .5));
+}
+
+.product-key-pool__form-copy {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.product-key-pool__form-copy strong {
+  color: #e9eeff;
+  font-size: 12px;
+}
+
+.product-key-pool__form-copy p {
+  margin: 2px 0 0;
+  color: #8494b6;
+  font-size: 10px;
+}
+
+.product-key-pool__form-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(79, 119, 255, .48);
+  border-radius: 10px;
+  color: #7f9aff;
+  background: rgba(48, 91, 239, .13);
+}
+
+.product-key-pool__form-icon svg,
+.product-key-pool__submit svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.product-key-pool__codes,
+.product-key-pool__expiry {
+  display: grid;
+  gap: 6px;
+  color: #a6b3ce;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.product-key-pool__codes textarea,
+.product-key-pool__expiry input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 82px;
+  padding: 10px 12px;
+  border: 1px solid rgba(126, 151, 217, .28);
+  border-radius: 11px;
+  outline: none;
+  color: #e5ebfb;
+  background: rgba(4, 10, 27, .74);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.product-key-pool__expiry input {
+  min-height: 42px;
+  resize: none;
+  color-scheme: dark;
+}
+
+.product-key-pool__codes textarea:focus,
+.product-key-pool__expiry input:focus {
+  border-color: rgba(83, 126, 255, .72);
+  box-shadow: 0 0 0 3px rgba(48, 91, 239, .09);
+}
+
+.product-key-pool__codes small,
+.product-key-pool__expiry small {
+  color: #7182a7;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.product-key-pool__submit {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 16px;
+  border: 1px solid rgba(87, 126, 255, .62);
+  border-radius: 11px;
+  color: #fff;
+  background: linear-gradient(135deg, #2455e8, #4c70ff);
+  box-shadow: 0 10px 24px rgba(35, 79, 225, .2);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.product-key-pool__submit:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.product-key-pool__message,
+.product-key-pool__readonly {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: 9px;
+  color: #8e9dbc;
+  background: rgba(126, 151, 217, .055);
+  font-size: 10px;
+}
+
+.product-key-pool__message--error {
+  color: #ffaaa8;
+  background: rgba(255, 150, 155, .075);
+}
+
+.product-key-pool__message--ok {
+  color: #72e7c5;
+  background: rgba(83, 229, 186, .075);
+}
+
+.product-key-pool__state {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px dashed rgba(126, 151, 217, .25);
+  border-radius: 13px;
+  color: #aab6d0;
+  background: rgba(8, 15, 34, .34);
+  font-size: 11px;
+}
+
+.product-key-pool__state--empty {
+  flex-direction: column;
+}
+
+.product-key-pool__state small {
+  color: #7586aa;
+}
+
+.product-key-pool__list-head,
+.product-key-pool__pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.product-key-pool__list-head strong {
+  color: #dce5f8;
+  font-size: 11px;
+}
+
+.product-key-pool__list-head span,
+.product-key-pool__pager span {
+  color: #7788ac;
+  font-size: 9px;
+}
+
+.product-key-pool__list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 310px;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 3px;
+}
+
+.product-key-pool__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px 10px;
+  padding: 11px 12px;
+  border: 1px solid rgba(126, 151, 217, .18);
+  border-radius: 11px;
+  background: rgba(8, 15, 34, .45);
+}
+
+.product-key-pool__item code {
+  overflow: hidden;
+  color: #dfe8fb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.product-key-pool__item time,
+.product-key-pool__item small {
+  color: #7182a7;
+  font-size: 8px;
+}
+
+.product-key-pool__status {
+  padding: 3px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: #58e3bd;
+  font-size: 7px;
+  font-weight: 900;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.product-key-pool__status--reserved,
+.product-key-pool__status--sending {
+  color: #ffc75a;
+}
+
+.product-key-pool__status--delivered {
+  color: #7da0ff;
+}
+
+.product-key-pool__status--expired,
+.product-key-pool__status--disabled {
+  color: #98a3ba;
+}
+
+.product-key-pool__pager {
+  justify-content: center;
+}
+
+.product-key-pool__pager button {
+  padding: 6px 10px;
+  border: 1px solid rgba(126, 151, 217, .25);
+  border-radius: 8px;
+  color: #aebbd5;
+  background: rgba(18, 29, 59, .72);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.product-key-pool__pager button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
 @media (max-width: 660px) {
   .product-card-backdrop {
     padding: 12px;
@@ -1542,6 +1991,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
   .product-instruction__content {
     grid-template-columns: 1fr;
+  }
+
+  .product-key-pool__stats,
+  .product-key-pool__list,
+  .product-key-pool__form {
+    grid-template-columns: 1fr;
+  }
+
+  .product-key-pool__stat {
+    border-right: 0;
+    border-bottom: 1px solid rgba(126, 151, 217, .14);
+  }
+
+  .product-key-pool__stat:last-child {
+    border-bottom: 0;
   }
 
   .product-settings-savebar,
