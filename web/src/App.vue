@@ -6,6 +6,13 @@ import ozonLogo from './assets/ozon-logo.png'
 import yandexMarketLogo from './assets/yandex-market-logo.png'
 import HamsterLoader from './components/HamsterLoader.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
+import {
+  isSyncJobActive,
+  syncActivityDetail,
+  syncActivityState as resolveSyncActivityState,
+  syncActivityTitle,
+} from './utils/sync.js'
+import { normalizeEscapedLineBreaks } from './utils/text.js'
 import packageMetadata from '../package.json'
 
 const appVersion = packageMetadata.version
@@ -32,7 +39,10 @@ const catalogSearch = ref('')
 const orderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
 const appliedOrderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
 const ordersFiltersOpen = ref(false)
-const isSyncing = ref(false)
+const syncEnqueueing = ref(false)
+const syncJobs = ref([])
+const syncMonitorError = ref('')
+const syncActivityVisible = ref(false)
 const isConnectionModalOpen = ref(false)
 const isSavingConnection = ref(false)
 const isDiscoveringStores = ref(false)
@@ -42,6 +52,9 @@ const selectedYandexStore = ref(null)
 const selectedCatalogItem = ref(null)
 const selectedStockLoading = ref(false)
 const selectedStockError = ref('')
+const selectedSettingsSaving = ref(false)
+const selectedSettingsError = ref('')
+const selectedSettingsNotice = ref('')
 const selectedProductOrders = ref([])
 const selectedProductOrdersTotal = ref(0)
 const selectedProductOrdersLoading = ref(false)
@@ -49,10 +62,27 @@ const selectedProductOrdersError = ref('')
 const selectedProductOrdersRefreshing = ref(false)
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
+let catalogRequestSequence = 0
+let ordersRequestSequence = 0
+let syncMonitorSequence = 0
 
 const isYandex = computed(() => connectionForm.provider_code === 'yandex_market')
 const activeConnections = computed(() => connections.value.filter((connection) => connection.status === 'active'))
+const hasConnections = computed(() => connections.value.length > 0)
 const hasActiveConnections = computed(() => activeConnections.value.length > 0)
+const selectedConnection = computed(() => connections.value.find((connection) => connection.id === selectedConnectionId.value) || null)
+const canSyncSelectedSnapshot = computed(() => selectedConnectionId.value === null
+  ? hasActiveConnections.value
+  : selectedConnection.value?.status === 'active')
+const syncButtonTitle = computed(() => {
+  if (selectedConnection.value?.status === 'disabled') return 'Подключите магазин снова, чтобы обновить его данные'
+  if (!hasActiveConnections.value) return 'Нет активных магазинов для обновления'
+  return selectedConnectionId.value ? 'Обновить выбранный магазин' : 'Обновить все активные магазины'
+})
+const currentSyncActivityState = computed(() => resolveSyncActivityState(syncJobs.value, syncMonitorError.value))
+const isSyncing = computed(() => syncEnqueueing.value || currentSyncActivityState.value === 'running')
+const currentSyncActivityTitle = computed(() => syncActivityTitle(syncJobs.value, currentSyncActivityState.value))
+const currentSyncActivityDetail = computed(() => syncActivityDetail(syncJobs.value, currentSyncActivityState.value, syncMonitorError.value))
 const pageSize = 24
 const catalogPageCount = computed(() => Math.max(1, Math.ceil(catalogTotal.value / pageSize)))
 const ordersPageCount = computed(() => Math.max(1, Math.ceil(ordersTotal.value / pageSize)))
@@ -74,15 +104,22 @@ function providerLogo(providerCode) {
   return providerCode === 'yandex_market' ? yandexMarketLogo : ozonLogo
 }
 
+function hasProductInstruction(item) {
+  // Литеральные переносы из старой CRM не должны считаться содержательной инструкцией сами по себе.
+  return Boolean(normalizeEscapedLineBreaks(item?.activation_instruction).trim())
+}
+
 async function openProductCard(item) {
   // Сразу показывает карточку, затем параллельно читает её локальные заказы и актуальный остаток Яндекс Маркета.
   selectedCatalogItem.value = item
   selectedStockError.value = ''
+  selectedSettingsError.value = ''
+  selectedSettingsNotice.value = ''
   selectedProductOrders.value = []
   selectedProductOrdersTotal.value = 0
   selectedProductOrdersError.value = ''
   const requests = [loadSelectedProductOrders()]
-  if (item.provider_code === 'yandex_market') requests.push(refreshSelectedProductStock())
+  if (item.provider_code === 'yandex_market' && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
   await Promise.allSettled(requests)
 }
 
@@ -90,6 +127,9 @@ function closeProductCard() {
   selectedCatalogItem.value = null
   selectedStockLoading.value = false
   selectedStockError.value = ''
+  selectedSettingsSaving.value = false
+  selectedSettingsError.value = ''
+  selectedSettingsNotice.value = ''
   selectedProductOrders.value = []
   selectedProductOrdersTotal.value = 0
   selectedProductOrdersLoading.value = false
@@ -130,6 +170,10 @@ async function refreshSelectedProductOrders() {
   // API Яндекса не фильтрует по SKU: обновляем инкрементальный снимок магазина и затем снова выбираем только этот товар.
   const item = selectedCatalogItem.value
   if (!item || selectedProductOrdersRefreshing.value) return
+  if (isConnectionDisabled(item.connection_id)) {
+    selectedProductOrdersError.value = 'Магазин отключён. Сохранённые заказы доступны, но обновление приостановлено.'
+    return
+  }
   const identity = `${item.connection_id}:${item.external_product_id}`
   selectedProductOrdersRefreshing.value = true
   selectedProductOrdersError.value = ''
@@ -161,6 +205,10 @@ async function refreshSelectedProductStock() {
   // Обновляет только остаток одной открытой карточки read-only запросом, не перезагружая весь каталог.
   const item = selectedCatalogItem.value
   if (!item || item.provider_code !== 'yandex_market' || selectedStockLoading.value) return
+  if (isConnectionDisabled(item.connection_id)) {
+    selectedStockError.value = 'Магазин отключён. Показан последний сохранённый остаток.'
+    return
+  }
   const identity = `${item.connection_id}:${item.offer_id}`
   selectedStockLoading.value = true
   selectedStockError.value = ''
@@ -188,9 +236,70 @@ async function refreshSelectedProductStock() {
   }
 }
 
-function connectionStatus(status) {
-  // Даёт человеку понятное состояние подключения вместо технических кодов базы данных.
-  return status === 'active' ? 'Активен' : status === 'disabled' ? 'Отключён' : 'Требует проверки'
+async function saveSelectedProductSettings(settings) {
+  // Сохраняет параметры только в собственной БД Seller; endpoint не содержит вызовов маркетплейса.
+  const item = selectedCatalogItem.value
+  if (!item || selectedSettingsSaving.value) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedSettingsSaving.value = true
+  selectedSettingsError.value = ''
+  selectedSettingsNotice.value = ''
+  try {
+    const result = await apiRequest('/marketplaces/catalog/settings', {
+      method: 'POST',
+      body: JSON.stringify({
+        connection_id: item.connection_id,
+        external_product_id: item.external_product_id,
+        ...settings,
+      }),
+    })
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    const savedSettings = {
+      stock_settings_available: true,
+      manual_stock_limit: result.manual_stock_limit,
+      sales_limit: result.sales_limit,
+      sales_limit_daily_extra: result.sales_limit_daily_extra,
+      sales_limit_day: result.sales_limit_day,
+      activation_instruction: result.activation_instruction,
+      settings_saved_at: result.settings_saved_at,
+    }
+    Object.assign(selectedCatalogItem.value, savedSettings)
+    const listItem = catalogItems.value.find((candidate) => `${candidate.connection_id}:${candidate.external_product_id}` === identity)
+    if (listItem) Object.assign(listItem, savedSettings)
+    selectedSettingsNotice.value = 'Настройки сохранены только в Seller'
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedSettingsError.value = requestError.message || 'Не удалось сохранить настройки карточки'
+    }
+  } finally {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedSettingsSaving.value = false
+    }
+  }
+}
+
+function connectionVisualStatus(connection) {
+  if (connection.status === 'disabled') return 'disabled'
+  if (connection.last_error) return 'error'
+  return 'active'
+}
+
+function connectionStatus(connection) {
+  // Разделяет сам факт подключения и здоровье последней синхронизации.
+  if (connection.status === 'disabled') return 'Отключён'
+  if (connection.last_error) return 'Ошибка синхронизации'
+  return 'Активен'
+}
+
+function connectionActivity(connection) {
+  if (connection.status === 'disabled') return 'Сохранённые данные доступны для просмотра'
+  if (connection.last_error) return 'Не удалось обновить данные. Проверьте ключ или повторите позже.'
+  if (connection.last_checked_at) return `Последняя успешная проверка: ${formatDate(connection.last_checked_at)}`
+  return 'Ожидает первой проверки'
+}
+
+function isConnectionDisabled(connectionId) {
+  return connections.value.some((connection) => connection.id === connectionId && connection.status === 'disabled')
 }
 
 function orderStatus(status) {
@@ -231,9 +340,78 @@ async function waitForSyncJobs(jobIds) {
     const result = await apiRequest(`/marketplaces/sync-jobs?job_ids=${encodeURIComponent(jobIds.join(','))}`)
     if (result.items.length !== jobIds.length) throw new Error('Не удалось получить состояние всех заданий')
     if (result.items.every((item) => item.status === 'succeeded' || item.status === 'failed')) return result.items
-    await wait(1000)
+    await wait(2500)
   }
   throw new Error('Синхронизация продолжается в фоне. Обновите страницу немного позже.')
+}
+
+function dismissSyncActivity() {
+  // Завершённый результат остаётся заметным, пока пользователь сам его не закроет.
+  if (currentSyncActivityState.value === 'running') return
+  syncMonitorSequence += 1
+  syncJobs.value = []
+  syncMonitorError.value = ''
+  syncActivityVisible.value = false
+}
+
+async function refreshSnapshotsAfterSync(jobs) {
+  // После фонового задания обновляет локальные списки независимо от открытого сейчас раздела.
+  const kinds = new Set(jobs.filter((job) => job.status === 'succeeded').map((job) => job.sync_kind))
+  const requests = []
+  if (kinds.has('catalog') && hasConnections.value) requests.push(loadCatalog())
+  if (kinds.has('orders') && hasConnections.value) requests.push(loadOrders())
+  await Promise.allSettled(requests)
+  await loadConnections()
+}
+
+async function monitorSyncJobs(jobIds) {
+  // Polling живёт отдельно от экрана: навигация не прерывает задачу, а новый монитор отменяет старый.
+  const monitorId = ++syncMonitorSequence
+  const deadline = Date.now() + 15 * 60 * 1000
+  try {
+    while (Date.now() < deadline && monitorId === syncMonitorSequence && user.value) {
+      const result = await apiRequest(`/marketplaces/sync-jobs?job_ids=${encodeURIComponent(jobIds.join(','))}`)
+      if (monitorId !== syncMonitorSequence || !user.value) return
+      if (result.items.length !== jobIds.length) throw new Error('Не удалось получить состояние всех заданий')
+      syncJobs.value = result.items
+      syncMonitorError.value = ''
+      syncActivityVisible.value = true
+      if (result.items.every((job) => !isSyncJobActive(job))) {
+        await refreshSnapshotsAfterSync(result.items)
+        return
+      }
+      await wait(2500)
+    }
+    if (monitorId === syncMonitorSequence && user.value) {
+      throw new Error('Обновление всё ещё выполняется. Seller проверит его состояние после перезагрузки страницы.')
+    }
+  } catch (requestError) {
+    if (monitorId !== syncMonitorSequence || !user.value) return
+    syncMonitorError.value = requestError.message || 'Не удалось получить состояние фонового обновления'
+    syncActivityVisible.value = true
+  }
+}
+
+function startSyncMonitor(jobs) {
+  // Сразу показывает поставленные в очередь задания и продолжает наблюдение без блокировки вызвавшей кнопки.
+  const jobIds = jobs.map((job) => job.id).filter(Boolean)
+  if (!jobIds.length) return false
+  syncJobs.value = jobs
+  syncMonitorError.value = ''
+  syncActivityVisible.value = true
+  monitorSyncJobs(jobIds)
+  return true
+}
+
+async function restoreActiveSyncJobs() {
+  // После обновления страницы подхватывает только незавершённые задания, не показывая старые уведомления повторно.
+  try {
+    const result = await apiRequest('/marketplaces/sync-jobs')
+    const activeJobs = result.items.filter(isSyncJobActive)
+    if (activeJobs.length) startSyncMonitor(activeJobs)
+  } catch {
+    // Восстановление индикатора не должно мешать открытию кабинета и чтению уже сохранённых данных.
+  }
 }
 
 async function loadConnections() {
@@ -243,6 +421,9 @@ async function loadConnections() {
   try {
     const result = await apiRequest('/marketplaces/connections')
     connections.value = result.items
+    if (selectedConnectionId.value && !result.items.some((connection) => connection.id === selectedConnectionId.value)) {
+      selectedConnectionId.value = null
+    }
     if (result.workspace_name) user.value.workspace_name = result.workspace_name
   } catch (requestError) {
     error.value = requestError.message || 'Не удалось загрузить магазины'
@@ -253,33 +434,39 @@ async function loadConnections() {
 
 async function loadCatalog() {
   // Загружает страницу сохранённого каталога без нового обращения к маркетплейсу на каждый поиск.
-  if (!user.value || !hasActiveConnections.value) return
+  if (!user.value || !hasConnections.value) return
+  const requestId = ++catalogRequestSequence
   catalogLoading.value = true
+  error.value = ''
   try {
     const query = queryString({ connection_id: selectedConnectionId.value, query: catalogSearch.value, page: catalogPage.value, page_size: pageSize })
     const result = await apiRequest(`/marketplaces/catalog?${query}`)
+    if (requestId !== catalogRequestSequence) return
     catalogItems.value = result.items
     catalogTotal.value = result.total
   } catch (requestError) {
-    error.value = requestError.message || 'Не удалось загрузить каталог'
+    if (requestId === catalogRequestSequence) error.value = requestError.message || 'Не удалось загрузить каталог'
   } finally {
-    catalogLoading.value = false
+    if (requestId === catalogRequestSequence) catalogLoading.value = false
   }
 }
 
 async function loadOrders() {
   // Загружает постраничный локальный снимок заказов с уже применёнными фильтрами.
-  if (!user.value || !hasActiveConnections.value) return
+  if (!user.value || !hasConnections.value) return
+  const requestId = ++ordersRequestSequence
   ordersLoading.value = true
+  error.value = ''
   try {
     const query = queryString({ connection_id: selectedConnectionId.value, ...appliedOrderFilters, page: ordersPage.value, page_size: pageSize })
     const result = await apiRequest(`/marketplaces/orders?${query}`)
+    if (requestId !== ordersRequestSequence) return
     orders.value = result.items
     ordersTotal.value = result.total
   } catch (requestError) {
-    error.value = requestError.message || 'Не удалось загрузить заказы'
+    if (requestId === ordersRequestSequence) error.value = requestError.message || 'Не удалось загрузить заказы'
   } finally {
-    ordersLoading.value = false
+    if (requestId === ordersRequestSequence) ordersLoading.value = false
   }
 }
 
@@ -287,7 +474,8 @@ async function changeSection(section) {
   // Переключает рабочий раздел и загружает его локальный снимок только при первом открытии или возврате.
   activeSection.value = section
   error.value = ''
-  if (!hasActiveConnections.value) return
+  notice.value = ''
+  if (!hasConnections.value) return
   if (section === 'catalog') await loadCatalog()
   if (section === 'orders') await loadOrders()
 }
@@ -306,27 +494,26 @@ async function selectConnection(connectionId) {
 }
 
 async function syncCurrentSnapshot() {
-  // Ставит выбранные магазины в очередь, ждёт статусы и затем перечитывает локальный снимок.
+  // Ставит выбранные магазины в очередь и сразу возвращает управление интерфейсу.
+  if (!canSyncSelectedSnapshot.value) {
+    error.value = selectedConnection.value?.status === 'disabled'
+      ? 'Этот магазин отключён. Подключите его снова, чтобы обновить данные.'
+      : 'Нет активных магазинов для обновления.'
+    return
+  }
   const kind = activeSection.value === 'catalog' ? 'catalog' : 'orders'
-  isSyncing.value = true
+  syncEnqueueing.value = true
   error.value = ''
   try {
     const result = await apiRequest(`/marketplaces/${kind}/sync`, {
       method: 'POST',
       body: JSON.stringify({ connection_id: selectedConnectionId.value }),
     })
-    const jobIds = result.items.map((item) => item.id)
-    if (!jobIds.length) throw new Error('Не удалось поставить синхронизацию в очередь')
-    const completedJobs = await waitForSyncJobs(jobIds)
-    const failedJobs = completedJobs.filter((item) => item.status === 'failed')
-    if (failedJobs.length) error.value = failedJobs.map((item) => `${item.store_name}: ${item.error}`).join(' ')
-    if (kind === 'catalog') await loadCatalog()
-    else await loadOrders()
-    await loadConnections()
+    if (!startSyncMonitor(result.items)) throw new Error('Не удалось поставить синхронизацию в очередь')
   } catch (requestError) {
     error.value = requestError.message || 'Не удалось обновить снимок'
   } finally {
-    isSyncing.value = false
+    syncEnqueueing.value = false
   }
 }
 
@@ -392,6 +579,7 @@ async function submit() {
     user.value = result.user
     form.password = ''
     await loadConnections()
+    await restoreActiveSyncJobs()
   } catch (requestError) {
     error.value = requestError.message || 'Не удалось войти'
   } finally {
@@ -408,6 +596,13 @@ async function logout() {
     connections.value = []
     catalogItems.value = []
     orders.value = []
+    catalogRequestSequence += 1
+    ordersRequestSequence += 1
+    syncMonitorSequence += 1
+    syncEnqueueing.value = false
+    syncJobs.value = []
+    syncMonitorError.value = ''
+    syncActivityVisible.value = false
     selectedConnectionId.value = null
     activeSection.value = 'stores'
     form.password = ''
@@ -473,6 +668,21 @@ function selectYandexStore(store) {
   connectionForm.display_name = store.display_name
 }
 
+function handleConnectionTokenInput() {
+  // После изменения уже проверенного ключа старый список кабинетов больше нельзя считать достоверным.
+  connectionError.value = ''
+  if (!isYandex.value || (!yandexStores.value.length && !selectedYandexStore.value)) return
+  yandexStores.value = []
+  selectedYandexStore.value = null
+  connectionForm.display_name = ''
+}
+
+function connectionPrimaryLabel() {
+  if (isSavingConnection.value || isDiscoveringStores.value) return isYandex.value && !selectedYandexStore.value ? 'Ищем магазины…' : 'Проверяем…'
+  if (isYandex.value && !selectedYandexStore.value) return yandexStores.value.length ? 'Выберите магазин' : 'Найти магазины'
+  return 'Подключить магазин'
+}
+
 async function saveConnection() {
   // Проверяет ключ у маркетплейса и только затем создаёт или обновляет подключение текущего аккаунта.
   const token = connectionForm.token.trim()
@@ -534,6 +744,7 @@ onMounted(async () => {
     const result = await apiRequest('/auth/me')
     user.value = result.user
     await loadConnections()
+    await restoreActiveSyncJobs()
   } catch {
     user.value = null
   } finally {
@@ -564,6 +775,31 @@ onMounted(async () => {
         <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'orders' }" type="button" @click="changeSection('orders')">Заказы</button>
       </nav>
 
+      <Transition name="sync-activity">
+        <aside
+          v-if="syncActivityVisible && syncJobs.length"
+          class="sync-activity"
+          :class="`sync-activity--${currentSyncActivityState}`"
+          :aria-busy="currentSyncActivityState === 'running'"
+          aria-live="polite"
+        >
+          <div v-if="currentSyncActivityState === 'running'" class="sync-activity__visual" aria-hidden="true">
+            <HamsterLoader compact label="" />
+          </div>
+          <div v-else class="sync-activity__visual sync-activity__result" aria-hidden="true">
+            <svg v-if="currentSyncActivityState === 'succeeded'" viewBox="0 0 24 24"><path d="m5 12.5 4.2 4L19 7" /></svg>
+            <svg v-else viewBox="0 0 24 24"><path d="M12 7v6" /><path d="M12 17.2v.1" /><circle cx="12" cy="12" r="9" /></svg>
+          </div>
+          <div class="sync-activity__copy">
+            <span>{{ currentSyncActivityState === 'running' ? 'ФОНОВОЕ ОБНОВЛЕНИЕ' : 'РЕЗУЛЬТАТ ОБНОВЛЕНИЯ' }}</span>
+            <strong>{{ currentSyncActivityTitle }}</strong>
+            <p>{{ currentSyncActivityDetail }}</p>
+          </div>
+          <span v-if="currentSyncActivityState === 'running'" class="sync-activity__live">Можно продолжать работу</span>
+          <button v-else class="sync-activity__close" type="button" aria-label="Закрыть уведомление" @click="dismissSyncActivity">×</button>
+        </aside>
+      </Transition>
+
       <div v-if="activeSection === 'stores'" class="dashboard-heading">
         <div>
           <p class="kicker">{{ user.workspace_name }}</p>
@@ -575,10 +811,10 @@ onMounted(async () => {
       <p v-if="notice" class="form-success" role="status">{{ notice }}</p>
       <div v-if="activeSection === 'stores' && connectionsLoading" class="empty-state">Загружаем подключённые магазины…</div>
       <div v-else-if="activeSection === 'stores'" class="connection-grid">
-        <article v-for="connection in connections" :key="connection.id" class="connection-card" :class="{ 'connection-card--disabled': connection.status === 'disabled' }">
+        <article v-for="connection in connections" :key="connection.id" class="connection-card" :class="{ 'connection-card--disabled': connection.status === 'disabled', 'connection-card--error': connectionVisualStatus(connection) === 'error' }">
           <div class="connection-card__head">
             <div class="market-mark" :class="`market-mark--${connection.provider_code}`"><img :src="providerLogo(connection.provider_code)" alt="" /></div>
-            <span class="connection-status" :class="`connection-status--${connection.status}`">{{ connectionStatus(connection.status) }}</span>
+            <span class="connection-status" :class="`connection-status--${connectionVisualStatus(connection)}`">{{ connectionStatus(connection) }}</span>
           </div>
           <div><h2>{{ connection.display_name }}</h2><p>{{ providerName(connection.provider_code) }}</p></div>
           <dl>
@@ -586,8 +822,9 @@ onMounted(async () => {
             <div v-if="connection.provider_code === 'ozon'"><dt>Client ID</dt><dd>{{ connection.client_id }}</dd></div>
             <div v-else><dt>Кабинет / магазин</dt><dd>{{ connection.business_id }} / {{ connection.campaign_id }}</dd></div>
           </dl>
+          <p class="connection-card__activity" :class="{ 'connection-card__activity--error': connection.last_error }" :title="connection.last_error || ''">{{ connectionActivity(connection) }}</p>
           <footer>
-            <span>{{ connection.status === 'disabled' ? 'Данные магазина сохранены' : 'Подключён' }}</span>
+            <span>{{ connection.status === 'disabled' ? 'Архивный снимок' : connection.last_error ? 'Требует внимания' : 'Режим чтения' }}</span>
             <button
               type="button"
               :class="{ 'connection-card__action--enable': connection.status === 'disabled' }"
@@ -602,19 +839,11 @@ onMounted(async () => {
       </div>
 
       <section v-if="activeSection === 'catalog' || activeSection === 'orders'" class="snapshot-view">
-        <Transition name="snapshot-loader">
-          <div v-if="isSyncing" class="snapshot-sync-overlay" aria-live="assertive" aria-busy="true">
-            <div class="snapshot-sync-overlay__card">
-              <HamsterLoader :label="activeSection === 'catalog' ? 'Обновляем каталог…' : 'Обновляем заказы…'" />
-            </div>
-          </div>
-        </Transition>
-
-        <div v-if="!hasActiveConnections" class="section-gate" aria-live="polite">
+        <div v-if="!hasConnections" class="section-gate" aria-live="polite">
           <span class="section-gate__mark" aria-hidden="true">+</span>
           <p class="kicker">ПЕРВЫЙ ШАГ</p>
           <h1>{{ activeSection === 'catalog' ? 'Каталог появится после подключения магазина' : 'Заказы появятся после подключения магазина' }}</h1>
-          <p>{{ activeSection === 'catalog' ? '' : '' }}</p>
+          <p>Подключите хотя бы один кабинет — Seller сохранит его данные и откроет поиск, фильтры и карточки.</p>
           <button class="primary-button" type="button" @click="openConnectionModal">Подключить магазин</button>
         </div>
 
@@ -667,14 +896,19 @@ onMounted(async () => {
             </div>
             <div class="store-filters" aria-label="Фильтр по магазину">
               <button :class="{ active: selectedConnectionId === null }" type="button" @click="selectConnection(null)">Все магазины</button>
-              <button v-for="connection in activeConnections" :key="connection.id" :class="{ active: selectedConnectionId === connection.id }" type="button" @click="selectConnection(connection.id)">
-                <span class="market-mark" :class="`market-mark--${connection.provider_code}`"><img :src="providerLogo(connection.provider_code)" alt="" /></span>{{ connection.display_name }}
+              <button v-for="connection in connections" :key="connection.id" :class="{ active: selectedConnectionId === connection.id, 'store-filter--disabled': connection.status === 'disabled' }" type="button" @click="selectConnection(connection.id)">
+                <span class="market-mark" :class="`market-mark--${connection.provider_code}`"><img :src="providerLogo(connection.provider_code)" alt="" /></span>
+                <span>{{ connection.display_name }}<small v-if="connection.status === 'disabled'">Архив</small></span>
               </button>
             </div>
-            <button class="sync-button" type="button" :disabled="isSyncing" :title="selectedConnectionId ? 'Обновить выбранный магазин' : 'Обновить все активные магазины'" @click="syncCurrentSnapshot">
-              <span :class="{ spinning: isSyncing }">↻</span><span class="sync-button__text">{{ isSyncing ? 'Обновляем…' : 'Обновить' }}</span>
+            <button class="sync-button" type="button" :disabled="isSyncing || !canSyncSelectedSnapshot" :title="syncButtonTitle" @click="syncCurrentSnapshot">
+              <span :class="{ spinning: isSyncing }">↻</span><span class="sync-button__text">{{ isSyncing ? 'В фоне…' : 'Обновить' }}</span>
             </button>
           </div>
+
+          <p v-if="selectedConnection?.status === 'disabled'" class="snapshot-archive-notice" role="status">
+            Показан сохранённый снимок отключённого магазина. Просмотр доступен, обновление приостановлено.
+          </p>
 
           <Transition name="order-filters">
             <div v-if="activeSection === 'orders' && ordersFiltersOpen" id="orders-advanced-filters" class="orders-filter-row">
@@ -712,13 +946,27 @@ onMounted(async () => {
               @keydown.enter.prevent="openProductCard(item)"
               @keydown.space.prevent="openProductCard(item)"
             >
-              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>{{ item.title || 'Без названия' }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}</p></div><span class="catalog-card__open" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 5h5v5" /><path d="m10 14 9-9" /><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></svg></span></div>
+              <div class="snapshot-card__head">
+                <span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span>
+                <div><h2>{{ item.title || 'Без названия' }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div>
+                <div class="catalog-card__actions" aria-hidden="true">
+                  <span
+                    class="catalog-card__instruction"
+                    :class="{ 'catalog-card__instruction--filled': hasProductInstruction(item) }"
+                    :title="hasProductInstruction(item) ? 'Инструкция покупателю заполнена' : 'Инструкция покупателю не заполнена'"
+                  >
+                    <svg viewBox="0 0 24 24"><path d="M3.5 5.5c2.8-.8 5.6-.2 8.5 1.7v12c-2.9-1.9-5.7-2.5-8.5-1.7z" /><path d="M20.5 5.5c-2.8-.8-5.6-.2-8.5 1.7v12c2.9-1.9 5.7-2.5 8.5-1.7z" /></svg>
+                  </span>
+                  <span class="catalog-card__open"><svg viewBox="0 0 24 24"><path d="M14 5h5v5" /><path d="m10 14 9-9" /><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></svg></span>
+                </div>
+                <span class="sr-only">{{ hasProductInstruction(item) ? 'Инструкция покупателю заполнена.' : 'Инструкция покупателю не заполнена.' }}</span>
+              </div>
               <div class="snapshot-card__footer catalog-card__footer"><div class="snapshot-card__facts"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><span class="catalog-card__stock">Остаток: <strong>{{ Number.isInteger(item.available_stock) ? item.available_stock : '—' }}</strong></span></div><time :datetime="item.stock_synced_at || item.synced_at">{{ formatDate(item.stock_synced_at || item.synced_at) }}</time></div>
             </article>
           </div>
           <div v-else class="snapshot-grid">
             <article v-for="item in orders" :key="`${item.connection_id}-${item.external_order_id}-${item.external_item_id}`" class="snapshot-card order-card">
-              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}</p></div><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span></div>
+              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span></div>
               <div class="order-card__body"><strong>{{ item.title || 'Товар без названия' }}</strong></div>
               <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.updated_at || item.created_at || item.synced_at">{{ formatDate(item.updated_at || item.created_at || item.synced_at) }}</time></div>
             </article>
@@ -741,7 +989,7 @@ onMounted(async () => {
       <form class="auth-form" @submit.prevent="submit">
         <label v-if="mode === 'register'"><span>Ваше имя</span><input v-model.trim="form.display_name" autocomplete="name" maxlength="120" /></label>
         <label><span>Email</span><input v-model.trim="form.email" required type="email" autocomplete="email" /></label>
-        <label><span>Пароль</span><input v-model="form.password" required type="password" autocomplete="current-password" /></label>
+        <label><span>Пароль</span><input v-model="form.password" required type="password" :autocomplete="mode === 'register' ? 'new-password' : 'current-password'" /></label>
         <p v-if="error" class="form-error">{{ error }}</p>
         <button class="primary-button" type="submit" :disabled="loading">{{ loading ? 'Проверяем…' : mode === 'register' ? 'Создать аккаунт' : 'Войти' }}</button>
       </form>
@@ -754,16 +1002,22 @@ onMounted(async () => {
       :provider-name="providerName(selectedCatalogItem.provider_code)"
       :provider-logo="providerLogo(selectedCatalogItem.provider_code)"
       :synced-label="formatDate(selectedCatalogItem.synced_at)"
-      :stock-synced-label="formatDate(selectedCatalogItem.stock_synced_at)"
+      :stock-synced-label="selectedCatalogItem.stock_synced_at ? formatDate(selectedCatalogItem.stock_synced_at) : ''"
       :stock-loading="selectedStockLoading"
       :stock-error="selectedStockError"
+      :stock-refresh-enabled="!isConnectionDisabled(selectedCatalogItem.connection_id)"
+      :settings-saving="selectedSettingsSaving"
+      :settings-error="selectedSettingsError"
+      :settings-notice="selectedSettingsNotice"
       :orders="selectedProductOrders"
       :orders-total="selectedProductOrdersTotal"
       :orders-loading="selectedProductOrdersLoading"
       :orders-error="selectedProductOrdersError"
       :orders-refreshing="selectedProductOrdersRefreshing"
+      :orders-refresh-enabled="!isConnectionDisabled(selectedCatalogItem.connection_id) && !isSyncing"
       @refresh-stock="refreshSelectedProductStock"
       @refresh-orders="refreshSelectedProductOrders"
+      @save-settings="saveSelectedProductSettings"
       @close="closeProductCard"
     />
 
@@ -776,18 +1030,18 @@ onMounted(async () => {
           <button type="button" :class="{ active: isYandex }" @click="chooseProvider('yandex_market')"><span class="market-mark market-mark--yandex_market"><img :src="yandexMarketLogo" alt="" /></span>Яндекс Маркет</button>
         </div>
         <form class="connection-form" @submit.prevent="saveConnection">
-          <label><span>Название магазина</span><input v-model.trim="connectionForm.display_name" :readonly="isYandex && !!selectedYandexStore" required /></label>
+          <label v-if="!isYandex || selectedYandexStore"><span>Название магазина</span><input v-model.trim="connectionForm.display_name" :readonly="isYandex" required /></label>
           <label v-if="!isYandex"><span>Client ID кабинета</span><input v-model.trim="connectionForm.client_id" required inputmode="numeric" /></label>
-          <label><span>{{ isYandex ? 'API-Key' : 'API Key' }}</span><textarea v-model="connectionForm.token" required /></label>
+          <label><span>{{ isYandex ? 'API-Key' : 'API Key' }}</span><textarea v-model="connectionForm.token" required @input="handleConnectionTokenInput" /></label>
           <div v-if="isYandex" class="yandex-discovery">
-            <button class="secondary-button" type="button" :disabled="isDiscoveringStores" @click="discoverYandexStores">{{ isDiscoveringStores ? 'Ищем магазины…' : 'Найти магазины' }}</button>
             <div v-if="yandexStores.length" class="store-choice">
-              <span>Выберите кабинет</span>
+              <span>Выберите магазин, который нужно подключить</span>
               <button v-for="store in yandexStores" :key="store.campaign_id" type="button" :class="{ active: selectedYandexStore?.campaign_id === store.campaign_id }" @click="selectYandexStore(store)">{{ store.display_name }} <small>№{{ store.campaign_id }}</small></button>
             </div>
+            <p v-else class="yandex-discovery__hint">Сначала Seller проверит API-Key и покажет доступные магазины.</p>
           </div>
           <p v-if="connectionError" class="form-error">{{ connectionError }}</p>
-          <div class="connection-form__actions"><button class="secondary-button" type="button" @click="closeConnectionModal">Отмена</button><button class="primary-button" type="submit" :disabled="isSavingConnection">{{ isSavingConnection ? 'Проверяем…' : isYandex && !selectedYandexStore ? 'Найти магазины' : 'Подключить магазин' }}</button></div>
+          <div class="connection-form__actions"><button class="secondary-button" type="button" @click="closeConnectionModal">Отмена</button><button class="primary-button" type="submit" :disabled="isSavingConnection || isDiscoveringStores || (isYandex && yandexStores.length > 0 && !selectedYandexStore)">{{ connectionPrimaryLabel() }}</button></div>
         </form>
       </section>
     </div>
@@ -805,10 +1059,11 @@ onMounted(async () => {
 .profile-button, .seller-nav__item, .secondary-button { border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .profile-button { padding: 11px 15px; font-size: 13px; }
 .session-loader { position: relative; z-index: 1; display: grid; width: max-content; max-width: 100%; place-items: center; margin: 18vh auto 0; padding: 22px 28px 20px; border: 1px solid rgba(144,160,204,.25); border-radius: 22px; background: linear-gradient(140deg,rgba(22,33,62,.96),rgba(10,15,34,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
 .seller-dashboard { position: relative; z-index: 1; width: min(100%,1760px); margin: 42px auto 0; } .seller-nav { display: flex; width: max-content; max-width: 100%; gap: 9px; padding: 7px; border: 1px solid rgba(149,164,203,.27); border-radius: 19px; background: rgba(10,17,37,.74); } .seller-nav__item { min-height: 46px; padding: 0 20px; font-size: 15px; } .seller-nav__item--active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .seller-nav small { margin-left: 5px; color: #efb44b; }
+.sync-activity { position: relative; display: grid; grid-template-columns: 64px minmax(0,1fr) auto; align-items: center; gap: 15px; margin-top: 18px; padding: 11px 15px 11px 12px; overflow: hidden; border: 1px solid rgba(92,126,226,.34); border-radius: 20px; background: linear-gradient(115deg,rgba(21,36,77,.92),rgba(13,21,46,.92)); box-shadow: 0 18px 45px rgba(4,10,29,.2),inset 0 1px rgba(255,255,255,.025); } .sync-activity::after { content: ''; position: absolute; right: 13%; bottom: -90px; width: 210px; aspect-ratio: 1; border: 1px solid rgba(96,128,222,.12); border-radius: 50%; pointer-events: none; } .sync-activity--succeeded { border-color: rgba(80,230,193,.36); background: linear-gradient(115deg,rgba(18,53,62,.82),rgba(13,25,47,.93)); } .sync-activity--failed { border-color: rgba(255,150,155,.4); background: linear-gradient(115deg,rgba(67,31,48,.76),rgba(19,23,48,.94)); } .sync-activity__visual { position: relative; z-index: 1; display: grid; width: 64px; height: 64px; place-items: center; border-radius: 17px; background: rgba(8,15,34,.48); } .sync-activity__result { color: var(--success); border: 1px solid rgba(80,230,193,.26); background: rgba(80,230,193,.08); } .sync-activity--failed .sync-activity__result { color: #ffaaa8; border-color: rgba(255,150,155,.28); background: rgba(255,150,155,.08); } .sync-activity__result svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; } .sync-activity__copy { position: relative; z-index: 1; min-width: 0; } .sync-activity__copy > span { display: block; margin-bottom: 3px; color: #7894ff; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .sync-activity--succeeded .sync-activity__copy > span { color: #58dcb8; } .sync-activity--failed .sync-activity__copy > span { color: #ff9fa4; } .sync-activity__copy strong { display: block; color: #f2f5ff; font-size: 15px; } .sync-activity__copy p { overflow: hidden; margin: 3px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; } .sync-activity__live { position: relative; z-index: 1; padding: 7px 10px; border: 1px solid rgba(115,144,235,.24); border-radius: 999px; color: #b8c5e3; background: rgba(26,39,76,.52); font-size: 10px; font-weight: 800; white-space: nowrap; } .sync-activity__close { position: relative; z-index: 1; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid rgba(149,164,203,.27); border-radius: 11px; color: #c3cde3; background: rgba(21,31,58,.62); font-size: 23px; line-height: 1; } .sync-activity + .dashboard-heading,.sync-activity + .snapshot-view { margin-top: 28px; } .sync-activity-enter-active,.sync-activity-leave-active { transition: opacity .18s ease,transform .18s ease; } .sync-activity-enter-from,.sync-activity-leave-to { opacity: 0; transform: translateY(-6px); }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 46px 0 27px; } .dashboard-heading h1, .connection-modal h1 { margin: 8px 0 10px; font-size: clamp(35px,4vw,52px); letter-spacing: -.065em; } .dashboard-heading p:not(.kicker) { max-width: 630px; margin: 0; color: #aeb9d4; line-height: 1.55; } .kicker { margin: 0; color: #7290ff; font-size: 12px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
 .primary-button { min-height: 52px; padding: 0 20px; border: 0; border-radius: 14px; color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); font-weight: 850; box-shadow: 0 13px 32px rgba(32,77,220,.28); transition: transform .2s, filter .2s; } .primary-button:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.08); }
-.connection-grid { display: grid; grid-template-columns: repeat(3,minmax(255px,1fr)); gap: 20px; } .connection-card, .connection-add-card { min-height: 300px; padding: 26px; border: 1px solid rgba(135,157,207,.24); border-radius: 25px; background: linear-gradient(145deg,rgba(20,31,60,.95),rgba(12,18,42,.93)); } .connection-card--disabled { border-color: rgba(135,157,207,.16); background: linear-gradient(145deg,rgba(18,27,51,.82),rgba(11,16,36,.86)); } .connection-card--disabled > :not(footer) { opacity: .66; } .connection-card { display: grid; gap: 16px; } .connection-card__head, .connection-card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; } .connection-card h2 { margin: 0; font-size: 24px; letter-spacing: -.045em; } .connection-card p { margin: 5px 0 0; color: #aeb9d4; }
-.market-mark { display: inline-grid; width: 43px; height: 43px; place-items: center; flex: 0 0 auto; overflow: hidden; border: 1px solid rgba(255,255,255,.17); border-radius: 12px; background: #fff; box-shadow: 0 7px 18px rgba(0,0,0,.16); } .market-mark img { display: block; width: 100%; height: 100%; object-fit: cover; } .market-mark--ozon img { transform: scale(1.32); } .market-mark--yandex_market img { transform: scale(1.03); } .connection-status { color: var(--success); font-size: 12px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; } .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px rgba(80,230,193,.1); } .connection-status--disabled { color: #aeb9d4; }
+.connection-grid { display: grid; grid-template-columns: repeat(3,minmax(255px,1fr)); gap: 20px; } .connection-card, .connection-add-card { min-height: 300px; padding: 26px; border: 1px solid rgba(135,157,207,.24); border-radius: 25px; background: linear-gradient(145deg,rgba(20,31,60,.95),rgba(12,18,42,.93)); } .connection-card--disabled { border-color: rgba(135,157,207,.16); background: linear-gradient(145deg,rgba(18,27,51,.82),rgba(11,16,36,.86)); } .connection-card--disabled > :not(footer) { opacity: .66; } .connection-card--error { border-color: rgba(255,150,155,.34); } .connection-card { display: grid; gap: 16px; } .connection-card__head, .connection-card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; } .connection-card h2 { margin: 0; font-size: 24px; letter-spacing: -.045em; } .connection-card p { margin: 5px 0 0; color: #aeb9d4; } .connection-card .connection-card__activity { min-height: 36px; margin: 0; color: #9eabc7; font-size: 12px; line-height: 1.45; } .connection-card .connection-card__activity--error { color: #ffaaa8; }
+.market-mark { display: inline-grid; width: 43px; height: 43px; place-items: center; flex: 0 0 auto; overflow: hidden; border: 1px solid rgba(255,255,255,.17); border-radius: 12px; background: #fff; box-shadow: 0 7px 18px rgba(0,0,0,.16); } .market-mark img { display: block; width: 100%; height: 100%; object-fit: cover; } .market-mark--ozon img { transform: scale(1.32); } .market-mark--yandex_market img { transform: scale(1.03); } .connection-status { color: var(--success); font-size: 12px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; } .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px rgba(80,230,193,.1); } .connection-status--disabled { color: #aeb9d4; } .connection-status--error { color: #ff969b; } .connection-status--error::before { box-shadow: 0 0 0 5px rgba(255,150,155,.1); }
 .connection-card dl { display: grid; margin: 0; border-top: 1px solid rgba(145,164,205,.19); } .connection-card dl div { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid rgba(145,164,205,.19); } .connection-card dt { color: #aeb9d4; } .connection-card dd { margin: 0; color: #f0f3fc; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-weight: 700; } .connection-card footer { color: #aeb9d4; font-size: 13px; } .connection-card footer button { padding: 0; border: 0; color: #ff9a9b; background: transparent; font-weight: 800; } .connection-card footer .connection-card__action--enable { color: #7894ff; }
 .connection-add-card { display: grid; place-content: center; justify-items: center; gap: 10px; color: #b7c2da; border-style: dashed; background: rgba(18,29,56,.38); } .connection-add-card strong { color: var(--brand-blue-bright); font-size: 47px; line-height: 1; font-weight: 400; } .connection-add-card span { font-weight: 800; } .empty-state { display: grid; min-height: 230px; place-items: center; color: #b7c2da; border: 1px dashed rgba(145,164,205,.35); border-radius: 24px; }
 .section-gate { position: relative; min-height: 430px; display: grid; place-content: center; justify-items: center; overflow: hidden; padding: clamp(34px,6vw,76px); border: 1px dashed rgba(126,151,213,.32); border-radius: 28px; background: radial-gradient(circle at 50% 24%,rgba(52,92,231,.18),transparent 43%),rgba(13,22,48,.52); text-align: center; } .section-gate::after { content: ''; position: absolute; width: 330px; aspect-ratio: 1; bottom: -260px; border: 1px solid rgba(100,130,207,.16); border-radius: 50%; } .section-gate__mark { display: grid; width: 58px; height: 58px; place-items: center; margin-bottom: 18px; border: 1px solid rgba(91,123,255,.46); border-radius: 18px; color: #84a0ff; background: rgba(38,68,165,.22); font-size: 34px; font-weight: 300; line-height: 1; box-shadow: 0 16px 45px rgba(20,55,181,.18); } .section-gate h1 { max-width: 680px; margin: 12px 0 16px; font-size: clamp(31px,4vw,52px); line-height: 1.02; letter-spacing: -.06em; } .section-gate > p:not(.kicker) { max-width: 590px; margin: 0 0 28px; color: #aeb9d4; font-size: 16px; line-height: 1.6; } .section-gate .primary-button { min-width: 220px; }
@@ -816,11 +1071,11 @@ onMounted(async () => {
 .auth-form, .connection-form { display: grid; gap: 16px; align-content: center; } .auth-form label, .connection-form label { display: grid; gap: 7px; color: #c3cbe0; font-size: 13px; font-weight: 750; } .auth-form input, .connection-form input, .connection-form textarea { width: 100%; min-height: 52px; padding: 0 16px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); transition: border-color .2s,box-shadow .2s; } .connection-form textarea { min-height: 105px; padding: 13px 16px; resize: vertical; } .auth-form input:focus, .connection-form input:focus, .connection-form textarea:focus { border-color: var(--brand-blue-bright); box-shadow: 0 0 0 4px var(--brand-blue-soft); } .form-error, .form-success { margin: 0 0 14px; font-size: 13px; } .form-error { color: #ffaaa8; } .form-success { color: var(--success); } .auth-card__footer { grid-column: 2; display: flex; gap: 8px; color: #9eaac5; font-size: 13px; } .auth-card__footer button { padding: 0; border: 0; color: #7894ff; background: transparent; font-weight: 750; }
 .modal-backdrop { position: fixed; z-index: 5; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2,6,19,.7); backdrop-filter: blur(9px); } .connection-modal { position: relative; width: min(100%,670px); max-height: calc(100vh - 48px); overflow: auto; padding: clamp(28px,4vw,46px); border: 1px solid rgba(146,164,205,.3); border-radius: 26px; background: linear-gradient(145deg,#14203d,#0b1128); box-shadow: 0 30px 100px rgba(0,0,0,.45); } .modal-close { position: absolute; top: 18px; right: 22px; padding: 0; border: 0; color: #bac4dc; background: transparent; font-size: 38px; line-height: 1; }
 .provider-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 26px 0; } .provider-picker button { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 800; } .provider-picker button.active { border-color: var(--brand-blue-bright); background: linear-gradient(115deg,rgba(23,72,220,.38),rgba(75,115,255,.22)); } .provider-picker .market-mark { width: 35px; height: 35px; border-radius: 10px; }
-.yandex-discovery { display: grid; gap: 13px; } .secondary-button { min-height: 48px; padding: 0 16px; } .store-choice { display: grid; gap: 8px; } .store-choice > span { color: #b7c2da; font-size: 13px; font-weight: 750; } .store-choice button { display: flex; justify-content: space-between; padding: 12px; border: 1px solid rgba(149,164,203,.25); border-radius: 12px; color: #edf1ff; background: rgba(24,34,61,.7); text-align: left; } .store-choice button.active { border-color: var(--brand-blue-bright); background: var(--brand-blue-soft); } .store-choice small { color: #aeb9d4; } .connection-form__actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 9px; } .connection-form__actions .primary-button { min-width: 190px; }
-.snapshot-view { display: grid; gap: 18px; margin-top: 46px; } .snapshot-toolbar { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(0, 1.6fr) auto; align-items: end; gap: 14px; } .snapshot-search { display: grid; gap: 7px; } .snapshot-search label, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .snapshot-search input, .orders-filter-row input, .orders-filter-row select { width: 100%; min-height: 50px; padding: 0 15px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); } .orders-filter-row input, .orders-filter-row select { height: 52px; min-height: 52px; } .store-filters { display: flex; min-width: 0; gap: 8px; overflow-x: auto; padding-bottom: 1px; } .store-filters button { display: inline-flex; min-height: 50px; align-items: center; gap: 8px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; color: #cbd5eb; background: rgba(31,40,70,.72); font-weight: 800; } .store-filters button.active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .store-filters .market-mark { width: 25px; height: 25px; border-radius: 8px; font-size: 8px; } .store-filters .market-mark--yandex_market { font-size: 16px; } .sync-button { display: inline-flex; min-width: 142px; min-height: 52px; align-items: center; justify-content: center; gap: 9px; padding: 0 17px; border: 1px solid #ee6cb5; border-radius: 50px; color: #fff; background: linear-gradient(140deg,#f13b9e,#cf206e); box-shadow: 0 12px 28px rgba(242,52,152,.27); font-weight: 850; } .sync-button > span:first-child { font-size: 25px; line-height: 1; } .spinning { animation: snapshot-spin .8s linear infinite; } @keyframes snapshot-spin { to { transform: rotate(360deg); } }
+.yandex-discovery { display: grid; gap: 13px; } .yandex-discovery__hint { margin: 0; color: #9eabc7; font-size: 13px; line-height: 1.5; } .secondary-button { min-height: 48px; padding: 0 16px; } .store-choice { display: grid; gap: 8px; } .store-choice > span { color: #b7c2da; font-size: 13px; font-weight: 750; } .store-choice button { display: flex; justify-content: space-between; padding: 12px; border: 1px solid rgba(149,164,203,.25); border-radius: 12px; color: #edf1ff; background: rgba(24,34,61,.7); text-align: left; } .store-choice button.active { border-color: var(--brand-blue-bright); background: var(--brand-blue-soft); } .store-choice small { color: #aeb9d4; } .connection-form__actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 9px; } .connection-form__actions .primary-button { min-width: 190px; }
+.snapshot-view { display: grid; gap: 18px; margin-top: 46px; } .snapshot-toolbar { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(0, 1.6fr) auto; align-items: end; gap: 14px; } .snapshot-search { display: grid; gap: 7px; } .snapshot-search label, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .snapshot-search input, .orders-filter-row input, .orders-filter-row select { width: 100%; min-height: 50px; padding: 0 15px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); } .orders-filter-row input, .orders-filter-row select { height: 52px; min-height: 52px; } .store-filters { display: flex; min-width: 0; gap: 8px; overflow-x: auto; padding-bottom: 1px; } .store-filters button { display: inline-flex; min-height: 50px; align-items: center; gap: 8px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; color: #cbd5eb; background: rgba(31,40,70,.72); font-weight: 800; } .store-filters button > span:last-child { display: grid; gap: 1px; text-align: left; } .store-filters button small { color: #929db8; font-size: 9px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; } .store-filters button.active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .store-filters button.active small { color: #dce5ff; } .store-filters button.store-filter--disabled:not(.active) { border-style: dashed; color: #9ca7c0; background: rgba(25,32,55,.6); } .store-filters .market-mark { width: 25px; height: 25px; border-radius: 8px; font-size: 8px; } .store-filters .market-mark--yandex_market { font-size: 16px; } .sync-button { display: inline-flex; min-width: 142px; min-height: 52px; align-items: center; justify-content: center; gap: 9px; padding: 0 17px; border: 1px solid #ee6cb5; border-radius: 50px; color: #fff; background: linear-gradient(140deg,#f13b9e,#cf206e); box-shadow: 0 12px 28px rgba(242,52,152,.27); font-weight: 850; } .sync-button > span:first-child { font-size: 25px; line-height: 1; } .spinning { animation: snapshot-spin .8s linear infinite; } @keyframes snapshot-spin { to { transform: rotate(360deg); } } .snapshot-archive-notice { margin: 0; padding: 11px 14px; border: 1px dashed rgba(149,164,203,.28); border-radius: 13px; color: #aeb9d4; background: rgba(20,28,52,.56); font-size: 13px; } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 6px; border: 1px solid rgba(159,172,202,.3); border-radius: 999px; color: #aeb9d4; font-size: 9px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
 .snapshot-search__row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; } .search-submit, .filter-toggle { display: inline-flex; min-height: 50px; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border-radius: 13px; font-weight: 800; } .search-submit { border: 1px solid rgba(75,115,255,.76); color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); box-shadow: 0 10px 24px rgba(32,77,220,.22); } .search-submit svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; } .search-submit:hover { filter: brightness(1.08); } .search-action-enter-active, .search-action-leave-active { transition: opacity .15s ease, transform .15s ease; } .search-action-enter-from, .search-action-leave-to { opacity: 0; transform: translateX(-5px); } .filter-toggle { border: 1px solid rgba(149,164,203,.28); color: #cbd5eb; background: rgba(31,40,70,.72); } .filter-toggle svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; } .filter-toggle small { display: grid; min-width: 20px; height: 20px; place-items: center; border-radius: 50%; color: #fff; background: var(--brand-blue-bright); font-size: 11px; } .filter-toggle--active { border-color: rgba(91,123,255,.64); color: #fff; background: rgba(42,67,145,.42); }
-.snapshot-sync-overlay { position: fixed; z-index: 4; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(5,9,23,.66); backdrop-filter: blur(7px); } .snapshot-sync-overlay::before { content: ''; position: absolute; width: min(520px,72vw); aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle,rgba(45,83,219,.2),transparent 68%); pointer-events: none; } .snapshot-sync-overlay__card { position: relative; padding: 28px 38px 25px; border: 1px solid rgba(139,160,210,.28); border-radius: 26px; background: linear-gradient(145deg,rgba(21,33,63,.97),rgba(10,16,37,.97)); box-shadow: 0 28px 90px rgba(0,0,0,.42),0 0 55px rgba(40,79,219,.12); } .snapshot-loader-enter-active, .snapshot-loader-leave-active { transition: opacity .2s ease; } .snapshot-loader-enter-from, .snapshot-loader-leave-to { opacity: 0; }
 .orders-filter-row { display: flex; flex-wrap: wrap; align-items: end; gap: 18px; padding: 16px 18px; border: 1px solid rgba(144,160,204,.17); border-radius: 18px; background: rgba(14,22,48,.52); box-shadow: inset 0 1px rgba(255,255,255,.02); } .orders-filter-row__period { position: relative; display: flex; align-items: end; gap: 9px; } .orders-filter-row__period > span:first-child, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .orders-filter-row__period > span:first-child { position: absolute; top: 0; left: 0; } .orders-filter-row__period label { padding-top: 19px; } .orders-filter-row label { display: grid; gap: 7px; min-width: 150px; } .orders-filter-row .status-select { position: relative; min-width: 175px; } .orders-filter-row .status-select::after { content: ''; position: absolute; right: 17px; bottom: 22px; width: 7px; height: 7px; border-right: 2px solid #8794b2; border-bottom: 2px solid #8794b2; transform: rotate(45deg); pointer-events: none; } .orders-filter-row select { padding-right: 42px; appearance: none; -webkit-appearance: none; } .date-divider { padding-bottom: 17px; color: #71809f; } .orders-filter-row__actions { display: flex; align-items: flex-end; gap: 9px; } .filter-apply, .filter-reset { height: 52px; min-height: 52px; } .filter-reset { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 1px solid rgba(255,150,155,.34); border-radius: 14px; color: #ffaaa8; background: rgba(255,150,155,.07); font-weight: 800; transition: border-color .2s, background .2s, transform .2s; } .filter-reset svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .filter-reset:hover { border-color: rgba(255,170,168,.62); background: rgba(255,150,155,.13); transform: translateY(-1px); } .order-filters-enter-active, .order-filters-leave-active { overflow: hidden; transition: opacity .18s ease,transform .18s ease; } .order-filters-enter-from, .order-filters-leave-to { opacity: 0; transform: translateY(-6px); } .snapshot-count { margin: 3px 0 0; color: #9eabc7; font-size: 13px; font-weight: 750; }
-.snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div { min-width: 0; flex: 1 1 auto; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .catalog-card { cursor: pointer; transition: border-color .18s,box-shadow .18s,transform .18s; } .catalog-card:hover,.catalog-card:focus-visible { border-color: rgba(91,123,255,.58); box-shadow: inset 0 1px rgba(255,255,255,.04),0 14px 34px rgba(6,16,48,.26); transform: translateY(-2px); outline: none; } .catalog-card:focus-visible { box-shadow: inset 0 1px rgba(255,255,255,.04),0 0 0 3px rgba(75,115,255,.22),0 14px 34px rgba(6,16,48,.26); } .catalog-card__open { display: grid; width: 39px; height: 39px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(126,151,217,.3); border-radius: 12px; color: #9cadd5; background: rgba(17,28,57,.72); transition: color .18s,border-color .18s,background .18s,transform .18s; } .catalog-card__open svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .catalog-card:hover .catalog-card__open,.catalog-card:focus-visible .catalog-card__open { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); transform: translateY(-1px); } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__facts { display: flex; min-width: 0; align-items: center; gap: 18px; } .catalog-card__stock { color: #9fdccb; white-space: nowrap; } .catalog-card__stock strong { color: #58e5bd; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { min-width: 0; } .order-card__body > strong { display: -webkit-box; overflow: hidden; color: #eef2fc; line-height: 1.42; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; } .order-status { flex: 0 0 auto; max-width: 120px; padding: 6px 9px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .035em; text-align: center; text-transform: uppercase; white-space: nowrap; } .order-status--processing { color: #ffc75a; background: rgba(255,199,90,.08); } .order-status--in_delivery { color: #65b5ff; background: rgba(101,181,255,.08); } .order-status--delivered { color: #4ee6bd; background: rgba(78,230,189,.08); } .order-status--cancelled, .order-status--problem { color: #ff969b; background: rgba(255,150,155,.08); } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div:not(.catalog-card__actions) { min-width: 0; flex: 1 1 auto; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .catalog-card { cursor: pointer; transition: border-color .18s,box-shadow .18s,transform .18s; } .catalog-card:hover,.catalog-card:focus-visible { border-color: rgba(91,123,255,.58); box-shadow: inset 0 1px rgba(255,255,255,.04),0 14px 34px rgba(6,16,48,.26); transform: translateY(-2px); outline: none; } .catalog-card:focus-visible { box-shadow: inset 0 1px rgba(255,255,255,.04),0 0 0 3px rgba(75,115,255,.22),0 14px 34px rgba(6,16,48,.26); } .catalog-card__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; } .catalog-card__open,.catalog-card__instruction { display: grid; width: 39px; height: 39px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(126,151,217,.3); border-radius: 12px; color: #9cadd5; background: rgba(17,28,57,.72); transition: color .18s,border-color .18s,background .18s,transform .18s,box-shadow .18s; } .catalog-card__open svg,.catalog-card__instruction svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .catalog-card__instruction { color: #f4f7ff; border-color: rgba(230,236,255,.34); } .catalog-card__instruction--filled { color: #fff; border-color: rgba(83,125,255,.74); background: linear-gradient(145deg,rgba(30,77,224,.96),rgba(74,111,255,.88)); box-shadow: 0 8px 20px rgba(32,77,220,.22); } .catalog-card:hover .catalog-card__open,.catalog-card:focus-visible .catalog-card__open { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); transform: translateY(-1px); } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__facts { display: flex; min-width: 0; align-items: center; gap: 18px; } .catalog-card__stock { color: #9fdccb; white-space: nowrap; } .catalog-card__stock strong { color: #58e5bd; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { min-width: 0; } .order-card__body > strong { display: -webkit-box; overflow: hidden; color: #eef2fc; line-height: 1.42; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; } .order-status { flex: 0 0 auto; max-width: 120px; padding: 6px 9px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .035em; text-align: center; text-transform: uppercase; white-space: nowrap; } .order-status--processing { color: #ffc75a; background: rgba(255,199,90,.08); } .order-status--in_delivery { color: #65b5ff; background: rgba(101,181,255,.08); } .order-status--delivered { color: #4ee6bd; background: rgba(78,230,189,.08); } .order-status--cancelled, .order-status--problem { color: #ff969b; background: rgba(255,150,155,.08); } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (max-width:900px) { .connection-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 147px; } .app-brand span { display: none; } .profile-button { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 26px; } .seller-nav { width: 100%; gap: 4px; } .seller-nav__item { flex: 1; padding: 0 9px; font-size: 13px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .connection-grid, .snapshot-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
+@media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
 </style>

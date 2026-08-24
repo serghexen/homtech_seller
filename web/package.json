@@ -1,7 +1,7 @@
 {
   "name": "homtech-seller-web",
   "private": true,
-  "version": "0.0.13",
+  "version": "0.0.20",
   "type": "module",
   "scripts": {
     "dev": "vite",

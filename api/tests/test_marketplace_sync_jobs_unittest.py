@@ -5,16 +5,55 @@ from __future__ import annotations
 import unittest
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from fastapi import HTTPException
 
 from domains.marketplace_sync_jobs_api import parse_job_ids
-from domains.marketplace_sync_service import execute_sync_job
+from domains.marketplace_sync_service import execute_sync_job, sync_catalog_connection
 from worker import advisory_lock_key, is_transient_sync_error, retry_delay_seconds
 
 
 class MarketplaceSyncJobsTests(unittest.TestCase):
+    @patch("domains.marketplace_sync_service.fetch_marketplace_stocks", return_value={})
+    @patch("domains.marketplace_sync_service.fetch_marketplace_catalog")
+    def test_catalog_sync_restores_current_items_and_archives_missing(self, fetch_catalog, _fetch_stocks) -> None:
+        fetch_catalog.return_value = [
+            {"product_id": 10, "offer_id": "SKU-10", "sku": "SKU-10", "name": "Товар 10"},
+            {"product_id": 11, "offer_id": "SKU-11", "sku": "SKU-11", "name": "Товар 11"},
+        ]
+        cursor = MagicMock()
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        synced = sync_catalog_connection(connection, (7, "ozon", "Store", "2", "", "", "token", None))
+
+        self.assertEqual(synced, 2)
+        statements = [" ".join(call.args[0].split()) for call in cursor.execute.call_args_list]
+        self.assertTrue(any("is_present=true, archived_at=NULL" in statement for statement in statements))
+        archive_call = next(call for call in cursor.execute.call_args_list if "SET is_present=false" in call.args[0])
+        self.assertEqual(archive_call.args[1], (7, ["10", "11"]))
+
+    @patch("domains.marketplace_sync_service.fetch_marketplace_catalog", return_value=[{"unexpected": "payload"}])
+    def test_catalog_sync_does_not_archive_on_unknown_payload(self, _fetch_catalog) -> None:
+        connection = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "неполный или неизвестный формат"):
+            sync_catalog_connection(connection, (7, "ozon", "Store", "2", "", "", "token", None))
+        connection.cursor.assert_not_called()
+
+    @patch("domains.marketplace_sync_service.fetch_marketplace_stocks", return_value={})
+    @patch("domains.marketplace_sync_service.fetch_marketplace_catalog", return_value=[])
+    def test_empty_successful_catalog_archives_previous_snapshot(self, _fetch_catalog, _fetch_stocks) -> None:
+        cursor = MagicMock()
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        synced = sync_catalog_connection(connection, (7, "ozon", "Store", "2", "", "", "token", None))
+
+        self.assertEqual(synced, 0)
+        archive_call = next(call for call in cursor.execute.call_args_list if "SET is_present=false" in call.args[0])
+        self.assertEqual(archive_call.args[1], (7, []))
+
     def test_parses_and_deduplicates_polling_job_ids(self) -> None:
         self.assertEqual(parse_job_ids("7, 8,7,9"), [7, 8, 9])
 

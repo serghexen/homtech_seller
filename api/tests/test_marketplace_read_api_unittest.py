@@ -6,12 +6,17 @@ import unittest
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
+from pydantic import ValidationError
 
 from domains.marketplace_read_api import (
+    CATALOG_SEARCH_EXPRESSIONS,
+    ORDER_SEARCH_EXPRESSIONS,
     MarketplaceCatalogItemOut,
+    MarketplaceCatalogSettingsIn,
     catalog_card_details,
     catalog_payload_with_stock,
     catalog_primary_image,
+    ilike_search_condition,
     mount_marketplace_read_routes,
     normalize_catalog_item,
     normalize_order_items,
@@ -19,6 +24,16 @@ from domains.marketplace_read_api import (
 
 
 class MarketplaceReadApiTests(unittest.TestCase):
+    def test_catalog_search_includes_visible_market_sku(self) -> None:
+        condition, params = ilike_search_condition("6099375668", CATALOG_SEARCH_EXPRESSIONS)
+        self.assertIn("mapping,marketSku", condition)
+        self.assertEqual(params, ["%6099375668%"] * 4)
+
+    def test_order_search_includes_offer_id(self) -> None:
+        condition, params = ilike_search_condition("MRKT-3ETEAI6X", ORDER_SEARCH_EXPRESSIONS)
+        self.assertIn("item.offer_id ILIKE %s", condition)
+        self.assertEqual(params, ["%MRKT-3ETEAI6X%"] * 4)
+
     def test_ozon_catalog_keeps_numeric_sku_and_title(self) -> None:
         # Фиксирует приоритет SKU Ozon, чтобы карточки не превращались в безымянные offerId.
         result = normalize_catalog_item(
@@ -117,6 +132,35 @@ class MarketplaceReadApiTests(unittest.TestCase):
         )
         route = next(route for route in app.routes if route.path == "/marketplaces/catalog/stock/refresh")
         self.assertEqual(route.methods, {"POST"})
+
+    def test_mounts_local_catalog_settings_save_without_marketplace_action(self) -> None:
+        app = FastAPI()
+        mount_marketplace_read_routes(
+            app,
+            database_url=lambda: "",
+            psycopg=None,
+            current_user=lambda: None,
+            user_with_workspace=lambda *_args: None,
+        )
+        route = next(route for route in app.routes if route.path == "/marketplaces/catalog/settings")
+        self.assertEqual(route.methods, {"POST"})
+
+    def test_catalog_settings_validate_local_limits(self) -> None:
+        valid = MarketplaceCatalogSettingsIn(
+            connection_id=1,
+            external_product_id="MRKT-1",
+            manual_stock_limit=5,
+            sales_limit=10,
+            sales_limit_daily_extra=2,
+            activation_instruction="Первая строка\nВторая строка",
+        )
+        self.assertEqual(valid.sales_limit, 10)
+        with self.assertRaises(ValidationError):
+            MarketplaceCatalogSettingsIn(
+                connection_id=1,
+                external_product_id="MRKT-1",
+                manual_stock_limit=-1,
+            )
 
     def test_mounts_readonly_catalog_orders_route(self) -> None:
         app = FastAPI()

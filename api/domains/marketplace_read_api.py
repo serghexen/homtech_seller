@@ -15,6 +15,20 @@ from domains.marketplace_catalog_service import fetch_marketplace_stocks
 from domains.marketplace_orders_service import normalize_marketplace_order_status
 
 
+CATALOG_SEARCH_EXPRESSIONS = (
+    "item.title",
+    "item.sku",
+    "item.offer_id",
+    "COALESCE(item.raw_payload #>> '{mapping,marketSku}', '')",
+)
+ORDER_SEARCH_EXPRESSIONS = (
+    "item.external_order_id",
+    "item.title",
+    "item.sku",
+    "item.offer_id",
+)
+
+
 class MarketplaceCatalogItemOut(BaseModel):
     connection_id: int
     provider_code: str
@@ -30,6 +44,7 @@ class MarketplaceCatalogItemOut(BaseModel):
     available_stock: int | None = None
     stock_synced_at: datetime | None = None
     stock_settings_available: bool = False
+    sales_metrics_available: bool = False
     manual_stock_limit: int | None = None
     published_stock: int | None = None
     activation_instruction: str = ""
@@ -44,6 +59,7 @@ class MarketplaceCatalogItemOut(BaseModel):
     archived_by_sales_limit: bool = False
     settings_source_updated_at: datetime | None = None
     settings_imported_at: datetime | None = None
+    settings_saved_at: datetime | None = None
     synced_at: datetime
 
 
@@ -65,6 +81,26 @@ class MarketplaceCatalogStockOut(BaseModel):
     available_stock: int
     checked_at: datetime
     provider_updated_at: str = ""
+
+
+class MarketplaceCatalogSettingsIn(BaseModel):
+    connection_id: int = Field(gt=0)
+    external_product_id: str = Field(min_length=1, max_length=256)
+    manual_stock_limit: int = Field(ge=0, le=1_000_000)
+    sales_limit: int | None = Field(default=None, ge=1, le=1_000_000)
+    sales_limit_daily_extra: int = Field(default=0, ge=0, le=1_000_000)
+    activation_instruction: str = Field(default="", max_length=10_000)
+
+
+class MarketplaceCatalogSettingsOut(BaseModel):
+    connection_id: int
+    external_product_id: str
+    manual_stock_limit: int
+    sales_limit: int | None = None
+    sales_limit_daily_extra: int
+    sales_limit_day: date
+    activation_instruction: str
+    settings_saved_at: datetime
 
 
 class MarketplaceOrderItemOut(BaseModel):
@@ -182,6 +218,15 @@ def safe_int(value: Any, *, default: int = 1) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return default
+
+
+def ilike_search_condition(search: str, expressions: tuple[str, ...]) -> tuple[str, list[str]]:
+    """Собирает поиск по тем же идентификаторам, которые видит оператор в интерфейсе."""
+    cleaned = str(search or "").strip()
+    if not cleaned:
+        return "", []
+    pattern = f"%{cleaned}%"
+    return f"({' OR '.join(f'{expression} ILIKE %s' for expression in expressions)})", [pattern] * len(expressions)
 
 
 def optional_datetime(value: Any) -> datetime | None:
@@ -332,14 +377,15 @@ def mount_marketplace_read_routes(
     ) -> MarketplaceCatalogListOut:
         # Отдаёт постраничный снимок своего workspace, чтобы длинный каталог не превращался в бесконечный список.
         search = str(query or "").strip()
-        conditions = ["connection.workspace_id=%s"]
+        conditions = ["connection.workspace_id=%s", "item.is_present=true"]
         params: list[Any] = []
         if connection_id:
             conditions.append("item.connection_id=%s")
             params.append(connection_id)
-        if search:
-            conditions.append("(item.title ILIKE %s OR item.sku ILIKE %s OR item.offer_id ILIKE %s)")
-            params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+        search_condition, search_params = ilike_search_condition(search, CATALOG_SEARCH_EXPRESSIONS)
+        if search_condition:
+            conditions.append(search_condition)
+            params.extend(search_params)
         where = " AND ".join(conditions)
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
@@ -355,18 +401,35 @@ def mount_marketplace_read_routes(
                     SELECT item.connection_id, connection.provider_code, connection.display_name,
                            item.external_product_id, item.offer_id, item.sku, item.title, item.synced_at,
                            item.raw_payload,
-                           settings.manual_stock_limit, settings.published_stock,
-                           settings.activation_instruction, settings.sales_limit,
-                           settings.sales_limit_daily_extra, settings.sales_limit_day,
+                           local_settings.connection_id IS NOT NULL,
+                           settings.connection_id IS NOT NULL,
+                           COALESCE(local_settings.manual_stock_limit, settings.manual_stock_limit),
+                           settings.published_stock,
+                           COALESCE(local_settings.activation_instruction, settings.activation_instruction),
+                           CASE WHEN local_settings.connection_id IS NOT NULL
+                             THEN local_settings.sales_limit ELSE settings.sales_limit END,
+                           CASE
+                             WHEN local_settings.connection_id IS NOT NULL THEN
+                               CASE WHEN local_settings.sales_limit_day=CURRENT_DATE
+                                 THEN local_settings.sales_limit_daily_extra ELSE 0 END
+                             ELSE CASE WHEN settings.sales_limit_day=CURRENT_DATE
+                               THEN COALESCE(settings.sales_limit_daily_extra, 0) ELSE 0 END
+                           END,
+                           CASE WHEN local_settings.connection_id IS NOT NULL
+                             THEN local_settings.sales_limit_day ELSE settings.sales_limit_day END,
                            settings.sales_limit_revision, settings.sales_limit_used,
                            settings.sales_limit_reserved, settings.sales_limit_remaining,
                            settings.sales_limit_exhausted_at, settings.archived_by_sales_limit,
-                           settings.source_updated_at, settings.imported_at
+                           settings.source_updated_at, settings.imported_at,
+                           local_settings.updated_at
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     LEFT JOIN seller.yandex_product_settings_snapshot AS settings
                       ON settings.connection_id=item.connection_id
                      AND settings.external_product_id=item.external_product_id
+                    LEFT JOIN seller.product_card_settings AS local_settings
+                      ON local_settings.connection_id=item.connection_id
+                     AND local_settings.external_product_id=item.external_product_id
                     WHERE {where}
                     ORDER BY item.title ASC NULLS LAST, item.sku ASC, item.external_product_id ASC
                     LIMIT %s OFFSET %s
@@ -378,31 +441,93 @@ def mount_marketplace_read_routes(
         for row in rows:
             provider_code = str(row[1])
             details = catalog_card_details(provider_code, row[8])
-            has_settings = row[9] is not None
+            has_local_settings = bool(row[9])
+            has_imported_settings = bool(row[10])
+            has_settings = has_local_settings or has_imported_settings
             items.append(MarketplaceCatalogItemOut(
                 connection_id=int(row[0]), provider_code=provider_code, store_name=str(row[2]), external_product_id=str(row[3]),
                 offer_id=str(row[4] or ""), sku=str(row[5] or ""), title=str(row[6] or ""), synced_at=row[7],
                 primary_image=catalog_primary_image(provider_code, row[8]),
                 stock_settings_available=has_settings,
-                manual_stock_limit=int(row[9]) if has_settings else None,
-                published_stock=int(row[10]) if has_settings else None,
-                activation_instruction=str(row[11] or "") if has_settings else "",
-                sales_limit=int(row[12]) if row[12] is not None else None,
-                sales_limit_daily_extra=int(row[13]) if has_settings else None,
-                sales_limit_day=row[14] if has_settings else None,
-                sales_limit_revision=int(row[15]) if has_settings else None,
-                sales_limit_used=int(row[16]) if has_settings else None,
-                sales_limit_reserved=int(row[17]) if has_settings else None,
-                sales_limit_remaining=int(row[18]) if row[18] is not None else None,
-                sales_limit_exhausted_at=row[19] if has_settings else None,
-                archived_by_sales_limit=bool(row[20]) if has_settings else False,
-                settings_source_updated_at=row[21] if has_settings else None,
-                settings_imported_at=row[22] if has_settings else None,
+                sales_metrics_available=has_imported_settings,
+                manual_stock_limit=int(row[11]) if has_settings else None,
+                published_stock=int(row[12]) if has_imported_settings else None,
+                activation_instruction=str(row[13] or "") if has_settings else "",
+                sales_limit=int(row[14]) if row[14] is not None else None,
+                sales_limit_daily_extra=int(row[15]) if has_settings else None,
+                sales_limit_day=row[16] if has_settings else None,
+                sales_limit_revision=int(row[17]) if has_imported_settings else None,
+                sales_limit_used=int(row[18]) if has_imported_settings else None,
+                sales_limit_reserved=int(row[19]) if has_imported_settings else None,
+                sales_limit_remaining=int(row[20]) if row[20] is not None else None,
+                sales_limit_exhausted_at=row[21] if has_imported_settings else None,
+                archived_by_sales_limit=bool(row[22]) if has_imported_settings else False,
+                settings_source_updated_at=row[23] if has_imported_settings else None,
+                settings_imported_at=row[24] if has_imported_settings else None,
+                settings_saved_at=row[25] if has_local_settings else None,
                 **details,
             ))
         return MarketplaceCatalogListOut(
             items=items,
             total=total, page=page, page_size=page_size,
+        )
+
+    @app.post("/marketplaces/catalog/settings", response_model=MarketplaceCatalogSettingsOut)
+    def save_catalog_settings(
+        payload: MarketplaceCatalogSettingsIn,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceCatalogSettingsOut:
+        # Сохраняет только локальные параметры Seller. Здесь намеренно нет токена и вызова API маркетплейса.
+        product_id = str(payload.external_product_id).strip()
+        instruction = str(payload.activation_instruction or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM seller.catalog_items AS item
+                    JOIN seller.marketplace_connections AS marketplace_connection
+                      ON marketplace_connection.id=item.connection_id
+                    WHERE item.connection_id=%s AND item.external_product_id=%s
+                      AND item.is_present=true AND marketplace_connection.workspace_id=%s
+                    LIMIT 1
+                    """,
+                    (payload.connection_id, product_id, seller_user.workspace_id),
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail="Карточка товара не найдена")
+                cursor.execute(
+                    """
+                    INSERT INTO seller.product_card_settings (
+                      connection_id, external_product_id, manual_stock_limit,
+                      sales_limit, sales_limit_daily_extra, sales_limit_day, activation_instruction,
+                      updated_by_user_id
+                    ) VALUES (%s,%s,%s,%s,%s,CURRENT_DATE,%s,%s)
+                    ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
+                      manual_stock_limit=EXCLUDED.manual_stock_limit,
+                      sales_limit=EXCLUDED.sales_limit,
+                      sales_limit_daily_extra=EXCLUDED.sales_limit_daily_extra,
+                      sales_limit_day=CURRENT_DATE,
+                      activation_instruction=EXCLUDED.activation_instruction,
+                      updated_by_user_id=EXCLUDED.updated_by_user_id,
+                      updated_at=now()
+                    RETURNING connection_id, external_product_id, manual_stock_limit,
+                              sales_limit, sales_limit_daily_extra, sales_limit_day,
+                              activation_instruction, updated_at
+                    """,
+                    (
+                        payload.connection_id, product_id, payload.manual_stock_limit,
+                        payload.sales_limit, payload.sales_limit_daily_extra, instruction,
+                        seller_user.id,
+                    ),
+                )
+                row = cursor.fetchone()
+        return MarketplaceCatalogSettingsOut(
+            connection_id=int(row[0]), external_product_id=str(row[1]),
+            manual_stock_limit=int(row[2]), sales_limit=int(row[3]) if row[3] is not None else None,
+            sales_limit_daily_extra=int(row[4]), sales_limit_day=row[5],
+            activation_instruction=str(row[6] or ""), settings_saved_at=row[7],
         )
 
     @app.post("/marketplaces/catalog/stock/refresh", response_model=MarketplaceCatalogStockOut)
@@ -422,7 +547,7 @@ def mount_marketplace_read_routes(
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE connection.id=%s AND connection.workspace_id=%s AND connection.status='active'
-                      AND item.offer_id=%s
+                      AND item.is_present=true AND item.offer_id=%s
                     LIMIT 1
                     """,
                     (credentials_secret(), payload.connection_id, seller_user.workspace_id, offer_id),
@@ -492,7 +617,7 @@ def mount_marketplace_read_routes(
                     SELECT item.offer_id, item.sku
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
-                    WHERE item.connection_id=%s AND item.external_product_id=%s
+                    WHERE item.connection_id=%s AND item.external_product_id=%s AND item.is_present=true
                       AND connection.workspace_id=%s
                     LIMIT 1
                     """,
@@ -582,9 +707,10 @@ def mount_marketplace_read_routes(
         if date_to:
             conditions.append("COALESCE(item.created_at, item.synced_at) < %s")
             params.append(datetime.combine(date_to, time.min, tzinfo=timezone.utc) + timedelta(days=1))
-        if search:
-            conditions.append("(item.external_order_id ILIKE %s OR item.title ILIKE %s OR item.sku ILIKE %s)")
-            params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+        search_condition, search_params = ilike_search_condition(search, ORDER_SEARCH_EXPRESSIONS)
+        if search_condition:
+            conditions.append(search_condition)
+            params.extend(search_params)
         where = " AND ".join(conditions)
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)

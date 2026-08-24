@@ -1,11 +1,12 @@
 <script setup>
 defineProps({
   label: { type: String, default: 'Загрузка…' },
+  compact: { type: Boolean, default: false },
 })
 </script>
 
 <template>
-  <div class="hamster-loader">
+  <div class="hamster-loader" :class="{ 'hamster-loader--compact': compact }">
     <div class="wheel-and-hamster" role="img" aria-label="Хомяк бежит в колесе">
       <div class="wheel"></div>
       <div class="hamster">
@@ -24,7 +25,7 @@ defineProps({
       </div>
       <div class="spoke"></div>
     </div>
-    <p>{{ label }}</p>
+    <p v-if="label">{{ label }}</p>
   </div>
 </template>
 
@@ -40,6 +41,17 @@ defineProps({
   color: #b7c2da;
   font-size: 13px;
   font-weight: 750;
+}
+
+.hamster-loader--compact {
+  width: 64px;
+  height: 64px;
+  place-content: center;
+  overflow: hidden;
+}
+
+.hamster-loader--compact .wheel-and-hamster {
+  font-size: 5px;
 }
 
 .wheel-and-hamster {

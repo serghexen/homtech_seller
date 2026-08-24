@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
+import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -11,49 +12,62 @@ const props = defineProps({
   stockSyncedLabel: { type: String, default: '' },
   stockLoading: { type: Boolean, default: false },
   stockError: { type: String, default: '' },
+  stockRefreshEnabled: { type: Boolean, default: true },
+  settingsSaving: { type: Boolean, default: false },
+  settingsError: { type: String, default: '' },
+  settingsNotice: { type: String, default: '' },
   orders: { type: Array, default: () => [] },
   ordersTotal: { type: Number, default: 0 },
   ordersLoading: { type: Boolean, default: false },
   ordersError: { type: String, default: '' },
   ordersRefreshing: { type: Boolean, default: false },
+  ordersRefreshEnabled: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders'])
+const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings'])
 const openSection = ref('')
 const imageFailed = ref(false)
-const showProductImage = computed(() => Boolean(props.item.primary_image) && !imageFailed.value)
-const canRefreshStock = computed(() => props.item.provider_code === 'yandex_market')
-const currentStock = computed(() => Number.isInteger(props.item.available_stock) ? props.item.available_stock : '—')
-const hasTransferredSalesLimit = computed(() => Boolean(props.item.stock_settings_available))
-const hasSalesLimit = computed(() => hasTransferredSalesLimit.value && props.item.sales_limit !== null && props.item.sales_limit !== '')
-const configuredStock = computed(() => hasTransferredSalesLimit.value ? Math.max(0, Number(props.item.manual_stock_limit) || 0) : 'Не перенесён')
-const dailySalesLimit = computed(() => {
-  if (!hasTransferredSalesLimit.value) return 'Не перенесён'
-  if (!hasSalesLimit.value) return 'Без ограничений'
-  return Math.max(0, Number(props.item.sales_limit) || 0)
+const settingsFormError = ref('')
+const settingsForm = reactive({
+  manual_stock_limit: Math.max(0, Number(props.item.manual_stock_limit) || 0),
+  sales_limit_enabled: props.item.sales_limit !== null && props.item.sales_limit !== '',
+  sales_limit: props.item.sales_limit !== null && props.item.sales_limit !== '' ? Math.max(1, Number(props.item.sales_limit) || 1) : 1,
+  sales_limit_daily_extra: Math.max(0, Number(props.item.sales_limit_daily_extra) || 0),
+  activation_instruction: normalizeEscapedLineBreaks(props.item.activation_instruction).trim(),
 })
+const showProductImage = computed(() => Boolean(props.item.primary_image) && !imageFailed.value)
+const canRefreshStock = computed(() => props.item.provider_code === 'yandex_market' && props.stockRefreshEnabled)
+const currentStock = computed(() => Number.isInteger(props.item.available_stock) ? props.item.available_stock : '—')
+const hasSalesMetrics = computed(() => Boolean(props.item.sales_metrics_available))
+const hasSalesLimit = computed(() => settingsForm.sales_limit_enabled)
 const limitMetrics = computed(() => [
-  { label: 'Продано', value: hasTransferredSalesLimit.value ? Math.max(0, Number(props.item.sales_limit_used) || 0) : '—' },
-  { label: 'В резерве', value: hasTransferredSalesLimit.value ? Math.max(0, Number(props.item.sales_limit_reserved) || 0) : '—' },
-  { label: 'Осталось', value: hasSalesLimit.value ? Math.max(0, Number(props.item.sales_limit_remaining) || 0) : '—' },
-  { label: 'Дополнительно сегодня', value: hasTransferredSalesLimit.value ? `+${Math.max(0, Number(props.item.sales_limit_daily_extra) || 0)}` : '—' },
+  { label: 'Продано', value: hasSalesMetrics.value ? Math.max(0, Number(props.item.sales_limit_used) || 0) : '—' },
+  { label: 'В резерве', value: hasSalesMetrics.value ? Math.max(0, Number(props.item.sales_limit_reserved) || 0) : '—' },
+  { label: 'Осталось по снимку', value: hasSalesMetrics.value && props.item.sales_limit_remaining !== null ? Math.max(0, Number(props.item.sales_limit_remaining) || 0) : '—' },
 ])
 const limitHeadline = computed(() => {
-  if (!hasTransferredSalesLimit.value) return 'Данные пока не перенесены'
   if (!hasSalesLimit.value) return 'Без ограничений'
-  const remaining = Math.max(0, Number(props.item.sales_limit_remaining) || 0)
-  return remaining === 0 ? 'Лимит исчерпан' : `${remaining} доступно сегодня`
+  return `${Math.max(1, Number(settingsForm.sales_limit) || 1)} продаж в день`
 })
-const activationInstruction = computed(() => {
-  if (!hasTransferredSalesLimit.value) return 'Инструкция пока не перенесена из CRM.'
-  return normalizeEscapedLineBreaks(props.item.activation_instruction).trim() || 'Инструкция не указана.'
+const hasActivationInstruction = computed(() => Boolean(settingsForm.activation_instruction.trim()))
+const activationInstructionDescription = computed(() => {
+  return hasActivationInstruction.value ? 'Текст для покупателя заполнен' : 'Текст для покупателя не указан'
 })
+const normalizedSettings = computed(() => normalizeProductSettings(settingsForm))
+const savedSettings = computed(() => normalizeProductSettings({
+  manual_stock_limit: Math.max(0, Number(props.item.manual_stock_limit) || 0),
+  sales_limit_enabled: props.item.sales_limit !== null && props.item.sales_limit !== '',
+  sales_limit: props.item.sales_limit,
+  sales_limit_daily_extra: Math.max(0, Number(props.item.sales_limit_daily_extra) || 0),
+  activation_instruction: normalizeEscapedLineBreaks(props.item.activation_instruction),
+}))
+const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.value, savedSettings.value))
+const instructionLength = computed(() => settingsForm.activation_instruction.length)
 
 const detailFields = computed(() => [
   { label: 'Артикул продавца', value: props.item.market_sku || props.item.offer_id || props.item.external_product_id || '—' },
   { label: 'SKU', value: props.item.offer_id || props.item.sku || '—' },
   { label: 'Цена', value: props.item.price ? `${props.item.price} ${props.item.currency_code || ''}`.trim() : '—' },
-  { key: 'stock', label: 'Остаток', value: Number.isInteger(props.item.available_stock) ? props.item.available_stock : '—' },
 ])
 
 const workSections = computed(() => [
@@ -64,8 +78,14 @@ const workSections = computed(() => [
     description: 'Актуальное количество, доступное для продажи на маркетплейсе',
   },
   {
-    id: 'orders',
+    id: 'instruction',
     number: '02',
+    title: 'Инструкция',
+    description: activationInstructionDescription.value,
+  },
+  {
+    id: 'orders',
+    number: '03',
     title: 'Заказы',
     description: props.ordersLoading
       ? 'Загружаем историю продаж этой карточки'
@@ -106,7 +126,25 @@ function toggleSection(sectionId) {
   openSection.value = openSection.value === sectionId ? '' : sectionId
 }
 
+function resetSettingsForm() {
+  settingsForm.manual_stock_limit = savedSettings.value.manual_stock_limit
+  settingsForm.sales_limit_enabled = savedSettings.value.sales_limit !== null
+  settingsForm.sales_limit = savedSettings.value.sales_limit || 1
+  settingsForm.sales_limit_daily_extra = savedSettings.value.sales_limit_daily_extra
+  settingsForm.activation_instruction = savedSettings.value.activation_instruction
+  settingsFormError.value = ''
+}
+
+function saveSettings() {
+  settingsFormError.value = ''
+  const values = normalizedSettings.value
+  settingsFormError.value = validateProductSettings(values)
+  if (settingsFormError.value) return
+  emit('save-settings', values)
+}
+
 function close() {
+  if (settingsDirty.value && !props.settingsSaving && !window.confirm('Закрыть карточку без сохранения изменений?')) return
   emit('close')
 }
 
@@ -126,7 +164,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
           <header class="product-card-modal__header">
             <h2 id="product-card-title">Карточка товара</h2>
             <div class="product-card-modal__head-actions">
-              <span class="product-card-modal__mode">Только просмотр</span>
+              <span class="product-card-modal__mode">Настройки Seller</span>
               <button type="button" aria-label="Вернуться к каталогу" title="К каталогу" @click="close">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m11 18-6-6 6-6" /></svg>
               </button>
@@ -150,13 +188,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 <dl class="product-overview__grid">
                   <template v-for="field in detailFields" :key="field.label">
                     <dt>{{ field.label }}</dt>
-                    <dd v-if="field.key === 'stock'" class="product-overview__stock-cell">
-                      <span :class="{ 'is-loading': stockLoading }">{{ stockLoading ? 'Проверяем…' : field.value }}</span>
-                    </dd>
-                    <dd v-else>{{ field.value }}</dd>
+                    <dd>{{ field.value }}</dd>
                   </template>
                 </dl>
-                <p v-if="stockError" class="product-overview__stock-error" role="alert">{{ stockError }}</p>
               </div>
             </section>
 
@@ -180,45 +214,64 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           </button>
                         </div>
                         <small>{{ stockSyncedLabel ? `Проверено ${stockSyncedLabel}` : 'Актуальность ещё не проверена' }}</small>
+                        <p v-if="stockError" class="stock-readonly__error" role="alert">{{ stockError }}</p>
                       </section>
 
-                      <section class="stock-readonly__field">
+                      <label class="stock-readonly__field stock-settings__field">
                         <span>Заданный остаток</span>
-                        <output>{{ configuredStock }}</output>
-                        <small>Целевое значение, сохранённое ранее в CRM</small>
-                      </section>
+                        <input v-model.number="settingsForm.manual_stock_limit" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
+                        <small>Локальное целевое значение Seller</small>
+                      </label>
 
-                      <section class="stock-readonly__field">
+                      <section class="stock-readonly__field stock-settings__field">
                         <span>Дневной лимит</span>
-                        <output>{{ dailySalesLimit }}</output>
+                        <label class="stock-limit-switch">
+                          <input v-model="settingsForm.sales_limit_enabled" type="checkbox" />
+                          <span aria-hidden="true"></span>
+                          <strong>{{ settingsForm.sales_limit_enabled ? 'Ограничен' : 'Без ограничений' }}</strong>
+                        </label>
+                        <input v-if="settingsForm.sales_limit_enabled" v-model.number="settingsForm.sales_limit" type="number" min="1" max="1000000" step="1" inputmode="numeric" aria-label="Количество продаж в день" />
                         <small>Максимальное количество продаж за день</small>
                       </section>
                     </div>
 
-                    <section class="stock-limit" :class="{ 'stock-limit--pending': !hasTransferredSalesLimit }">
+                    <section class="stock-limit">
                       <div class="stock-limit__heading">
                         <div><span>Состояние лимита</span><strong>{{ limitHeadline }}</strong></div>
-                        <span class="stock-limit__badge">Только просмотр</span>
+                        <span class="stock-limit__badge">Локальная настройка</span>
                       </div>
+                      <label class="stock-limit__extra">
+                        <span>Дополнительно сегодня</span>
+                        <input v-model.number="settingsForm.sales_limit_daily_extra" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
+                        <small>Временная прибавка к дневному лимиту, сохранённая в Seller</small>
+                      </label>
                       <div class="stock-limit__metrics">
                         <div v-for="metric in limitMetrics" :key="metric.label"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong></div>
                       </div>
-                    </section>
-
-                    <section class="stock-instruction">
-                      <span>Инструкция покупателю</span>
-                      <p>{{ activationInstruction }}</p>
+                      <p v-if="!hasSalesMetrics" class="stock-limit__metrics-note">Статистика использования появится после получения соответствующего снимка.</p>
                     </section>
 
                     <p class="stock-readonly__notice">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                      Seller только показывает сохранённые параметры. Изменение и отправка данных в маркетплейс отключены.
+                      Эти значения сохраняются только в Seller. Отправка остатков и лимитов в маркетплейс не выполняется.
                     </p>
+                  </div>
+                  <div v-else-if="section.id === 'instruction'" class="product-instruction">
+                    <section class="product-instruction__content" :class="{ 'product-instruction__content--empty': !hasActivationInstruction }">
+                      <span class="product-instruction__icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M3.5 5.5c2.8-.8 5.6-.2 8.5 1.7v12c-2.9-1.9-5.7-2.5-8.5-1.7z" /><path d="M20.5 5.5c-2.8-.8-5.6-.2-8.5 1.7v12c2.9-1.9 5.7-2.5 8.5-1.7z" /></svg>
+                      </span>
+                      <label class="product-instruction__editor">
+                        <span>Текст для покупателя</span>
+                        <textarea v-model="settingsForm.activation_instruction" maxlength="10000" placeholder="Например: как активировать код и куда обратиться при затруднениях" />
+                        <small>{{ instructionLength.toLocaleString('ru-RU') }} / 10 000</small>
+                      </label>
+                    </section>
                   </div>
                   <div v-else class="product-orders">
                     <div class="product-orders__toolbar">
                       <div><strong>Заказы товара</strong><span>Обновление выполняется по магазину</span></div>
-                      <button type="button" :disabled="ordersLoading || ordersRefreshing" title="Получить свежие заказы магазина и обновить список этой карточки" @click="emit('refresh-orders')">
+                      <button type="button" :disabled="ordersLoading || ordersRefreshing || !ordersRefreshEnabled" :title="ordersRefreshEnabled ? 'Получить свежие заказы магазина и обновить список этой карточки' : 'Магазин отключён: доступен только сохранённый снимок'" @click="emit('refresh-orders')">
                         <svg :class="{ 'is-spinning': ordersRefreshing }" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7" /><path d="M20 4v6h-6" /></svg>
                         <span>{{ ordersRefreshing ? 'Обновляем' : 'Обновить' }}</span>
                       </button>
@@ -260,6 +313,27 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 </div>
               </section>
             </div>
+
+            <section class="product-settings-savebar" :class="{ 'is-dirty': settingsDirty }" aria-live="polite">
+              <div class="product-settings-savebar__copy">
+                <span class="product-settings-savebar__mark" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M6 4h10l3 3v13H6z" /><path d="M9 4v6h7V4M9 16h7" /></svg>
+                </span>
+                <div>
+                  <strong>{{ settingsDirty ? 'Есть несохранённые изменения' : settingsNotice || (item.settings_saved_at ? 'Локальные настройки сохранены' : 'Готово к настройке') }}</strong>
+                  <p v-if="settingsFormError || settingsError" class="product-settings-savebar__error">{{ settingsFormError || settingsError }}</p>
+                  <p v-else>{{ item.settings_saved_at ? 'Последнее сохранение находится в Seller' : 'Маркетплейс не получит эти значения' }}</p>
+                </div>
+              </div>
+              <div class="product-settings-savebar__actions">
+                <button v-if="settingsDirty" class="product-settings-reset" type="button" :disabled="settingsSaving" @click="resetSettingsForm">Отменить изменения</button>
+                <button class="product-settings-save" type="button" :disabled="!settingsDirty || settingsSaving" @click="saveSettings">
+                  <span v-if="settingsSaving" class="product-settings-save__spinner" aria-hidden="true"></span>
+                  <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h10l3 3v13H6z" /><path d="M9 4v6h7V4M9 16h7" /></svg>
+                  <span>{{ settingsSaving ? 'Сохраняем…' : 'Сохранить в Seller' }}</span>
+                </button>
+              </div>
+            </section>
 
             <footer class="product-card-modal__footer">
               <span>{{ item.stock_synced_at ? 'Остаток проверен' : 'Последнее обновление снимка' }}</span>
@@ -465,26 +539,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   border-bottom: 1px solid rgba(137, 159, 211, .18);
 }
 
-.product-overview__stock-cell {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+@keyframes product-stock-spin {
+  to { transform: rotate(360deg); }
 }
 
-.product-overview__stock-cell > span.is-loading {
-  color: #91a6d8;
-}
-
-.product-overview__stock-error {
-  margin: 9px 2px 0;
+.stock-readonly__error {
+  margin: 7px 0 0;
   color: #ffaaa8;
   font-size: 11px;
   line-height: 1.4;
-}
-
-@keyframes product-stock-spin {
-  to { transform: rotate(360deg); }
 }
 
 .product-overview__grid dt {
@@ -871,8 +934,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   gap: 12px;
 }
 
-.stock-readonly__field,
-.stock-instruction {
+.stock-readonly__field {
   display: grid;
   gap: 8px;
   padding: 14px;
@@ -882,7 +944,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 }
 
 .stock-readonly__field > span,
-.stock-instruction > span,
 .stock-limit__heading > div > span {
   color: #96a4c2;
   font-size: 10px;
@@ -907,6 +968,91 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   color: #7f8fb0;
   font-size: 10px;
   line-height: 1.35;
+}
+
+.stock-settings__field input,
+.stock-limit__extra input,
+.product-instruction__editor textarea {
+  width: 100%;
+  border: 1px solid rgba(126, 151, 217, .28);
+  outline: none;
+  color: #eef3ff;
+  background: rgba(5, 11, 26, .64);
+  transition: border-color .16s, box-shadow .16s, background .16s;
+}
+
+.stock-settings__field > input,
+.stock-limit__extra input {
+  min-height: 39px;
+  padding: 0 11px;
+  border-radius: 9px;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.stock-settings__field input:focus,
+.stock-limit__extra input:focus,
+.product-instruction__editor textarea:focus {
+  border-color: rgba(83, 125, 255, .8);
+  background: rgba(9, 18, 43, .82);
+  box-shadow: 0 0 0 3px rgba(75, 115, 255, .13);
+}
+
+.stock-limit-switch {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.stock-limit-switch > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.stock-limit-switch > span {
+  position: relative;
+  width: 36px;
+  height: 21px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(126, 151, 217, .35);
+  border-radius: 999px;
+  background: rgba(34, 47, 78, .84);
+  transition: border-color .16s, background .16s;
+}
+
+.stock-limit-switch > span::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #aeb9d4;
+  transition: transform .16s, background .16s;
+}
+
+.stock-limit-switch > input:checked + span {
+  border-color: rgba(83, 229, 186, .55);
+  background: rgba(41, 151, 122, .34);
+}
+
+.stock-limit-switch > input:checked + span::after {
+  background: #65e8c2;
+  transform: translateX(15px);
+}
+
+.stock-limit-switch > input:focus-visible + span {
+  box-shadow: 0 0 0 3px rgba(75, 115, 255, .2);
+}
+
+.stock-limit-switch strong {
+  color: #dce5f7;
+  font-size: 12px;
 }
 
 .stock-readonly__field--primary {
@@ -1004,10 +1150,38 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
 .stock-limit__metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: hidden;
   border: 1px solid rgba(126, 151, 217, .16);
   border-radius: 10px;
+}
+
+.stock-limit__extra {
+  display: grid;
+  grid-template-columns: minmax(140px, .7fr) minmax(110px, .35fr) minmax(220px, 1fr);
+  align-items: center;
+  gap: 11px;
+  padding: 10px 11px;
+  border: 1px solid rgba(126, 151, 217, .16);
+  border-radius: 10px;
+  background: rgba(6, 13, 31, .34);
+}
+
+.stock-limit__extra > span {
+  color: #c6d0e5;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.stock-limit__extra > small,
+.stock-limit__metrics-note {
+  color: #7f8fb0;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.stock-limit__metrics-note {
+  margin: -3px 0 0;
 }
 
 .stock-limit__metrics > div {
@@ -1031,9 +1205,85 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-size: 13px;
 }
 
-.stock-instruction p {
-  min-height: 42px;
-  margin: 0;
+.product-instruction {
+  display: grid;
+  gap: 10px;
+}
+
+.product-instruction__content {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(83, 125, 255, .34);
+  border-radius: 13px;
+  background: linear-gradient(145deg, rgba(39, 75, 190, .12), rgba(8, 15, 34, .46));
+}
+
+.product-instruction__editor {
+  display: grid;
+  gap: 7px;
+}
+
+.product-instruction__editor > span {
+  color: #dce5f7;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.product-instruction__editor textarea {
+  min-height: 155px;
+  padding: 12px 13px;
+  border-radius: 11px;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.product-instruction__editor small {
+  justify-self: end;
+  color: #7183aa;
+  font-size: 9px;
+}
+
+.product-instruction__content--empty {
+  border-color: rgba(126, 151, 217, .22);
+  border-style: dashed;
+  background: rgba(8, 15, 34, .42);
+}
+
+.product-instruction__icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid rgba(83, 125, 255, .5);
+  border-radius: 10px;
+  color: #86a0ff;
+  background: rgba(39, 75, 190, .2);
+}
+
+.product-instruction__content--empty .product-instruction__icon {
+  border-color: rgba(225, 233, 255, .3);
+  color: #e5ebfa;
+  background: rgba(255, 255, 255, .025);
+}
+
+.product-instruction__icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.product-instruction__content > p {
+  min-height: 38px;
+  margin: 5px 0 0;
   color: #cbd5eb;
   font-size: 12px;
   line-height: 1.5;
@@ -1051,6 +1301,120 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   background: rgba(126, 151, 217, .055);
   font-size: 10px;
   line-height: 1.45;
+}
+
+.product-settings-savebar {
+  position: sticky;
+  z-index: 3;
+  bottom: -22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 15px;
+  padding: 12px 13px;
+  border: 1px solid rgba(126, 151, 217, .24);
+  border-radius: 15px;
+  background: rgba(10, 18, 39, .96);
+  box-shadow: 0 -12px 34px rgba(4, 8, 23, .22);
+  backdrop-filter: blur(12px);
+  transition: border-color .16s, box-shadow .16s;
+}
+
+.product-settings-savebar.is-dirty {
+  border-color: rgba(83, 125, 255, .58);
+  box-shadow: 0 -12px 36px rgba(4, 8, 23, .28), 0 0 0 1px rgba(75, 115, 255, .08) inset;
+}
+
+.product-settings-savebar__copy,
+.product-settings-savebar__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.product-settings-savebar__copy {
+  min-width: 0;
+}
+
+.product-settings-savebar__mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid rgba(126, 151, 217, .24);
+  border-radius: 10px;
+  color: #8fa2cf;
+  background: rgba(30, 43, 76, .58);
+}
+
+.is-dirty .product-settings-savebar__mark {
+  color: #86a0ff;
+  border-color: rgba(83, 125, 255, .45);
+  background: rgba(39, 75, 190, .16);
+}
+
+.product-settings-savebar__mark svg,
+.product-settings-save svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.product-settings-savebar__copy strong {
+  color: #e8edf9;
+  font-size: 12px;
+}
+
+.product-settings-savebar__copy p {
+  margin: 3px 0 0;
+  color: #7f8fb0;
+  font-size: 9px;
+}
+
+.product-settings-savebar__copy .product-settings-savebar__error {
+  color: #ffaaa8;
+}
+
+.product-settings-reset,
+.product-settings-save {
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.product-settings-reset {
+  border: 1px solid rgba(149, 164, 203, .24);
+  color: #aeb9d4;
+  background: rgba(27, 38, 67, .62);
+}
+
+.product-settings-save {
+  display: inline-flex;
+  min-width: 145px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid rgba(75, 115, 255, .78);
+  color: #fff;
+  background: linear-gradient(135deg, #1748dc, #4b73ff);
+  box-shadow: 0 9px 23px rgba(32, 77, 220, .22);
+}
+
+.product-settings-save__spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(255, 255, 255, .28);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: product-stock-spin .8s linear infinite;
 }
 
 .product-card-modal__footer {
@@ -1160,15 +1524,38 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   }
 
   .stock-limit__metrics {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
 
-  .stock-limit__metrics > div:nth-child(2) {
+  .stock-limit__metrics > div {
     border-right: 0;
+    border-bottom: 1px solid rgba(126, 151, 217, .14);
   }
 
-  .stock-limit__metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid rgba(126, 151, 217, .14);
+  .stock-limit__metrics > div:last-child {
+    border-bottom: 0;
+  }
+
+  .stock-limit__extra {
+    grid-template-columns: 1fr;
+  }
+
+  .product-instruction__content {
+    grid-template-columns: 1fr;
+  }
+
+  .product-settings-savebar,
+  .product-settings-savebar__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .product-settings-savebar__actions {
+    width: 100%;
+  }
+
+  .product-settings-savebar__actions button {
+    width: 100%;
   }
 
   .product-card-modal__footer {
