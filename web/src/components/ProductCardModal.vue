@@ -1,6 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
+import { normalizeEscapedLineBreaks } from '../utils/text.js'
+
 const props = defineProps({
   item: { type: Object, required: true },
   providerName: { type: String, required: true },
@@ -39,7 +41,7 @@ const limitHeadline = computed(() => {
 })
 const activationInstruction = computed(() => {
   if (!hasTransferredSalesLimit.value) return 'Инструкция пока не перенесена из CRM.'
-  return String(props.item.activation_instruction || '').trim() || 'Инструкция не указана.'
+  return normalizeEscapedLineBreaks(props.item.activation_instruction).trim() || 'Инструкция не указана.'
 })
 
 const detailFields = computed(() => [
