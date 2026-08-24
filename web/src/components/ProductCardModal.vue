@@ -15,9 +15,10 @@ const props = defineProps({
   ordersTotal: { type: Number, default: 0 },
   ordersLoading: { type: Boolean, default: false },
   ordersError: { type: String, default: '' },
+  ordersRefreshing: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh-stock'])
+const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders'])
 const openSection = ref('')
 const imageFailed = ref(false)
 const showProductImage = computed(() => Boolean(props.item.primary_image) && !imageFailed.value)
@@ -215,11 +216,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                     </p>
                   </div>
                   <div v-else class="product-orders">
-                    <div v-if="ordersLoading" class="product-orders__state" aria-live="polite" aria-busy="true">
+                    <div class="product-orders__toolbar">
+                      <div><strong>Заказы товара</strong><span>Обновление выполняется по магазину</span></div>
+                      <button type="button" :disabled="ordersLoading || ordersRefreshing" title="Получить свежие заказы магазина и обновить список этой карточки" @click="emit('refresh-orders')">
+                        <svg :class="{ 'is-spinning': ordersRefreshing }" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7" /><path d="M20 4v6h-6" /></svg>
+                        <span>{{ ordersRefreshing ? 'Обновляем' : 'Обновить' }}</span>
+                      </button>
+                    </div>
+                    <div v-if="ordersLoading && !orders.length" class="product-orders__state" aria-live="polite" aria-busy="true">
                       <span class="product-orders__spinner" aria-hidden="true"></span>
                       <div><strong>Загружаем заказы</strong><p>Читаем сохранённые позиции этой карточки.</p></div>
                     </div>
-                    <div v-else-if="ordersError" class="product-orders__state product-orders__state--error" role="alert">
+                    <div v-else-if="ordersError && !orders.length" class="product-orders__state product-orders__state--error" role="alert">
                       <div><strong>Не удалось загрузить заказы</strong><p>{{ ordersError }}</p></div>
                     </div>
                     <div v-else-if="!orders.length" class="product-orders__state product-orders__state--empty">
@@ -229,9 +237,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                     <template v-else>
                       <header class="product-orders__summary">
                         <strong>{{ orderCountLabel(ordersTotal) }}</strong>
-                        <span v-if="ordersTotal > orders.length">Показаны последние {{ orders.length }}</span>
+                        <span v-if="ordersRefreshing">Получаем свежие данные…</span>
+                        <span v-else-if="ordersTotal > orders.length">Показаны последние {{ orders.length }}</span>
                         <span v-else>Все найденные заказы</span>
                       </header>
+                      <p v-if="ordersError" class="product-orders__inline-error" role="alert">{{ ordersError }}</p>
                       <div class="product-orders__list">
                         <article v-for="order in orders" :key="`${order.external_order_id}-${order.external_item_id}`" class="product-order">
                           <div class="product-order__head">
@@ -620,6 +630,67 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   gap: 10px;
 }
 
+.product-orders__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 1px solid rgba(83, 229, 186, .2);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(83, 229, 186, .06), rgba(8, 15, 34, .42));
+}
+
+.product-orders__toolbar > div {
+  display: grid;
+  gap: 2px;
+}
+
+.product-orders__toolbar > div > strong {
+  color: #dfe8f9;
+  font-size: 12px;
+}
+
+.product-orders__toolbar > div > span {
+  color: #7f91b3;
+  font-size: 9px;
+}
+
+.product-orders__toolbar > button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid rgba(83, 229, 186, .32);
+  border-radius: 9px;
+  color: #72e7c5;
+  background: rgba(83, 229, 186, .08);
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.product-orders__toolbar > button:hover:not(:disabled) {
+  border-color: rgba(83, 229, 186, .62);
+  color: #b6f9e6;
+  background: rgba(83, 229, 186, .14);
+}
+
+.product-orders__toolbar > button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.product-orders__toolbar > button svg.is-spinning {
+  animation: product-stock-spin .8s linear infinite;
+}
+
 .product-orders__summary {
   display: flex;
   align-items: center;
@@ -775,6 +846,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   color: #7183aa;
   background: rgba(126, 151, 217, .045);
   font-size: 9px;
+  line-height: 1.4;
+}
+
+.product-orders__inline-error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 150, 155, .24);
+  border-radius: 9px;
+  color: #ffaaa8;
+  background: rgba(255, 150, 155, .055);
+  font-size: 10px;
   line-height: 1.4;
 }
 
@@ -1046,6 +1128,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   }
 
   .product-orders__summary,
+  .product-orders__toolbar,
   .product-order__head,
   .product-order__meta {
     align-items: flex-start;

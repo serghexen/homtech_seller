@@ -46,6 +46,7 @@ const selectedProductOrders = ref([])
 const selectedProductOrdersTotal = ref(0)
 const selectedProductOrdersLoading = ref(false)
 const selectedProductOrdersError = ref('')
+const selectedProductOrdersRefreshing = ref(false)
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 
@@ -93,6 +94,7 @@ function closeProductCard() {
   selectedProductOrdersTotal.value = 0
   selectedProductOrdersLoading.value = false
   selectedProductOrdersError.value = ''
+  selectedProductOrdersRefreshing.value = false
 }
 
 async function loadSelectedProductOrders() {
@@ -120,6 +122,37 @@ async function loadSelectedProductOrders() {
   } finally {
     if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
       selectedProductOrdersLoading.value = false
+    }
+  }
+}
+
+async function refreshSelectedProductOrders() {
+  // API Яндекса не фильтрует по SKU: обновляем инкрементальный снимок магазина и затем снова выбираем только этот товар.
+  const item = selectedCatalogItem.value
+  if (!item || selectedProductOrdersRefreshing.value) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedProductOrdersRefreshing.value = true
+  selectedProductOrdersError.value = ''
+  try {
+    const result = await apiRequest('/marketplaces/orders/sync', {
+      method: 'POST',
+      body: JSON.stringify({ connection_id: item.connection_id }),
+    })
+    const jobIds = result.items.map((job) => job.id)
+    if (!jobIds.length) throw new Error('Не удалось поставить обновление заказов в очередь')
+    const completedJobs = await waitForSyncJobs(jobIds)
+    const failedJob = completedJobs.find((job) => job.status === 'failed')
+    if (failedJob) throw new Error(failedJob.error || 'Маркетплейс не отдал свежие заказы')
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    await loadSelectedProductOrders()
+    await loadConnections()
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductOrdersError.value = requestError.message || 'Не удалось обновить заказы карточки'
+    }
+  } finally {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductOrdersRefreshing.value = false
     }
   }
 }
@@ -728,7 +761,9 @@ onMounted(async () => {
       :orders-total="selectedProductOrdersTotal"
       :orders-loading="selectedProductOrdersLoading"
       :orders-error="selectedProductOrdersError"
+      :orders-refreshing="selectedProductOrdersRefreshing"
       @refresh-stock="refreshSelectedProductStock"
+      @refresh-orders="refreshSelectedProductOrders"
       @close="closeProductCard"
     />
 
