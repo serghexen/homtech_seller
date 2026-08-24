@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import json
-import os
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from domains.local_auth import AuthenticatedUser
-from domains.marketplace_catalog_service import fetch_marketplace_catalog
-from domains.marketplace_orders_service import fetch_marketplace_orders, normalize_marketplace_order_status
+from domains.marketplace_orders_service import normalize_marketplace_order_status
 
 
 class MarketplaceCatalogItemOut(BaseModel):
@@ -56,22 +53,6 @@ class MarketplaceOrderListOut(BaseModel):
     total: int
     page: int
     page_size: int
-
-
-class MarketplaceSnapshotSyncIn(BaseModel):
-    connection_id: int | None = Field(default=None, gt=0)
-
-
-class MarketplaceSnapshotSyncConnectionOut(BaseModel):
-    connection_id: int
-    store_name: str
-    provider_code: str
-    synced_items: int = 0
-    error: str = ""
-
-
-class MarketplaceSnapshotSyncOut(BaseModel):
-    items: list[MarketplaceSnapshotSyncConnectionOut]
 
 
 def first_text(*values: Any) -> str:
@@ -202,7 +183,9 @@ def normalize_order_items(provider_code: str, payload: dict[str, Any]) -> list[d
                     ),
                     "delivery_type": first_text(payload.get("deliveryType"), payload.get("delivery", {}).get("type") if isinstance(payload.get("delivery"), dict) else ""),
                     "created_at": optional_datetime(payload.get("creationDate") or payload.get("createdAt")),
-                    "updated_at": optional_datetime(payload.get("updatedAt") or payload.get("statusUpdateDate")),
+                    "updated_at": optional_datetime(
+                        payload.get("updateDate") or payload.get("updatedAt") or payload.get("statusUpdateDate")
+                    ),
                 }
             )
         return result
@@ -219,168 +202,12 @@ def mount_marketplace_read_routes(
 ) -> None:
     """Подключает только чтение и сохранение локальных снимков без операций в кабинетах маркетплейсов."""
 
-    def credentials_secret() -> str:
-        # Проверяет ключ до расшифровки токена и не позволяет запросу использовать частично настроенное окружение.
-        value = str(os.getenv("MARKETPLACE_CREDENTIALS_SECRET", "")).strip()
-        if len(value) < 32:
-            raise HTTPException(status_code=503, detail="Не настроено защищённое хранение токенов маркетплейсов")
-        return value
-
     def workspace_for_user(connection, user: AuthenticatedUser):
         # Получает рабочую область сессии на сервере, не доверяя идентификатору организации из браузера.
         seller_user = user_with_workspace(connection, user.user_id)
         if not seller_user:
             raise HTTPException(status_code=401, detail="Рабочая область недоступна")
         return seller_user
-
-    def active_connections(connection, workspace_id: int, connection_id: int | None = None) -> list[tuple[Any, ...]]:
-        # Расшифровывает реквизиты только на момент исходящего read-only запроса и только для своего workspace.
-        where_connection = "AND id=%s" if connection_id else ""
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT id, provider_code, display_name, client_id, business_id, campaign_id,
-                       pgp_sym_decrypt(token_ciphertext, %s)
-                FROM seller.marketplace_connections
-                WHERE workspace_id=%s AND status='active' {where_connection}
-                ORDER BY created_at, id
-                """,
-                [credentials_secret(), workspace_id, *([connection_id] if connection_id else [])],
-            )
-            return cursor.fetchall()
-
-    def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
-        # Загружает карточки выбранного магазина, сохраняя снимок без изменения товарных данных в маркетплейсе.
-        connection_id, provider_code, _name, client_id, business_id, _campaign_id, token = connection_row
-        rows = fetch_marketplace_catalog(
-            provider_code=str(provider_code),
-            token=str(token),
-            client_id=str(client_id or ""),
-            business_id=int(business_id) if str(business_id or "").isdigit() else None,
-        )
-        normalized_rows = [(normalize_catalog_item(str(provider_code), item), item) for item in rows if isinstance(item, dict)]
-        normalized_rows = [(item, payload) for item, payload in normalized_rows if item]
-        with connection.cursor() as cursor:
-            for item, raw_payload in normalized_rows:
-                cursor.execute(
-                    """
-                    INSERT INTO seller.catalog_items(
-                        connection_id, external_product_id, offer_id, sku, title, raw_payload, synced_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, now())
-                    ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
-                        offer_id=EXCLUDED.offer_id, sku=EXCLUDED.sku, title=EXCLUDED.title,
-                        raw_payload=EXCLUDED.raw_payload, synced_at=now()
-                    """,
-                    (
-                        connection_id,
-                        item["external_product_id"],
-                        item["offer_id"],
-                        item["sku"],
-                        item["title"],
-                        json.dumps(raw_payload, ensure_ascii=False),
-                    ),
-                )
-        return len(normalized_rows)
-
-    def sync_orders_connection(connection, connection_row: tuple[Any, ...]) -> int:
-        # Загружает только свежий read-only снимок заказов, не подтверждая доставку и не выдавая ключи.
-        connection_id, provider_code, _name, client_id, business_id, campaign_id, token = connection_row
-        rows = fetch_marketplace_orders(
-            provider_code=str(provider_code),
-            token=str(token),
-            client_id=str(client_id or ""),
-            business_id=int(business_id) if str(business_id or "").isdigit() else None,
-            campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
-        )
-        normalized_rows = [
-            (item, raw_payload)
-            for raw_payload in rows if isinstance(raw_payload, dict)
-            for item in normalize_order_items(str(provider_code), raw_payload)
-        ]
-        with connection.cursor() as cursor:
-            for item, raw_payload in normalized_rows:
-                cursor.execute(
-                    """
-                    INSERT INTO seller.order_items(
-                        connection_id, external_order_id, external_item_id, offer_id, sku, title, quantity,
-                        provider_status, provider_substatus, normalized_status, delivery_type,
-                        created_at, updated_at, raw_payload, synced_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
-                    ON CONFLICT (connection_id, external_order_id, external_item_id) DO UPDATE SET
-                        offer_id=EXCLUDED.offer_id, sku=EXCLUDED.sku, title=EXCLUDED.title,
-                        quantity=EXCLUDED.quantity, provider_status=EXCLUDED.provider_status,
-                        provider_substatus=EXCLUDED.provider_substatus, normalized_status=EXCLUDED.normalized_status,
-                        delivery_type=EXCLUDED.delivery_type, created_at=COALESCE(EXCLUDED.created_at, seller.order_items.created_at),
-                        updated_at=COALESCE(EXCLUDED.updated_at, seller.order_items.updated_at),
-                        raw_payload=EXCLUDED.raw_payload, synced_at=now()
-                    """,
-                    (
-                        connection_id,
-                        item["external_order_id"],
-                        item["external_item_id"],
-                        item["offer_id"],
-                        item["sku"],
-                        item["title"],
-                        item["quantity"],
-                        item["provider_status"],
-                        item["provider_substatus"],
-                        item["normalized_status"],
-                        item["delivery_type"],
-                        item["created_at"],
-                        item["updated_at"],
-                        json.dumps(raw_payload, ensure_ascii=False),
-                    ),
-                )
-        return len(normalized_rows)
-
-    def save_sync_error(connection, connection_id: int, message: str) -> None:
-        # Сохраняет короткую диагностику синхронизации, не меняя активный доступ и не раскрывая токен.
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "UPDATE seller.marketplace_connections SET last_error=%s, updated_at=now() WHERE id=%s",
-                (message[:1000], connection_id),
-            )
-
-    def clear_sync_error(connection, connection_id: int) -> None:
-        # Очищает прошлую ошибку только после полностью успешного обновления снимка выбранного магазина.
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "UPDATE seller.marketplace_connections SET last_error='', updated_at=now() WHERE id=%s",
-                (connection_id,),
-            )
-
-    def sync_snapshot(kind: str, payload: MarketplaceSnapshotSyncIn, user: AuthenticatedUser) -> MarketplaceSnapshotSyncOut:
-        # Обрабатывает каждый магазин отдельно, чтобы сбой одного кабинета не скрывал обновления остальных.
-        with psycopg.connect(database_url()) as connection:
-            seller_user = workspace_for_user(connection, user)
-            connection_rows = active_connections(connection, seller_user.workspace_id, payload.connection_id)
-            if not connection_rows:
-                raise HTTPException(status_code=404, detail="Активный подключенный магазин не найден")
-            result: list[MarketplaceSnapshotSyncConnectionOut] = []
-            for row in connection_rows:
-                connection_id, provider_code, store_name = int(row[0]), str(row[1]), str(row[2])
-                try:
-                    synced_items = sync_catalog_connection(connection, row) if kind == "catalog" else sync_orders_connection(connection, row)
-                except HTTPException as exc:
-                    save_sync_error(connection, connection_id, str(exc.detail))
-                    result.append(
-                        MarketplaceSnapshotSyncConnectionOut(
-                            connection_id=connection_id, provider_code=provider_code, store_name=store_name, error=str(exc.detail),
-                        )
-                    )
-                    continue
-                clear_sync_error(connection, connection_id)
-                result.append(
-                    MarketplaceSnapshotSyncConnectionOut(
-                        connection_id=connection_id, provider_code=provider_code, store_name=store_name, synced_items=synced_items,
-                    )
-                )
-        return MarketplaceSnapshotSyncOut(items=result)
-
-    @app.post("/marketplaces/catalog/sync", response_model=MarketplaceSnapshotSyncOut)
-    def sync_catalog(payload: MarketplaceSnapshotSyncIn, user: AuthenticatedUser = Depends(current_user)) -> MarketplaceSnapshotSyncOut:
-        # Обновляет локальный снимок каталога и намеренно не содержит методов изменения карточек маркетплейса.
-        return sync_snapshot("catalog", payload, user)
 
     @app.get("/marketplaces/catalog", response_model=MarketplaceCatalogListOut)
     def list_catalog(
@@ -430,11 +257,6 @@ def mount_marketplace_read_routes(
             ) for row in rows],
             total=total, page=page, page_size=page_size,
         )
-
-    @app.post("/marketplaces/orders/sync", response_model=MarketplaceSnapshotSyncOut)
-    def sync_orders(payload: MarketplaceSnapshotSyncIn, user: AuthenticatedUser = Depends(current_user)) -> MarketplaceSnapshotSyncOut:
-        # Обновляет только локальный снимок свежих заказов без подтверждения доставки или отправки ключей.
-        return sync_snapshot("orders", payload, user)
 
     @app.get("/marketplaces/orders", response_model=MarketplaceOrderListOut)
     def list_orders(

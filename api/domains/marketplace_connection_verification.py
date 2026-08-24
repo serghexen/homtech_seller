@@ -4,6 +4,7 @@ import json
 import os
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -61,13 +62,30 @@ def verify_ozon_connection(*, client_id: str, token: str) -> None:
 
 def discover_yandex_market_stores(*, token: str) -> list[dict[str, Any]]:
     # Находит доступные кабинеты и магазины по API-Key, чтобы пользователь не вводил технические ID вручную.
-    request = urllib.request.Request(
-        f"{YANDEX_MARKET_BASE_URL}/v2/campaigns",
-        method="GET",
-        headers={"Api-Key": token, "Content-Type": "application/json"},
-    )
-    payload = _read_json(request)
-    rows = payload.get("campaigns") if isinstance(payload.get("campaigns"), list) else []
+    rows: list[Any] = []
+    page_token = ""
+    for _page in range(1000):
+        query: dict[str, int | str] = {"limit": 100}
+        if page_token:
+            query["pageToken"] = page_token
+        request = urllib.request.Request(
+            f"{YANDEX_MARKET_BASE_URL}/v2/campaigns?{urllib.parse.urlencode(query)}",
+            method="GET",
+            headers={"Api-Key": token, "Content-Type": "application/json"},
+        )
+        payload = _read_json(request)
+        campaigns = payload.get("campaigns") if isinstance(payload.get("campaigns"), list) else []
+        rows.extend(campaigns)
+        paging = payload.get("paging") if isinstance(payload.get("paging"), dict) else {}
+        next_page_token = str(paging.get("nextPageToken") or "")
+        if not next_page_token:
+            break
+        if next_page_token == page_token:
+            raise HTTPException(502, "Яндекс Маркет не продвинул постраничное чтение магазинов")
+        page_token = next_page_token
+    else:
+        raise HTTPException(502, "Список магазинов Яндекс Маркета превысил безопасный лимит страниц")
+
     stores: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
     for row in rows:

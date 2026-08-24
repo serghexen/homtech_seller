@@ -54,6 +54,7 @@ class MarketplaceReadApiTests(unittest.TestCase):
                 "orderId": 59817480451,
                 "status": "PROCESSING",
                 "creationDate": "2026-08-02T16:25:00Z",
+                "updateDate": "2026-08-02T17:26:30+03:00",
                 "items": [{"id": 2, "offerId": "MRKT-14UDFN97", "offerName": "App Store 2 USD", "count": 1}],
             },
         )
@@ -61,6 +62,7 @@ class MarketplaceReadApiTests(unittest.TestCase):
         self.assertEqual(items[0]["external_order_id"], "59817480451")
         self.assertEqual(items[0]["status"] if "status" in items[0] else items[0]["normalized_status"], "processing")
         self.assertEqual(items[0]["sku"], "MRKT-14UDFN97")
+        self.assertEqual(items[0]["updated_at"].isoformat(), "2026-08-02T17:26:30+03:00")
 
 
 if __name__ == "__main__":

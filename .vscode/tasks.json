@@ -18,6 +18,15 @@
       "problemMatcher": []
     },
     {
+      "label": "Seller: запустить worker локально",
+      "type": "shell",
+      "command": "set -a && . ../.env.dev && set +a && .venv/bin/python worker.py",
+      "options": {
+        "cwd": "${workspaceFolder}/api"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "Seller: запустить web локально",
       "type": "shell",
       "command": "npm run dev",

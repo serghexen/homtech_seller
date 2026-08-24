@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -75,9 +76,11 @@ def _fetch_yandex_catalog(*, business_id: int, token: str) -> list[dict[str, Any
     rows: list[dict[str, Any]] = []
     page_token = ""
     for _page in range(1000):
-        suffix = f"?limit=200{'&pageToken=' + page_token if page_token else ''}"
+        query: dict[str, int | str] = {"limit": 100}
+        if page_token:
+            query["pageToken"] = page_token
         payload = _request_json(
-            f"{YANDEX_MARKET_BASE_URL}/v2/businesses/{business_id}/offer-mappings{suffix}",
+            f"{YANDEX_MARKET_BASE_URL}/v2/businesses/{business_id}/offer-mappings?{urllib.parse.urlencode(query)}",
             method="POST", headers={"Api-Key": token}, payload={"archived": False},
         )
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}

@@ -1,0 +1,281 @@
+"""Отдельный worker долговечной очереди синхронизации Seller."""
+
+from __future__ import annotations
+
+import os
+import re
+import signal
+import time
+from dataclasses import dataclass
+from datetime import timedelta
+
+import psycopg
+from fastapi import HTTPException
+
+from domains.marketplace_sync_service import execute_sync_job, record_connection_error
+
+
+SYNC_LOCK_NAMESPACE = 20_260_824
+
+
+@dataclass(frozen=True)
+class ClaimedJob:
+    id: int
+    connection_id: int
+    sync_kind: str
+    attempt_count: int
+    max_attempts: int
+
+
+def database_url() -> str:
+    value = str(os.getenv("DATABASE_URL", "")).strip()
+    if not value:
+        raise RuntimeError("DATABASE_URL is required")
+    return value
+
+
+def poll_seconds() -> float:
+    return max(0.2, min(float(os.getenv("SYNC_WORKER_POLL_SECONDS", "2")), 30.0))
+
+
+def stale_seconds() -> int:
+    return max(60, min(int(os.getenv("SYNC_JOB_STALE_SECONDS", "300")), 86_400))
+
+
+def advisory_lock_key(connection_id: int) -> int:
+    # PostgreSQL-вариант advisory lock принимает signed int32 во второй части ключа.
+    return int(connection_id) % 2_147_483_647
+
+
+def retry_delay_seconds(attempt_count: int) -> int:
+    # Короткий exponential backoff ограничивает нагрузку и не оставляет пользователя ждать часами.
+    return min(15 * (2 ** max(0, attempt_count - 1)), 300)
+
+
+def is_transient_sync_error(exc: Exception) -> bool:
+    # Повторяем сетевые/серверные сбои, но не ошибки доступа и отключённые магазины.
+    if isinstance(exc, HTTPException):
+        detail = str(exc.detail or "")
+        upstream_status = re.search(r"\bHTTP\s+(\d{3})\b", detail)
+        if upstream_status:
+            status_code = int(upstream_status.group(1))
+            return status_code == 429 or status_code >= 500
+        return int(exc.status_code) in {429, 502, 503, 504}
+    return isinstance(exc, (psycopg.Error, TimeoutError, ConnectionError, OSError))
+
+
+def error_text(exc: Exception) -> str:
+    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+    return str(detail or exc.__class__.__name__)[:1000]
+
+
+def try_connection_lock(connection, connection_id: int) -> bool:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)",
+            (SYNC_LOCK_NAMESPACE, advisory_lock_key(connection_id)),
+        )
+        return bool(cursor.fetchone()[0])
+
+
+def release_connection_lock(connection, connection_id: int) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_unlock(%s, %s)",
+            (SYNC_LOCK_NAMESPACE, advisory_lock_key(connection_id)),
+        )
+
+
+def recover_stale_jobs(connection) -> int:
+    # Возвращает задания после падения worker-а только если его session lock уже освобождён.
+    recovered = 0
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, connection_id, attempt_count, max_attempts
+            FROM seller.marketplace_sync_jobs
+            WHERE status='running'
+              AND heartbeat_at < now() - (%s * interval '1 second')
+            ORDER BY heartbeat_at, id
+            LIMIT 20
+            """,
+            (stale_seconds(),),
+        )
+        rows = cursor.fetchall()
+    for job_id, connection_id, attempt_count, max_attempts in rows:
+        if not try_connection_lock(connection, int(connection_id)):
+            continue
+        try:
+            with connection.cursor() as cursor:
+                if int(attempt_count) < int(max_attempts):
+                    cursor.execute(
+                        """
+                        UPDATE seller.marketplace_sync_jobs
+                        SET status='queued', available_at=now(), started_at=NULL, heartbeat_at=NULL,
+                            error='Worker был перезапущен; задание поставлено повторно', updated_at=now()
+                        WHERE id=%s AND status='running'
+                        """,
+                        (job_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE seller.marketplace_sync_jobs
+                        SET status='failed', finished_at=now(), heartbeat_at=NULL,
+                            error='Worker был перезапущен; исчерпаны попытки', updated_at=now()
+                        WHERE id=%s AND status='running'
+                        """,
+                        (job_id,),
+                    )
+                recovered += cursor.rowcount
+            connection.commit()
+        finally:
+            release_connection_lock(connection, int(connection_id))
+            connection.commit()
+    return recovered
+
+
+def claim_next_job(connection) -> ClaimedJob | None:
+    # SKIP LOCKED позволяет нескольким worker-ам брать разные магазины без общей блокировки очереди.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, connection_id, sync_kind, attempt_count, max_attempts
+            FROM seller.marketplace_sync_jobs
+            WHERE status='queued' AND available_at <= now()
+            ORDER BY available_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+    if not row:
+        connection.commit()
+        return None
+    job_id, connection_id, sync_kind, attempt_count, max_attempts = row
+    if not try_connection_lock(connection, int(connection_id)):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE seller.marketplace_sync_jobs
+                SET available_at=now() + interval '2 seconds', updated_at=now()
+                WHERE id=%s AND status='queued'
+                """,
+                (job_id,),
+            )
+        connection.commit()
+        return None
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE seller.marketplace_sync_jobs
+            SET status='running', attempt_count=attempt_count + 1,
+                started_at=now(), heartbeat_at=now(), finished_at=NULL, error='', updated_at=now()
+            WHERE id=%s AND status='queued'
+            RETURNING attempt_count
+            """,
+            (job_id,),
+        )
+        claimed = cursor.fetchone()
+    connection.commit()
+    if not claimed:
+        release_connection_lock(connection, int(connection_id))
+        connection.commit()
+        return None
+    return ClaimedJob(
+        id=int(job_id),
+        connection_id=int(connection_id),
+        sync_kind=str(sync_kind),
+        attempt_count=int(claimed[0]),
+        max_attempts=int(max_attempts),
+    )
+
+
+def complete_job(connection, job: ClaimedJob, synced_items: int) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE seller.marketplace_sync_jobs
+            SET status='succeeded', synced_items=%s, error='', finished_at=now(),
+                heartbeat_at=NULL, updated_at=now()
+            WHERE id=%s AND status='running'
+            """,
+            (synced_items, job.id),
+        )
+    connection.commit()
+
+
+def fail_job(connection, job: ClaimedJob, exc: Exception) -> str:
+    message = error_text(exc)
+    should_retry = is_transient_sync_error(exc) and job.attempt_count < job.max_attempts
+    with connection.cursor() as cursor:
+        if should_retry:
+            cursor.execute(
+                """
+                UPDATE seller.marketplace_sync_jobs
+                SET status='queued', available_at=now() + (%s * interval '1 second'),
+                    started_at=NULL, heartbeat_at=NULL, error=%s, updated_at=now()
+                WHERE id=%s AND status='running'
+                """,
+                (retry_delay_seconds(job.attempt_count), message, job.id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE seller.marketplace_sync_jobs
+                SET status='failed', error=%s, finished_at=now(), heartbeat_at=NULL, updated_at=now()
+                WHERE id=%s AND status='running'
+                """,
+                (message, job.id),
+            )
+    connection.commit()
+    return "queued" if should_retry else "failed"
+
+
+def run_worker() -> int:
+    stopping = False
+
+    def stop(_signal, _frame) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    print("Seller sync worker started", flush=True)
+    while not stopping:
+        try:
+            with psycopg.connect(database_url()) as lock_connection:
+                recovered = recover_stale_jobs(lock_connection)
+                if recovered:
+                    print(f"Recovered stale sync jobs: {recovered}", flush=True)
+                job = claim_next_job(lock_connection)
+                if not job:
+                    time.sleep(poll_seconds())
+                    continue
+                try:
+                    synced_items = execute_sync_job(
+                        database_url, psycopg, connection_id=job.connection_id, sync_kind=job.sync_kind,
+                    )
+                except Exception as exc:
+                    message = error_text(exc)
+                    try:
+                        record_connection_error(database_url, psycopg, job.connection_id, message)
+                    except Exception as record_exc:
+                        print(f"Could not record connection error for job {job.id}: {record_exc}", flush=True)
+                    state = fail_job(lock_connection, job, exc)
+                    print(f"Sync job {job.id} {state}: {message}", flush=True)
+                else:
+                    complete_job(lock_connection, job, synced_items)
+                    print(f"Sync job {job.id} succeeded: {synced_items} items", flush=True)
+                finally:
+                    release_connection_lock(lock_connection, job.connection_id)
+                    lock_connection.commit()
+        except Exception as exc:
+            print(f"Worker loop error: {exc}", flush=True)
+            time.sleep(poll_seconds())
+    print("Seller sync worker stopped", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_worker())

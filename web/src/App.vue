@@ -84,6 +84,23 @@ function queryString(params) {
   return search.toString()
 }
 
+function wait(milliseconds) {
+  // Неблокирующая пауза нужна только для короткого polling статуса фоновых заданий.
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+}
+
+async function waitForSyncJobs(jobIds) {
+  // Ждёт завершения долговечных заданий, не удерживая исходный HTTP-запрос открытым.
+  const deadline = Date.now() + 15 * 60 * 1000
+  while (Date.now() < deadline) {
+    const result = await apiRequest(`/marketplaces/sync-jobs?job_ids=${encodeURIComponent(jobIds.join(','))}`)
+    if (result.items.length !== jobIds.length) throw new Error('Не удалось получить состояние всех заданий')
+    if (result.items.every((item) => item.status === 'succeeded' || item.status === 'failed')) return result.items
+    await wait(1000)
+  }
+  throw new Error('Синхронизация продолжается в фоне. Обновите страницу немного позже.')
+}
+
 async function loadConnections() {
   // Загружает только магазины рабочей области текущей сессии, а не общий список системы.
   if (!user.value) return
@@ -153,7 +170,7 @@ async function selectConnection(connectionId) {
 }
 
 async function syncCurrentSnapshot() {
-  // Обновляет только выбранный магазин или все активные и затем перечитывает локальный снимок из БД.
+  // Ставит выбранные магазины в очередь, ждёт статусы и затем перечитывает локальный снимок.
   const kind = activeSection.value === 'catalog' ? 'catalog' : 'orders'
   isSyncing.value = true
   error.value = ''
@@ -162,10 +179,14 @@ async function syncCurrentSnapshot() {
       method: 'POST',
       body: JSON.stringify({ connection_id: selectedConnectionId.value }),
     })
-    const errors = result.items.filter((item) => item.error)
-    if (errors.length) error.value = errors.map((item) => `${item.store_name}: ${item.error}`).join(' ')
+    const jobIds = result.items.map((item) => item.id)
+    if (!jobIds.length) throw new Error('Не удалось поставить синхронизацию в очередь')
+    const completedJobs = await waitForSyncJobs(jobIds)
+    const failedJobs = completedJobs.filter((item) => item.status === 'failed')
+    if (failedJobs.length) error.value = failedJobs.map((item) => `${item.store_name}: ${item.error}`).join(' ')
     if (kind === 'catalog') await loadCatalog()
     else await loadOrders()
+    await loadConnections()
   } catch (requestError) {
     error.value = requestError.message || 'Не удалось обновить снимок'
   } finally {

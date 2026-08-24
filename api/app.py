@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from domains.local_auth import AuthenticatedUser, create_access_token, decode_access_token, hash_password, normalize_email, verify_password
 from domains.marketplace_connections_api import mount_marketplace_connection_routes
 from domains.marketplace_read_api import mount_marketplace_read_routes
+from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 
 
 app = FastAPI(title="HomTech Seller API", version="0.1.0")
@@ -262,6 +263,15 @@ mount_marketplace_connection_routes(
 
 # Подключает снимки каталога и заказов после авторизации, сохраняя их внутри отдельного Seller workspace.
 mount_marketplace_read_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+# HTTP только ставит синхронизацию в PostgreSQL-очередь; внешние API вызывает отдельный worker.
+mount_marketplace_sync_job_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

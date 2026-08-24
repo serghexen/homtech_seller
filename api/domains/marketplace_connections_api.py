@@ -49,6 +49,7 @@ class MarketplaceConnectionOut(BaseModel):
     token_masked: str
     status: str
     last_checked_at: datetime | None = None
+    last_successful_sync_at: datetime | None = None
     last_error: str = ""
     created_at: datetime
 
@@ -93,7 +94,8 @@ def mount_marketplace_connection_routes(
             status=str(row[7]),
             last_checked_at=row[8],
             last_error=str(row[9] or ""),
-            created_at=row[10],
+            last_successful_sync_at=row[10],
+            created_at=row[11],
         )
 
     def workspace_for_user(connection, user: AuthenticatedUser):
@@ -112,7 +114,8 @@ def mount_marketplace_connection_routes(
                 cursor.execute(
                     """
                     SELECT id, provider_code, display_name, client_id, business_id, campaign_id,
-                           token_suffix, status, last_checked_at, last_error, created_at
+                           token_suffix, status, last_checked_at, last_error,
+                           last_successful_sync_at, created_at
                     FROM seller.marketplace_connections
                     WHERE workspace_id=%s
                     ORDER BY created_at DESC, id DESC
@@ -192,7 +195,8 @@ def mount_marketplace_connection_routes(
                         last_error='',
                         updated_at=now()
                     RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
-                              token_suffix, status, last_checked_at, last_error, created_at
+                              token_suffix, status, last_checked_at, last_error,
+                              last_successful_sync_at, created_at
                     """,
                     (
                         seller_user.workspace_id,
@@ -225,7 +229,8 @@ def mount_marketplace_connection_routes(
                     SET status='disabled', updated_at=now()
                     WHERE id=%s AND workspace_id=%s
                     RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
-                              token_suffix, status, last_checked_at, last_error, created_at
+                              token_suffix, status, last_checked_at, last_error,
+                              last_successful_sync_at, created_at
                     """,
                     (connection_id, seller_user.workspace_id),
                 )
