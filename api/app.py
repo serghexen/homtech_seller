@@ -15,7 +15,7 @@ from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.20")
+app = FastAPI(title="HomTech Seller API", version="0.0.21")
 
 
 def cors_origins() -> list[str]:

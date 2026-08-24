@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from domains.marketplace_orders_service import (
+    MarketplacePaginationError,
     _fetch_ozon_orders,
     _fetch_yandex_market_orders,
     fetch_marketplace_orders,
@@ -63,7 +64,7 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
 
     @patch("domains.marketplace_orders_service._request_json", return_value={"result": {"orders": [], "paging": {}}})
     def test_yandex_first_sync_backfills_thirty_calendar_days(self, request_json) -> None:
-        # Первый запуск явно читает историю, а не только заказы текущего дня.
+        # Первый запуск читает историю посуточно, чтобы большой магазин не упирался в число страниц за месяц.
         _fetch_yandex_market_orders(
             business_id=10,
             campaign_id=20,
@@ -71,8 +72,11 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
             synced_before=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
         )
 
-        dates = request_json.call_args.kwargs["payload"]["dates"]
-        self.assertEqual(dates, {"creationDateFrom": "2026-07-26", "creationDateTo": "2026-08-25"})
+        self.assertEqual(request_json.call_count, 30)
+        first_dates = request_json.call_args_list[0].kwargs["payload"]["dates"]
+        last_dates = request_json.call_args_list[-1].kwargs["payload"]["dates"]
+        self.assertEqual(first_dates, {"creationDateFrom": "2026-07-26", "creationDateTo": "2026-07-27"})
+        self.assertEqual(last_dates, {"creationDateFrom": "2026-08-24", "creationDateTo": "2026-08-25"})
 
     @patch("domains.marketplace_orders_service._request_json", return_value={"result": {"orders": [], "paging": {}}})
     def test_yandex_incremental_sync_uses_update_watermark_and_splits_downtime(self, request_json) -> None:
@@ -85,12 +89,54 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
             synced_before=datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
         )
 
-        self.assertEqual(request_json.call_count, 2)
+        self.assertEqual(request_json.call_count, 46)
         first_dates = request_json.call_args_list[0].kwargs["payload"]["dates"]
         second_dates = request_json.call_args_list[1].kwargs["payload"]["dates"]
+        last_dates = request_json.call_args_list[-1].kwargs["payload"]["dates"]
         self.assertEqual(first_dates["updateDateFrom"], "2026-07-01T11:55:00Z")
         self.assertEqual(first_dates["updateDateTo"], second_dates["updateDateFrom"])
-        self.assertEqual(second_dates["updateDateTo"], "2026-08-15T12:00:00Z")
+        self.assertEqual(last_dates["updateDateTo"], "2026-08-15T12:00:00Z")
+
+    @patch("domains.marketplace_orders_service._request_json")
+    def test_yandex_pagination_continues_beyond_one_hundred_pages(self, request_json) -> None:
+        # nextPageToken является единственным признаком конца выдачи; внутренний предел не должен обрезать магазин.
+        request_json.side_effect = [
+            {
+                "result": {
+                    "orders": [{"campaignId": 20, "orderId": str(page_number)}],
+                    "paging": {"nextPageToken": f"page-{page_number + 1}"} if page_number < 100 else {},
+                }
+            }
+            for page_number in range(101)
+        ]
+
+        result = _fetch_yandex_market_orders(
+            business_id=10,
+            campaign_id=20,
+            token="secret",
+            synced_after=datetime(2026, 8, 24, 0, 5, tzinfo=timezone.utc),
+            synced_before=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(request_json.call_count, 101)
+        self.assertEqual(len(result), 101)
+        self.assertIn("pageToken=page-100", request_json.call_args.args[0])
+
+    @patch("domains.marketplace_orders_service._request_json")
+    def test_yandex_pagination_rejects_repeated_token(self, request_json) -> None:
+        request_json.side_effect = [
+            {"result": {"orders": [], "paging": {"nextPageToken": "same-page"}}},
+            {"result": {"orders": [], "paging": {"nextPageToken": "same-page"}}},
+        ]
+
+        with self.assertRaisesRegex(MarketplacePaginationError, "зациклил"):
+            _fetch_yandex_market_orders(
+                business_id=10,
+                campaign_id=20,
+                token="secret",
+                synced_after=datetime(2026, 8, 24, 0, 5, tzinfo=timezone.utc),
+                synced_before=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+            )
 
     @patch("domains.marketplace_orders_service._fetch_ozon_fbo_orders", return_value=[])
     @patch("domains.marketplace_orders_service._fetch_ozon_digital_orders", return_value=[])

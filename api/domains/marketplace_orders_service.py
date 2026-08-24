@@ -15,6 +15,11 @@ from .marketplace_connection_verification import OZON_SELLER_BASE_URL, YANDEX_MA
 ORDER_INITIAL_BACKFILL_DAYS = 30
 ORDER_SYNC_OVERLAP = timedelta(minutes=5)
 ORDER_SYNC_CHUNK = timedelta(days=30)
+YANDEX_ORDER_SYNC_CHUNK = timedelta(days=1)
+
+
+class MarketplacePaginationError(RuntimeError):
+    """Маркетплейс вернул некорректную последовательность токенов страниц."""
 
 
 def _as_utc(value: datetime | None, *, default: datetime) -> datetime:
@@ -29,12 +34,14 @@ def _utc_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _split_period(period_from: datetime, period_to: datetime) -> list[tuple[datetime, datetime]]:
-    # Делит длинный простой на допустимые 30-дневные запросы без разрыва между интервалами.
+def _split_period(
+    period_from: datetime, period_to: datetime, *, chunk: timedelta = ORDER_SYNC_CHUNK,
+) -> list[tuple[datetime, datetime]]:
+    # Делит длинный простой на ограниченные запросы без разрыва между интервалами.
     periods: list[tuple[datetime, datetime]] = []
     cursor = period_from
     while cursor < period_to:
-        next_cursor = min(cursor + ORDER_SYNC_CHUNK, period_to)
+        next_cursor = min(cursor + chunk, period_to)
         periods.append((cursor, next_cursor))
         cursor = next_cursor
     return periods
@@ -193,24 +200,31 @@ def _fetch_yandex_market_orders(
     period_to = _as_utc(synced_before, default=datetime.now(timezone.utc))
     if synced_after is None:
         creation_to = period_to.date() + timedelta(days=1)
-        date_filters = [{
-            "creationDateFrom": (creation_to - timedelta(days=ORDER_INITIAL_BACKFILL_DAYS)).isoformat(),
-            "creationDateTo": creation_to.isoformat(),
-        }]
+        creation_from = creation_to - timedelta(days=ORDER_INITIAL_BACKFILL_DAYS)
+        date_filters = [
+            {"creationDateFrom": chunk_from.date().isoformat(), "creationDateTo": chunk_to.date().isoformat()}
+            for chunk_from, chunk_to in _split_period(
+                datetime.combine(creation_from, datetime.min.time(), tzinfo=timezone.utc),
+                datetime.combine(creation_to, datetime.min.time(), tzinfo=timezone.utc),
+                chunk=YANDEX_ORDER_SYNC_CHUNK,
+            )
+        ]
     else:
         update_from = _as_utc(synced_after, default=period_to) - ORDER_SYNC_OVERLAP
         if update_from >= period_to:
             update_from = period_to - ORDER_SYNC_OVERLAP
         date_filters = [
             {"updateDateFrom": _utc_text(chunk_from), "updateDateTo": _utc_text(chunk_to)}
-            for chunk_from, chunk_to in _split_period(update_from, period_to)
+            for chunk_from, chunk_to in _split_period(
+                update_from, period_to, chunk=YANDEX_ORDER_SYNC_CHUNK,
+            )
         ]
 
     rows_by_order: dict[str, dict[str, Any]] = {}
-    max_pages = 100
     for dates in date_filters:
         page_token = ""
-        for page_number in range(1, max_pages + 1):
+        seen_page_tokens: set[str] = set()
+        while True:
             query = {"limit": "50"}
             if page_token:
                 query["pageToken"] = page_token
@@ -231,10 +245,9 @@ def _fetch_yandex_market_orders(
             next_page_token = str(paging.get("nextPageToken") or "").strip()
             if not next_page_token:
                 break
-            if next_page_token == page_token:
-                raise HTTPException(502, "Яндекс Маркет не продвинул постраничное чтение заказов")
-            if page_number == max_pages:
-                raise HTTPException(502, "Список заказов Яндекс Маркета превысил безопасный лимит страниц")
+            if next_page_token == page_token or next_page_token in seen_page_tokens:
+                raise MarketplacePaginationError("Яндекс Маркет зациклил постраничное чтение заказов")
+            seen_page_tokens.add(next_page_token)
             page_token = next_page_token
     return list(rows_by_order.values())
 

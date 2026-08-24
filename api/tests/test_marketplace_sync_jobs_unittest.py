@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from fastapi import HTTPException
 
+from domains.marketplace_orders_service import MarketplacePaginationError
 from domains.marketplace_sync_jobs_api import parse_job_ids
 from domains.marketplace_sync_service import execute_sync_job, sync_catalog_connection
 from worker import advisory_lock_key, is_transient_sync_error, retry_delay_seconds
@@ -73,6 +74,7 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
         self.assertFalse(is_transient_sync_error(HTTPException(status_code=502, detail="Маркетплейс: HTTP 400")))
         self.assertFalse(is_transient_sync_error(HTTPException(status_code=409, detail="disabled")))
         self.assertFalse(is_transient_sync_error(HTTPException(status_code=400, detail="credentials")))
+        self.assertFalse(is_transient_sync_error(MarketplacePaginationError("token loop")))
 
     def test_advisory_lock_key_stays_inside_postgresql_int32(self) -> None:
         self.assertEqual(advisory_lock_key(1), 1)
