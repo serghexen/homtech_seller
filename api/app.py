@@ -15,7 +15,7 @@ from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.1")
+app = FastAPI(title="HomTech Seller API", version="0.0.9")
 
 
 def cors_origins() -> list[str]:
@@ -37,9 +37,9 @@ app.add_middleware(
 
 class RegisterIn(BaseModel):
     email: str = Field(min_length=3, max_length=254)
-    password: str = Field(min_length=10, max_length=256)
+    password: str = Field(min_length=1, max_length=256)
     display_name: str = Field(default="", max_length=120)
-    workspace_name: str = Field(min_length=1, max_length=160)
+    workspace_name: str = Field(default="", max_length=160)
 
 
 class LoginIn(BaseModel):
@@ -172,13 +172,13 @@ def health() -> dict[str, str]:
 
 @app.post("/auth/register", response_model=AuthOut, status_code=201)
 def register(payload: RegisterIn, response: Response) -> AuthOut:
-    # Создаёт локальный аккаунт и его первую организацию одной транзакцией для изоляции клиентских данных.
+    # Создаёт локальный аккаунт и внутреннюю рабочую область одной транзакцией для изоляции данных.
     try:
         email = normalize_email(payload.email)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid email") from exc
     display_name = str(payload.display_name or "").strip()
-    workspace_name = str(payload.workspace_name or "").strip()
+    workspace_name = str(payload.workspace_name or "").strip() or display_name or "Мой кабинет"
     with psycopg.connect(database_url()) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -215,13 +215,13 @@ def login(payload: LoginIn, response: Response) -> AuthOut:
     try:
         email = normalize_email(payload.email)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid credentials") from exc
+        raise HTTPException(status_code=401, detail="Неверный email или пароль") from exc
     with psycopg.connect(database_url()) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT id, password_hash FROM seller.users WHERE email=%s AND is_active=true", (email,))
             row = cursor.fetchone()
         if not row or not verify_password(payload.password, str(row[1] or "")):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise HTTPException(status_code=401, detail="Неверный email или пароль")
         user = user_with_workspace(connection, int(row[0]))
     if not user:
         raise HTTPException(status_code=403, detail="Workspace access is unavailable")

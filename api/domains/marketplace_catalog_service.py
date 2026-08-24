@@ -24,11 +24,11 @@ def _request_json(url: str, *, method: str, headers: dict[str, str], payload: di
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(502, f"Маркетплейс не отдал каталог: HTTP {exc.code}; {detail[:300]}")
+        raise HTTPException(502, f"Маркетплейс не отдал данные: HTTP {exc.code}; {detail[:300]}")
     except urllib.error.URLError as exc:
         raise HTTPException(502, f"Не удалось связаться с маркетплейсом: {exc.reason}")
     if not isinstance(value, dict):
-        raise HTTPException(502, "Маркетплейс вернул некорректный каталог")
+        raise HTTPException(502, "Маркетплейс вернул некорректные данные")
     return value
 
 
@@ -98,6 +98,45 @@ def _fetch_yandex_catalog(*, business_id: int, token: str) -> list[dict[str, Any
     return rows
 
 
+def _fetch_yandex_stocks(*, campaign_id: int, token: str, offer_ids: list[str]) -> dict[str, dict[str, Any]]:
+    # Читает остатки Яндекс Маркета пакетами по 500 SKU. POST этого метода ничего не меняет в кабинете.
+    normalized_ids = list(dict.fromkeys(str(offer_id or "").strip() for offer_id in offer_ids if str(offer_id or "").strip()))
+    stocks_by_offer: dict[str, dict[str, Any]] = {
+        offer_id: {"found": False, "available_stock": None, "updated_at": ""}
+        for offer_id in normalized_ids
+    }
+    headers = {"Api-Key": token}
+    for offset in range(0, len(normalized_ids), 500):
+        batch = normalized_ids[offset:offset + 500]
+        payload = _request_json(
+            f"{YANDEX_MARKET_BASE_URL}/v2/campaigns/{campaign_id}/offers/stocks",
+            method="POST",
+            headers=headers,
+            payload={"offerIds": batch, "withTurnover": False},
+        )
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        warehouses = result.get("warehouses") if isinstance(result.get("warehouses"), list) else []
+        for warehouse in warehouses:
+            offers = warehouse.get("offers") if isinstance(warehouse, dict) and isinstance(warehouse.get("offers"), list) else []
+            for offer in offers:
+                offer_id = str(offer.get("offerId") or "").strip() if isinstance(offer, dict) else ""
+                if offer_id not in stocks_by_offer:
+                    continue
+                snapshot = stocks_by_offer[offer_id]
+                snapshot["found"] = True
+                snapshot["available_stock"] = int(snapshot["available_stock"] or 0)
+                snapshot["updated_at"] = max(str(snapshot["updated_at"] or ""), str(offer.get("updatedAt") or "").strip())
+                rows = offer.get("stocks") if isinstance(offer.get("stocks"), list) else []
+                for stock in rows:
+                    if not isinstance(stock, dict) or str(stock.get("type") or "").upper() != "AVAILABLE":
+                        continue
+                    try:
+                        snapshot["available_stock"] += max(0, int(stock.get("count") or 0))
+                    except (TypeError, ValueError):
+                        continue
+    return stocks_by_offer
+
+
 def fetch_marketplace_catalog(*, provider_code: str, token: str, client_id: str, business_id: int | None) -> list[dict[str, Any]]:
     # Выбирает строго read-only адаптер нужного маркетплейса и не предоставляет операций отправки.
     if provider_code == "ozon":
@@ -105,3 +144,14 @@ def fetch_marketplace_catalog(*, provider_code: str, token: str, client_id: str,
     if provider_code == "yandex_market" and business_id:
         return _fetch_yandex_catalog(business_id=business_id, token=token)
     raise HTTPException(400, "Для чтения каталога не хватает реквизитов подключенного магазина")
+
+
+def fetch_marketplace_stocks(
+    *, provider_code: str, token: str, campaign_id: int | None, offer_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    # На текущем этапе отдельный снимок остатков нужен Яндекс Маркету; Ozon продолжает отдавать их в деталях товара.
+    if provider_code == "yandex_market" and campaign_id:
+        return _fetch_yandex_stocks(campaign_id=campaign_id, token=token, offer_ids=offer_ids)
+    if provider_code == "ozon":
+        return {}
+    raise HTTPException(400, "Для чтения остатков не хватает идентификатора магазина")

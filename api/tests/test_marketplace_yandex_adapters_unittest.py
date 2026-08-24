@@ -6,7 +6,7 @@ import unittest
 import urllib.parse
 from unittest.mock import patch
 
-from domains.marketplace_catalog_service import _fetch_yandex_catalog
+from domains.marketplace_catalog_service import _fetch_yandex_catalog, _fetch_yandex_stocks
 from domains.marketplace_connection_verification import discover_yandex_market_stores
 
 
@@ -55,6 +55,35 @@ class YandexMarketplaceAdaptersTests(unittest.TestCase):
         second_query = urllib.parse.parse_qs(urllib.parse.urlparse(request_json.call_args_list[1].args[0]).query)
         self.assertEqual(first_query, {"limit": ["100"]})
         self.assertEqual(second_query, {"limit": ["100"], "pageToken": ["catalog /+="]})
+
+    @patch("domains.marketplace_catalog_service._request_json")
+    def test_stocks_are_read_in_batches_and_sum_only_available(self, request_json) -> None:
+        # Фиксирует read-only POST, лимит 500 SKU и сумму AVAILABLE по складам без вызова обновления остатков.
+        request_json.side_effect = [
+            {"result": {"warehouses": [
+                {"offers": [{"offerId": "sku-0", "updatedAt": "2026-08-24T12:00:00Z", "stocks": [
+                    {"type": "AVAILABLE", "count": 3}, {"type": "FREEZE", "count": 9},
+                ]}]},
+                {"offers": [{"offerId": "sku-0", "updatedAt": "2026-08-24T12:01:00Z", "stocks": [
+                    {"type": "AVAILABLE", "count": 2},
+                ]}]},
+            ]}},
+            {"result": {"warehouses": []}},
+        ]
+
+        stocks = _fetch_yandex_stocks(
+            campaign_id=77,
+            token="test-api-key",
+            offer_ids=[f"sku-{index}" for index in range(501)],
+        )
+
+        self.assertEqual(request_json.call_count, 2)
+        self.assertTrue(all(call.kwargs["method"] == "POST" for call in request_json.call_args_list))
+        self.assertEqual(len(request_json.call_args_list[0].kwargs["payload"]["offerIds"]), 500)
+        self.assertEqual(len(request_json.call_args_list[1].kwargs["payload"]["offerIds"]), 1)
+        self.assertEqual(stocks["sku-0"]["available_stock"], 5)
+        self.assertEqual(stocks["sku-0"]["updated_at"], "2026-08-24T12:01:00Z")
+        self.assertFalse(stocks["sku-500"]["found"])
 
 
 if __name__ == "__main__":

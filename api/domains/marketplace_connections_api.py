@@ -238,3 +238,60 @@ def mount_marketplace_connection_routes(
         if not row:
             raise HTTPException(status_code=404, detail="Подключенный магазин не найден")
         return connection_out(row)
+
+    @app.post("/marketplaces/connections/{connection_id}/enable", response_model=MarketplaceConnectionOut)
+    def enable_connection(
+        connection_id: int,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceConnectionOut:
+        # Повторно проверяет сохранённый ключ перед включением, не заставляя пользователя вводить его заново.
+        secret = credentials_secret()
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            workspace_id = seller_user.workspace_id
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT provider_code, client_id, business_id, campaign_id,
+                           pgp_sym_decrypt(token_ciphertext, %s)
+                    FROM seller.marketplace_connections
+                    WHERE id=%s AND workspace_id=%s
+                    """,
+                    (secret, connection_id, workspace_id),
+                )
+                saved_connection = cursor.fetchone()
+        if not saved_connection:
+            raise HTTPException(status_code=404, detail="Подключенный магазин не найден")
+
+        provider_code, client_id, business_id, campaign_id, token = saved_connection
+        token = str(token or "")
+        if provider_code == "ozon":
+            verify_ozon_connection(client_id=str(client_id or ""), token=token)
+        else:
+            available_stores = discover_yandex_market_stores(token=token)
+            available_store_ids = {
+                (str(item["business_id"]), str(item["campaign_id"])) for item in available_stores
+            }
+            if (str(business_id or ""), str(campaign_id or "")) not in available_store_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Сохранённый API-ключ больше не даёт доступ к этому магазину",
+                )
+
+        with psycopg.connect(database_url()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE seller.marketplace_connections
+                    SET status='active', last_checked_at=now(), last_error='', updated_at=now()
+                    WHERE id=%s AND workspace_id=%s
+                    RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
+                              token_suffix, status, last_checked_at, last_error,
+                              last_successful_sync_at, created_at
+                    """,
+                    (connection_id, workspace_id),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Подключенный магазин не найден")
+        return connection_out(row)

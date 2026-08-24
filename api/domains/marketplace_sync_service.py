@@ -9,9 +9,9 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from domains.marketplace_catalog_service import fetch_marketplace_catalog
+from domains.marketplace_catalog_service import fetch_marketplace_catalog, fetch_marketplace_stocks
 from domains.marketplace_orders_service import fetch_marketplace_orders
-from domains.marketplace_read_api import normalize_catalog_item, normalize_order_items
+from domains.marketplace_read_api import catalog_payload_with_stock, normalize_catalog_item, normalize_order_items
 
 
 def credentials_secret() -> str:
@@ -42,7 +42,7 @@ def load_active_connection(connection, connection_id: int) -> tuple[Any, ...]:
 
 def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
     # Сохраняет полный полученный набор карточек, не вызывая методы изменения маркетплейса.
-    connection_id, provider_code, _name, client_id, business_id, _campaign_id, token, _last_sync = connection_row
+    connection_id, provider_code, _name, client_id, business_id, campaign_id, token, _last_sync = connection_row
     rows = fetch_marketplace_catalog(
         provider_code=str(provider_code),
         token=str(token),
@@ -51,8 +51,25 @@ def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
     )
     normalized_rows = [(normalize_catalog_item(str(provider_code), item), item) for item in rows if isinstance(item, dict)]
     normalized_rows = [(item, payload) for item, payload in normalized_rows if item]
+    stock_checked_at = datetime.now(timezone.utc)
+    stocks_by_offer = fetch_marketplace_stocks(
+        provider_code=str(provider_code),
+        token=str(token),
+        campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
+        offer_ids=[str(item["offer_id"]) for item, _payload in normalized_rows],
+    )
     with connection.cursor() as cursor:
         for item, raw_payload in normalized_rows:
+            persisted_payload = dict(raw_payload)
+            if str(provider_code) == "yandex_market":
+                stock = stocks_by_offer.get(str(item["offer_id"]), {})
+                if stock.get("found") and stock.get("available_stock") is not None:
+                    persisted_payload = catalog_payload_with_stock(
+                        raw_payload,
+                        available_stock=int(stock["available_stock"]),
+                        checked_at=stock_checked_at,
+                        provider_updated_at=str(stock.get("updated_at") or ""),
+                    )
             cursor.execute(
                 """
                 INSERT INTO seller.catalog_items(
@@ -68,7 +85,7 @@ def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
                     item["offer_id"],
                     item["sku"],
                     item["title"],
-                    json.dumps(raw_payload, ensure_ascii=False),
+                    json.dumps(persisted_payload, ensure_ascii=False),
                 ),
             )
     return len(normalized_rows)

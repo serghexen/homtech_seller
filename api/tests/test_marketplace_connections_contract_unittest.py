@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import unittest
 
+from fastapi import FastAPI
 from pydantic import ValidationError
 
-from domains.marketplace_connections_api import MarketplaceConnectionCreateIn, MarketplaceConnectionDiscoverIn
+from domains.marketplace_connections_api import (
+    MarketplaceConnectionCreateIn,
+    MarketplaceConnectionDiscoverIn,
+    mount_marketplace_connection_routes,
+)
 
 
 class MarketplaceConnectionsContractTests(unittest.TestCase):
@@ -30,3 +35,17 @@ class MarketplaceConnectionsContractTests(unittest.TestCase):
         # Отсекает пустой и явно неполный токен без сетевого запроса к маркетплейсу.
         with self.assertRaises(ValidationError):
             MarketplaceConnectionDiscoverIn(provider_code="yandex_market", token="short")
+
+    def test_mounts_reversible_connection_routes(self) -> None:
+        # Фиксирует парные операции отключения и повторного включения магазина в HTTP-контракте.
+        app = FastAPI()
+        mount_marketplace_connection_routes(
+            app,
+            database_url=lambda: "",
+            psycopg=None,
+            current_user=lambda: None,
+            user_with_workspace=lambda *_args: None,
+        )
+        paths = {route.path for route in app.routes}
+        self.assertIn("/marketplaces/connections/{connection_id}/disable", paths)
+        self.assertIn("/marketplaces/connections/{connection_id}/enable", paths)

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from domains.local_auth import AuthenticatedUser
+from domains.marketplace_catalog_service import fetch_marketplace_stocks
 from domains.marketplace_orders_service import normalize_marketplace_order_status
 
 
@@ -20,6 +23,27 @@ class MarketplaceCatalogItemOut(BaseModel):
     offer_id: str = ""
     sku: str = ""
     title: str = ""
+    primary_image: str = ""
+    market_sku: str = ""
+    price: str = ""
+    currency_code: str = ""
+    available_stock: int | None = None
+    stock_synced_at: datetime | None = None
+    stock_settings_available: bool = False
+    manual_stock_limit: int | None = None
+    published_stock: int | None = None
+    activation_instruction: str = ""
+    sales_limit: int | None = None
+    sales_limit_daily_extra: int | None = None
+    sales_limit_day: date | None = None
+    sales_limit_revision: int | None = None
+    sales_limit_used: int | None = None
+    sales_limit_reserved: int | None = None
+    sales_limit_remaining: int | None = None
+    sales_limit_exhausted_at: datetime | None = None
+    archived_by_sales_limit: bool = False
+    settings_source_updated_at: datetime | None = None
+    settings_imported_at: datetime | None = None
     synced_at: datetime
 
 
@@ -28,6 +52,19 @@ class MarketplaceCatalogListOut(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class MarketplaceCatalogStockRefreshIn(BaseModel):
+    connection_id: int = Field(gt=0)
+    offer_id: str = Field(min_length=1, max_length=256)
+
+
+class MarketplaceCatalogStockOut(BaseModel):
+    connection_id: int
+    offer_id: str
+    available_stock: int
+    checked_at: datetime
+    provider_updated_at: str = ""
 
 
 class MarketplaceOrderItemOut(BaseModel):
@@ -68,6 +105,65 @@ def first_text(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def catalog_primary_image(provider_code: str, payload: Any) -> str:
+    # Берёт ссылку на главное изображение из уже сохранённого ответа, не запрашивая карточку у маркетплейса повторно.
+    if not isinstance(payload, dict):
+        return ""
+    if provider_code == "yandex_market":
+        offer = payload.get("offer") if isinstance(payload.get("offer"), dict) else {}
+        pictures = offer.get("pictures") if isinstance(offer.get("pictures"), list) else []
+        return first_text(pictures)
+    if provider_code == "ozon":
+        return first_text(payload.get("primary_image"), payload.get("images"))
+    return ""
+
+
+def catalog_card_details(provider_code: str, payload: Any) -> dict[str, Any]:
+    # Достаёт параметры карточки из уже сохранённого снимка. Остаток не подменяется выдуманным значением,
+    # потому что Яндекс отдаёт его отдельным методом, который в read-only Seller пока не перенесён.
+    if not isinstance(payload, dict):
+        return {"market_sku": "", "price": "", "currency_code": "", "available_stock": None, "stock_synced_at": None}
+    if provider_code == "yandex_market":
+        offer = payload.get("offer") if isinstance(payload.get("offer"), dict) else {}
+        mapping = payload.get("mapping") if isinstance(payload.get("mapping"), dict) else {}
+        basic_price = offer.get("basicPrice") if isinstance(offer.get("basicPrice"), dict) else {}
+        seller_snapshot = payload.get("_sellerSnapshot") if isinstance(payload.get("_sellerSnapshot"), dict) else {}
+        available_stock = seller_snapshot.get("availableStock")
+        try:
+            available_stock = max(0, int(available_stock)) if available_stock is not None else None
+        except (TypeError, ValueError):
+            available_stock = None
+        return {
+            "market_sku": first_text(mapping.get("marketSku")),
+            "price": first_text(basic_price.get("value")),
+            "currency_code": first_text(basic_price.get("currencyId")),
+            "available_stock": available_stock,
+            "stock_synced_at": first_text(seller_snapshot.get("stockCheckedAt")) or None,
+        }
+    if provider_code == "ozon":
+        return {
+            "market_sku": "",
+            "price": first_text(payload.get("price"), payload.get("marketing_price")),
+            "currency_code": first_text(payload.get("currency_code"), payload.get("currency")),
+            "available_stock": None,
+            "stock_synced_at": None,
+        }
+    return {"market_sku": "", "price": "", "currency_code": "", "available_stock": None, "stock_synced_at": None}
+
+
+def catalog_payload_with_stock(
+    payload: Any, *, available_stock: int, checked_at: datetime, provider_updated_at: str = "",
+) -> dict[str, Any]:
+    # Добавляет к исходному ответу только локальные метаданные чтения, не меняя поля карточки маркетплейса.
+    result = dict(payload) if isinstance(payload, dict) else {}
+    result["_sellerSnapshot"] = {
+        "availableStock": max(0, int(available_stock)),
+        "stockCheckedAt": checked_at.isoformat(),
+        "stockUpdatedAt": str(provider_updated_at or "").strip(),
+    }
+    return result
 
 
 def safe_int(value: Any, *, default: int = 1) -> int:
@@ -209,6 +305,13 @@ def mount_marketplace_read_routes(
             raise HTTPException(status_code=401, detail="Рабочая область недоступна")
         return seller_user
 
+    def credentials_secret() -> str:
+        # Расшифровывает API-Key только на время одного read-only запроса остатка.
+        value = str(os.getenv("MARKETPLACE_CREDENTIALS_SECRET", "")).strip()
+        if len(value) < 32:
+            raise HTTPException(status_code=503, detail="Не настроено защищённое чтение токена маркетплейса")
+        return value
+
     @app.get("/marketplaces/catalog", response_model=MarketplaceCatalogListOut)
     def list_catalog(
         connection_id: int | None = Query(default=None, gt=0),
@@ -240,9 +343,20 @@ def mount_marketplace_read_routes(
                 cursor.execute(
                     f"""
                     SELECT item.connection_id, connection.provider_code, connection.display_name,
-                           item.external_product_id, item.offer_id, item.sku, item.title, item.synced_at
+                           item.external_product_id, item.offer_id, item.sku, item.title, item.synced_at,
+                           item.raw_payload,
+                           settings.manual_stock_limit, settings.published_stock,
+                           settings.activation_instruction, settings.sales_limit,
+                           settings.sales_limit_daily_extra, settings.sales_limit_day,
+                           settings.sales_limit_revision, settings.sales_limit_used,
+                           settings.sales_limit_reserved, settings.sales_limit_remaining,
+                           settings.sales_limit_exhausted_at, settings.archived_by_sales_limit,
+                           settings.source_updated_at, settings.imported_at
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    LEFT JOIN seller.yandex_product_settings_snapshot AS settings
+                      ON settings.connection_id=item.connection_id
+                     AND settings.external_product_id=item.external_product_id
                     WHERE {where}
                     ORDER BY item.title ASC NULLS LAST, item.sku ASC, item.external_product_id ASC
                     LIMIT %s OFFSET %s
@@ -250,12 +364,104 @@ def mount_marketplace_read_routes(
                     [*base_params, page_size, (page - 1) * page_size],
                 )
                 rows = cursor.fetchall()
-        return MarketplaceCatalogListOut(
-            items=[MarketplaceCatalogItemOut(
-                connection_id=int(row[0]), provider_code=str(row[1]), store_name=str(row[2]), external_product_id=str(row[3]),
+        items: list[MarketplaceCatalogItemOut] = []
+        for row in rows:
+            provider_code = str(row[1])
+            details = catalog_card_details(provider_code, row[8])
+            has_settings = row[9] is not None
+            items.append(MarketplaceCatalogItemOut(
+                connection_id=int(row[0]), provider_code=provider_code, store_name=str(row[2]), external_product_id=str(row[3]),
                 offer_id=str(row[4] or ""), sku=str(row[5] or ""), title=str(row[6] or ""), synced_at=row[7],
-            ) for row in rows],
+                primary_image=catalog_primary_image(provider_code, row[8]),
+                stock_settings_available=has_settings,
+                manual_stock_limit=int(row[9]) if has_settings else None,
+                published_stock=int(row[10]) if has_settings else None,
+                activation_instruction=str(row[11] or "") if has_settings else "",
+                sales_limit=int(row[12]) if row[12] is not None else None,
+                sales_limit_daily_extra=int(row[13]) if has_settings else None,
+                sales_limit_day=row[14] if has_settings else None,
+                sales_limit_revision=int(row[15]) if has_settings else None,
+                sales_limit_used=int(row[16]) if has_settings else None,
+                sales_limit_reserved=int(row[17]) if has_settings else None,
+                sales_limit_remaining=int(row[18]) if row[18] is not None else None,
+                sales_limit_exhausted_at=row[19] if has_settings else None,
+                archived_by_sales_limit=bool(row[20]) if has_settings else False,
+                settings_source_updated_at=row[21] if has_settings else None,
+                settings_imported_at=row[22] if has_settings else None,
+                **details,
+            ))
+        return MarketplaceCatalogListOut(
+            items=items,
             total=total, page=page, page_size=page_size,
+        )
+
+    @app.post("/marketplaces/catalog/stock/refresh", response_model=MarketplaceCatalogStockOut)
+    def refresh_catalog_stock(
+        payload: MarketplaceCatalogStockRefreshIn,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceCatalogStockOut:
+        # Интерактивно читает один остаток. Вызов к Яндексу использует только POST просмотра и не публикует значение.
+        offer_id = str(payload.offer_id).strip()
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT connection.provider_code, connection.campaign_id,
+                           pgp_sym_decrypt(connection.token_ciphertext, %s), item.raw_payload
+                    FROM seller.catalog_items AS item
+                    JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    WHERE connection.id=%s AND connection.workspace_id=%s AND connection.status='active'
+                      AND item.offer_id=%s
+                    LIMIT 1
+                    """,
+                    (credentials_secret(), payload.connection_id, seller_user.workspace_id, offer_id),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Карточка или подключенный магазин не найдены")
+        provider_code, campaign_id, token, raw_payload = row
+        if str(provider_code) != "yandex_market":
+            raise HTTPException(status_code=400, detail="Интерактивное обновление остатка пока доступно для Яндекс Маркета")
+        stocks = fetch_marketplace_stocks(
+            provider_code=str(provider_code),
+            token=str(token),
+            campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
+            offer_ids=[offer_id],
+        )
+        stock = stocks.get(offer_id, {})
+        if not stock.get("found") or stock.get("available_stock") is None:
+            raise HTTPException(status_code=502, detail="Яндекс Маркет не вернул актуальный остаток этой карточки")
+        checked_at = datetime.now(timezone.utc)
+        available_stock = max(0, int(stock["available_stock"]))
+        provider_updated_at = str(stock.get("updated_at") or "")
+        persisted_payload = catalog_payload_with_stock(
+            raw_payload,
+            available_stock=available_stock,
+            checked_at=checked_at,
+            provider_updated_at=provider_updated_at,
+        )
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE seller.catalog_items AS item
+                    SET raw_payload=%s::jsonb
+                    FROM seller.marketplace_connections AS connection
+                    WHERE item.connection_id=connection.id AND connection.id=%s
+                      AND connection.workspace_id=%s AND item.offer_id=%s
+                    """,
+                    (json.dumps(persisted_payload, ensure_ascii=False), payload.connection_id, seller_user.workspace_id, offer_id),
+                )
+                if cursor.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="Карточка изменилась во время обновления остатка")
+        return MarketplaceCatalogStockOut(
+            connection_id=payload.connection_id,
+            offer_id=offer_id,
+            available_stock=available_stock,
+            checked_at=checked_at,
+            provider_updated_at=provider_updated_at,
         )
 
     @app.get("/marketplaces/orders", response_model=MarketplaceOrderListOut)
