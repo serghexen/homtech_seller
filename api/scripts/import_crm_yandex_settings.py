@@ -220,6 +220,22 @@ def catalog_external_ids(connection, connection_id: int) -> dict[str, str]:
     return result
 
 
+def prepare_catalog_rows(
+    source_rows: Iterable[SourceSettings],
+    catalog: dict[str, str],
+    *,
+    skip_missing: bool,
+) -> tuple[list[tuple[SourceSettings, str]], list[str]]:
+    rows = list(source_rows)
+    missing = [row.offer_id for row in rows if row.offer_id not in catalog]
+    if missing and not skip_missing:
+        raise RuntimeError(
+            f"{len(missing)} source offers are missing in Seller catalog: {', '.join(missing[:10])}"
+        )
+    prepared = [(row, catalog[row.offer_id]) for row in rows if row.offer_id in catalog]
+    return prepared, missing
+
+
 def existing_settings(connection, connection_id: int) -> dict[str, tuple[Any, ...]]:
     with connection.cursor() as cursor:
         cursor.execute(
@@ -342,6 +358,11 @@ def main() -> int:
     parser.add_argument("--source-store-code", required=True)
     parser.add_argument("--campaign-id", required=True)
     parser.add_argument("--expected-count", type=int)
+    parser.add_argument(
+        "--skip-missing",
+        action="store_true",
+        help="Import only offers currently present in Seller catalog and report skipped source rows",
+    )
     parser.add_argument("--apply", action="store_true", help="Write to Seller; without this flag only validates")
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL", ""))
     args = parser.parse_args()
@@ -373,10 +394,11 @@ def main() -> int:
     with psycopg.connect(args.database_url) as connection:
         connection_id, display_name, status = connection_for_campaign(connection, str(args.campaign_id))
         catalog = catalog_external_ids(connection, connection_id)
-        missing = [row.offer_id for row in source_rows if row.offer_id not in catalog]
-        if missing:
-            raise RuntimeError(f"{len(missing)} source offers are missing in Seller catalog: {', '.join(missing[:10])}")
-        prepared = [(row, catalog[row.offer_id]) for row in source_rows]
+        prepared, missing = prepare_catalog_rows(
+            source_rows,
+            catalog,
+            skip_missing=args.skip_missing,
+        )
         table_ready = snapshot_table_exists(connection)
         if args.apply and not table_ready:
             raise RuntimeError("Seller snapshot table is missing; apply database migrations first")
@@ -408,7 +430,8 @@ def main() -> int:
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
-        "missing": 0,
+        "missing": len(missing),
+        "missing_offer_ids_preview": missing[:10],
         "target_table_ready": table_ready,
     }, ensure_ascii=False, indent=2))
     return 0

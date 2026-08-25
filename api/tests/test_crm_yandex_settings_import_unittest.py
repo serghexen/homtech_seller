@@ -4,7 +4,7 @@ import io
 import json
 import unittest
 
-from scripts.import_crm_yandex_settings import db_values, read_source_rows
+from scripts.import_crm_yandex_settings import db_values, prepare_catalog_rows, read_source_rows
 
 
 class CrmYandexSettingsImportTests(unittest.TestCase):
@@ -37,6 +37,22 @@ class CrmYandexSettingsImportTests(unittest.TestCase):
         self.assertEqual(rows[0].activation_instruction, "Первая строка\nВторая строка")
         self.assertIsNone(rows[0].sales_limit)
         self.assertIsNone(rows[0].sales_limit_remaining)
+
+    def test_missing_catalog_offers_are_strict_by_default(self):
+        row = read_source_rows(io.StringIO(json.dumps(self.source_payload()) + "\n"))[0]
+        with self.assertRaisesRegex(RuntimeError, "1 source offers are missing"):
+            prepare_catalog_rows([row], {}, skip_missing=False)
+
+    def test_missing_catalog_offers_can_be_reported_and_skipped(self):
+        matched = read_source_rows(io.StringIO(json.dumps(self.source_payload(offer_id="MATCH")) + "\n"))[0]
+        missing = read_source_rows(io.StringIO(json.dumps(self.source_payload(offer_id="MISSING")) + "\n"))[0]
+        prepared, missing_ids = prepare_catalog_rows(
+            [matched, missing],
+            {"MATCH": "external-1"},
+            skip_missing=True,
+        )
+        self.assertEqual(prepared, [(matched, "external-1")])
+        self.assertEqual(missing_ids, ["MISSING"])
 
     def test_rejects_duplicate_offer_id_before_database_write(self):
         line = json.dumps(self.source_payload(), ensure_ascii=False)
