@@ -223,6 +223,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
           <header class="product-card-modal__header">
             <h2 id="product-card-title">Карточка товара</h2>
             <div class="product-card-modal__head-actions">
+              <span v-if="item.archived" class="product-card-modal__archive-state">В архиве</span>
               <span class="product-card-modal__mode">Настройки Seller</span>
               <button type="button" aria-label="Вернуться к каталогу" title="К каталогу" @click="close">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m11 18-6-6 6-6" /></svg>
@@ -242,6 +243,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 <div class="product-overview__source">
                   <span class="product-overview__logo" :class="`product-overview__logo--${item.provider_code}`"><img :src="providerLogo" alt="" /></span>
                   <span>{{ providerName }}</span>
+                  <small v-if="item.archived">Архивная карточка</small>
                 </div>
                 <h3>{{ item.title || item.offer_id || item.sku || 'Товар без названия' }}</h3>
                 <dl class="product-overview__grid">
@@ -541,6 +543,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   text-transform: uppercase;
 }
 
+.product-card-modal__archive-state {
+  padding: 7px 10px;
+  border: 1px solid rgba(116, 142, 210, .34);
+  border-radius: 999px;
+  color: #c2cce2;
+  background: rgba(24, 36, 68, .58);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
 .product-card-modal__head-actions button {
   display: grid;
   width: 38px;
@@ -625,6 +639,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   color: #9faccc;
   font-size: 12px;
   font-weight: 750;
+}
+
+.product-overview__source small {
+  padding: 3px 7px;
+  border: 1px solid rgba(124, 147, 207, .3);
+  border-radius: 999px;
+  color: #9aaacb;
+  font-size: 9px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
 }
 
 .product-overview__logo {

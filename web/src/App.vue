@@ -5,6 +5,7 @@ import homtechLogo from './assets/homtech-wordmark.png'
 import ozonLogo from './assets/ozon-logo.png'
 import yandexMarketLogo from './assets/yandex-market-logo.png'
 import HamsterLoader from './components/HamsterLoader.vue'
+import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
 import {
   isSyncJobActive,
@@ -28,8 +29,13 @@ const connectionActionId = ref(null)
 const activeSection = ref('stores')
 const catalogItems = ref([])
 const catalogTotal = ref(0)
+const catalogActiveTotal = ref(0)
+const catalogArchivedTotal = ref(0)
+const catalogState = ref('active')
 const catalogPage = ref(1)
 const catalogLoading = ref(false)
+const catalogArchiveActionId = ref('')
+const catalogArchiveConfirmItem = ref(null)
 const orders = ref([])
 const ordersTotal = ref(0)
 const ordersPage = ref(1)
@@ -95,6 +101,7 @@ const pageSize = 24
 const catalogPageCount = computed(() => Math.max(1, Math.ceil(catalogTotal.value / pageSize)))
 const ordersPageCount = computed(() => Math.max(1, Math.ceil(ordersTotal.value / pageSize)))
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
+const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
 
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
@@ -133,7 +140,7 @@ async function openProductCard(item) {
   selectedProductKeyPoolError.value = ''
   selectedProductKeyPoolNotice.value = ''
   const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool()]
-  if (item.provider_code === 'yandex_market' && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
+  if (item.provider_code === 'yandex_market' && !item.archived && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
   await Promise.allSettled(requests)
 }
 
@@ -518,11 +525,19 @@ async function loadCatalog() {
   catalogLoading.value = true
   error.value = ''
   try {
-    const query = queryString({ connection_id: selectedConnectionId.value, query: catalogSearch.value, page: catalogPage.value, page_size: pageSize })
+    const query = queryString({
+      connection_id: selectedConnectionId.value,
+      query: catalogSearch.value,
+      state: catalogState.value,
+      page: catalogPage.value,
+      page_size: pageSize,
+    })
     const result = await apiRequest(`/marketplaces/catalog?${query}`)
     if (requestId !== catalogRequestSequence) return
     catalogItems.value = result.items
     catalogTotal.value = result.total
+    catalogActiveTotal.value = result.active_total
+    catalogArchivedTotal.value = result.archived_total
   } catch (requestError) {
     if (requestId === catalogRequestSequence) error.value = requestError.message || 'Не удалось загрузить каталог'
   } finally {
@@ -569,6 +584,68 @@ async function selectConnection(connectionId) {
   if (activeSection.value === 'orders') {
     ordersPage.value = 1
     await loadOrders()
+  }
+}
+
+async function selectCatalogState(state) {
+  // Архив отделён от рабочего каталога, но сохраняет тот же поиск и выбранный магазин.
+  if (state !== 'active' && state !== 'archived') return
+  catalogState.value = state
+  catalogPage.value = 1
+  catalogArchiveConfirmItem.value = null
+  await loadCatalog()
+}
+
+function catalogArchiveIdentity(item) {
+  return `${item?.connection_id || ''}:${item?.external_product_id || ''}`
+}
+
+function requestCatalogArchive(item) {
+  // Архивирование требует отдельного подтверждения, восстановление выполняется одним обратимым действием.
+  if (!item || item.provider_code !== 'yandex_market' || !canManageCatalog.value || isConnectionDisabled(item.connection_id)) return
+  if (item.archived) {
+    updateCatalogArchive(item, false)
+    return
+  }
+  catalogArchiveConfirmItem.value = item
+}
+
+function closeCatalogArchiveConfirm() {
+  if (catalogArchiveActionId.value) return
+  catalogArchiveConfirmItem.value = null
+}
+
+async function confirmCatalogArchive() {
+  const item = catalogArchiveConfirmItem.value
+  if (!item) return
+  await updateCatalogArchive(item, true)
+}
+
+async function updateCatalogArchive(item, archived) {
+  // После подтверждённого ответа Яндекса перечитывает текущую вкладку и её счётчики.
+  const identity = catalogArchiveIdentity(item)
+  if (!identity || catalogArchiveActionId.value) return
+  catalogArchiveActionId.value = identity
+  error.value = ''
+  notice.value = ''
+  try {
+    await apiRequest('/marketplaces/catalog/archive', {
+      method: 'POST',
+      body: JSON.stringify({
+        connection_id: item.connection_id,
+        external_product_id: item.external_product_id,
+        archived,
+      }),
+    })
+    catalogArchiveConfirmItem.value = null
+    if (selectedCatalogItem.value && catalogArchiveIdentity(selectedCatalogItem.value) === identity) closeProductCard()
+    catalogPage.value = 1
+    await loadCatalog()
+    notice.value = archived ? 'Карточка перенесена в архив Яндекс Маркета' : 'Карточка восстановлена из архива'
+  } catch (requestError) {
+    error.value = requestError.message || (archived ? 'Не удалось архивировать карточку' : 'Не удалось восстановить карточку')
+  } finally {
+    catalogArchiveActionId.value = ''
   }
 }
 
@@ -985,6 +1062,27 @@ onMounted(async () => {
             </button>
           </div>
 
+          <div v-if="activeSection === 'catalog'" class="catalog-state-switch" role="tablist" aria-label="Состояние карточек">
+            <button
+              role="tab"
+              type="button"
+              :aria-selected="catalogState === 'active'"
+              :class="{ active: catalogState === 'active' }"
+              @click="selectCatalogState('active')"
+            >
+              <span>Активные</span><small>{{ catalogActiveTotal }}</small>
+            </button>
+            <button
+              role="tab"
+              type="button"
+              :aria-selected="catalogState === 'archived'"
+              :class="{ active: catalogState === 'archived' }"
+              @click="selectCatalogState('archived')"
+            >
+              <span>Архив</span><small>{{ catalogArchivedTotal }}</small>
+            </button>
+          </div>
+
           <p v-if="selectedConnection?.status === 'disabled'" class="snapshot-archive-notice" role="status">
             Показан сохранённый снимок отключённого магазина. Просмотр доступен, обновление приостановлено.
           </p>
@@ -1010,7 +1108,11 @@ onMounted(async () => {
 
           <p class="snapshot-count">Найдено: {{ activeSection === 'catalog' ? catalogTotal : ordersTotal }}</p>
           <div v-if="(activeSection === 'catalog' && catalogLoading) || (activeSection === 'orders' && ordersLoading)" class="empty-state">Загружаем локальный снимок…</div>
-          <div v-else-if="activeSection === 'catalog' && !catalogItems.length" class="empty-state">Каталог пока пуст. Нажмите «Обновить», чтобы прочитать товары из выбранного магазина.</div>
+          <div v-else-if="activeSection === 'catalog' && !catalogItems.length" class="empty-state">
+            {{ catalogState === 'archived'
+              ? 'В архиве пока нет карточек.'
+              : 'Каталог пока пуст. Нажмите «Обновить», чтобы прочитать товары из выбранного магазина.' }}
+          </div>
           <div v-else-if="activeSection === 'orders' && !orders.length" class="empty-state">Заказов пока нет в снимке. Нажмите «Обновить», чтобы прочитать свежие заказы.</div>
 
           <div v-else-if="activeSection === 'catalog'" class="snapshot-grid">
@@ -1018,29 +1120,41 @@ onMounted(async () => {
               v-for="item in catalogItems"
               :key="`${item.connection_id}-${item.external_product_id}`"
               class="snapshot-card catalog-card"
-              role="button"
-              tabindex="0"
-              :aria-label="`Открыть карточку товара ${item.title || item.sku || ''}`"
+              :class="{ 'catalog-card--archived': item.archived }"
               @click="openProductCard(item)"
-              @keydown.enter.prevent="openProductCard(item)"
-              @keydown.space.prevent="openProductCard(item)"
             >
               <div class="snapshot-card__head">
                 <span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span>
-                <div><h2>{{ item.title || 'Без названия' }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div>
-                <div class="catalog-card__actions" aria-hidden="true">
+                <div><h2>{{ item.title || 'Без названия' }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="item.archived" class="snapshot-archive-label">В архиве</span><span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Магазин отключён</span></p></div>
+                <div class="catalog-card__actions">
                   <span
                     class="catalog-card__instruction"
                     :class="{ 'catalog-card__instruction--filled': hasProductInstruction(item) }"
                     :title="hasProductInstruction(item) ? 'Инструкция покупателю заполнена' : 'Инструкция покупателю не заполнена'"
                   >
-                    <svg viewBox="0 0 24 24"><path d="M3.5 5.5c2.8-.8 5.6-.2 8.5 1.7v12c-2.9-1.9-5.7-2.5-8.5-1.7z" /><path d="M20.5 5.5c-2.8-.8-5.6-.2-8.5 1.7v12c2.9-1.9 5.7-2.5 8.5-1.7z" /></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5.5c2.8-.8 5.6-.2 8.5 1.7v12c-2.9-1.9-5.7-2.5-8.5-1.7z" /><path d="M20.5 5.5c-2.8-.8-5.6-.2-8.5 1.7v12c2.9-1.9 5.7-2.5 8.5-1.7z" /></svg>
                   </span>
-                  <span class="catalog-card__open"><svg viewBox="0 0 24 24"><path d="M14 5h5v5" /><path d="m10 14 9-9" /><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></svg></span>
+                  <button
+                    v-if="item.provider_code === 'yandex_market' && canManageCatalog"
+                    class="catalog-card__archive-action"
+                    :class="{ 'catalog-card__archive-action--restore': item.archived }"
+                    type="button"
+                    :disabled="Boolean(catalogArchiveActionId) || isConnectionDisabled(item.connection_id)"
+                    :title="item.archived ? 'Восстановить карточку' : 'Перенести карточку в архив'"
+                    @click.stop="requestCatalogArchive(item)"
+                    @keydown.stop
+                  >
+                    <svg v-if="item.archived" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v11H4z" /><path d="M3 5h18v3H3z" /><path d="M9 12h6" /><path d="m10 15-3-3 3-3" /></svg>
+                    <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v11H4z" /><path d="M3 5h18v3H3z" /><path d="M9 12h6" /></svg>
+                    <span class="sr-only">{{ item.archived ? 'Восстановить карточку' : 'Перенести карточку в архив' }}</span>
+                  </button>
+                  <button class="catalog-card__open" type="button" :aria-label="`Открыть карточку товара ${item.title || item.sku || ''}`" @click.stop="openProductCard(item)">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5" /><path d="m10 14 9-9" /><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></svg>
+                  </button>
                 </div>
                 <span class="sr-only">{{ hasProductInstruction(item) ? 'Инструкция покупателю заполнена.' : 'Инструкция покупателю не заполнена.' }}</span>
               </div>
-              <div class="snapshot-card__footer catalog-card__footer"><div class="snapshot-card__facts"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><span class="catalog-card__stock">Остаток: <strong>{{ Number.isInteger(item.available_stock) ? item.available_stock : '—' }}</strong></span></div><time :datetime="item.stock_synced_at || item.synced_at">{{ formatDate(item.stock_synced_at || item.synced_at) }}</time></div>
+              <div class="snapshot-card__footer catalog-card__footer"><div class="snapshot-card__facts"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><span v-if="!item.archived" class="catalog-card__stock">Остаток: <strong>{{ Number.isInteger(item.available_stock) ? item.available_stock : '—' }}</strong></span></div><time :datetime="item.stock_synced_at || item.synced_at">{{ formatDate(item.stock_synced_at || item.synced_at) }}</time></div>
             </article>
           </div>
           <div v-else class="snapshot-grid">
@@ -1084,7 +1198,7 @@ onMounted(async () => {
       :stock-synced-label="selectedCatalogItem.stock_synced_at ? formatDate(selectedCatalogItem.stock_synced_at) : ''"
       :stock-loading="selectedStockLoading"
       :stock-error="selectedStockError"
-      :stock-refresh-enabled="!isConnectionDisabled(selectedCatalogItem.connection_id)"
+      :stock-refresh-enabled="!selectedCatalogItem.archived && !isConnectionDisabled(selectedCatalogItem.connection_id)"
       :settings-saving="selectedSettingsSaving"
       :settings-error="selectedSettingsError"
       :settings-notice="selectedSettingsNotice"
@@ -1106,6 +1220,14 @@ onMounted(async () => {
       @add-keys="addSelectedProductKeys"
       @save-settings="saveSelectedProductSettings"
       @close="closeProductCard"
+    />
+
+    <CatalogArchiveConfirm
+      v-if="catalogArchiveConfirmItem"
+      :item="catalogArchiveConfirmItem"
+      :busy="catalogArchiveActionId === catalogArchiveIdentity(catalogArchiveConfirmItem)"
+      @confirm="confirmCatalogArchive"
+      @cancel="closeCatalogArchiveConfirm"
     />
 
     <div v-if="isConnectionModalOpen" class="modal-backdrop" @click.self="closeConnectionModal">
@@ -1162,7 +1284,10 @@ onMounted(async () => {
 .snapshot-view { display: grid; gap: 18px; margin-top: 46px; } .snapshot-toolbar { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(0, 1.6fr) auto; align-items: end; gap: 14px; } .snapshot-search { display: grid; gap: 7px; } .snapshot-search label, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .snapshot-search input, .orders-filter-row input, .orders-filter-row select { width: 100%; min-height: 50px; padding: 0 15px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); } .orders-filter-row input, .orders-filter-row select { height: 52px; min-height: 52px; } .store-filters { display: flex; min-width: 0; gap: 8px; overflow-x: auto; padding-bottom: 1px; } .store-filters button { display: inline-flex; min-height: 50px; align-items: center; gap: 8px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; color: #cbd5eb; background: rgba(31,40,70,.72); font-weight: 800; } .store-filters button > span:last-child { display: grid; gap: 1px; text-align: left; } .store-filters button small { color: #929db8; font-size: 9px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; } .store-filters button.active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .store-filters button.active small { color: #dce5ff; } .store-filters button.store-filter--disabled:not(.active) { border-style: dashed; color: #9ca7c0; background: rgba(25,32,55,.6); } .store-filters .market-mark { width: 25px; height: 25px; border-radius: 8px; font-size: 8px; } .store-filters .market-mark--yandex_market { font-size: 16px; } .sync-button { display: inline-flex; min-width: 142px; min-height: 52px; align-items: center; justify-content: center; gap: 9px; padding: 0 17px; border: 1px solid #ee6cb5; border-radius: 50px; color: #fff; background: linear-gradient(140deg,#f13b9e,#cf206e); box-shadow: 0 12px 28px rgba(242,52,152,.27); font-weight: 850; } .sync-button > span:first-child { font-size: 25px; line-height: 1; } .spinning { animation: snapshot-spin .8s linear infinite; } @keyframes snapshot-spin { to { transform: rotate(360deg); } } .snapshot-archive-notice { margin: 0; padding: 11px 14px; border: 1px dashed rgba(149,164,203,.28); border-radius: 13px; color: #aeb9d4; background: rgba(20,28,52,.56); font-size: 13px; } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 6px; border: 1px solid rgba(159,172,202,.3); border-radius: 999px; color: #aeb9d4; font-size: 9px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
 .snapshot-search__row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; } .search-submit, .filter-toggle { display: inline-flex; min-height: 50px; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border-radius: 13px; font-weight: 800; } .search-submit { border: 1px solid rgba(75,115,255,.76); color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); box-shadow: 0 10px 24px rgba(32,77,220,.22); } .search-submit svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; } .search-submit:hover { filter: brightness(1.08); } .search-action-enter-active, .search-action-leave-active { transition: opacity .15s ease, transform .15s ease; } .search-action-enter-from, .search-action-leave-to { opacity: 0; transform: translateX(-5px); } .filter-toggle { border: 1px solid rgba(149,164,203,.28); color: #cbd5eb; background: rgba(31,40,70,.72); } .filter-toggle svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; } .filter-toggle small { display: grid; min-width: 20px; height: 20px; place-items: center; border-radius: 50%; color: #fff; background: var(--brand-blue-bright); font-size: 11px; } .filter-toggle--active { border-color: rgba(91,123,255,.64); color: #fff; background: rgba(42,67,145,.42); }
 .orders-filter-row { display: flex; flex-wrap: wrap; align-items: end; gap: 18px; padding: 16px 18px; border: 1px solid rgba(144,160,204,.17); border-radius: 18px; background: rgba(14,22,48,.52); box-shadow: inset 0 1px rgba(255,255,255,.02); } .orders-filter-row__period { position: relative; display: flex; align-items: end; gap: 9px; } .orders-filter-row__period > span:first-child, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .orders-filter-row__period > span:first-child { position: absolute; top: 0; left: 0; } .orders-filter-row__period label { padding-top: 19px; } .orders-filter-row label { display: grid; gap: 7px; min-width: 150px; } .orders-filter-row .status-select { position: relative; min-width: 175px; } .orders-filter-row .status-select::after { content: ''; position: absolute; right: 17px; bottom: 22px; width: 7px; height: 7px; border-right: 2px solid #8794b2; border-bottom: 2px solid #8794b2; transform: rotate(45deg); pointer-events: none; } .orders-filter-row select { padding-right: 42px; appearance: none; -webkit-appearance: none; } .date-divider { padding-bottom: 17px; color: #71809f; } .orders-filter-row__actions { display: flex; align-items: flex-end; gap: 9px; } .filter-apply, .filter-reset { height: 52px; min-height: 52px; } .filter-reset { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 1px solid rgba(255,150,155,.34); border-radius: 14px; color: #ffaaa8; background: rgba(255,150,155,.07); font-weight: 800; transition: border-color .2s, background .2s, transform .2s; } .filter-reset svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .filter-reset:hover { border-color: rgba(255,170,168,.62); background: rgba(255,150,155,.13); transform: translateY(-1px); } .order-filters-enter-active, .order-filters-leave-active { overflow: hidden; transition: opacity .18s ease,transform .18s ease; } .order-filters-enter-from, .order-filters-leave-to { opacity: 0; transform: translateY(-6px); } .snapshot-count { margin: 3px 0 0; color: #9eabc7; font-size: 13px; font-weight: 750; }
-.snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div:not(.catalog-card__actions) { min-width: 0; flex: 1 1 auto; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .catalog-card { cursor: pointer; transition: border-color .18s,box-shadow .18s,transform .18s; } .catalog-card:hover,.catalog-card:focus-visible { border-color: rgba(91,123,255,.58); box-shadow: inset 0 1px rgba(255,255,255,.04),0 14px 34px rgba(6,16,48,.26); transform: translateY(-2px); outline: none; } .catalog-card:focus-visible { box-shadow: inset 0 1px rgba(255,255,255,.04),0 0 0 3px rgba(75,115,255,.22),0 14px 34px rgba(6,16,48,.26); } .catalog-card__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; } .catalog-card__open,.catalog-card__instruction { display: grid; width: 39px; height: 39px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(126,151,217,.3); border-radius: 12px; color: #9cadd5; background: rgba(17,28,57,.72); transition: color .18s,border-color .18s,background .18s,transform .18s,box-shadow .18s; } .catalog-card__open svg,.catalog-card__instruction svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .catalog-card__instruction { color: #f4f7ff; border-color: rgba(230,236,255,.34); } .catalog-card__instruction--filled { color: #fff; border-color: rgba(83,125,255,.74); background: linear-gradient(145deg,rgba(30,77,224,.96),rgba(74,111,255,.88)); box-shadow: 0 8px 20px rgba(32,77,220,.22); } .catalog-card:hover .catalog-card__open,.catalog-card:focus-visible .catalog-card__open { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); transform: translateY(-1px); } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__facts { display: flex; min-width: 0; align-items: center; gap: 18px; } .catalog-card__stock { color: #9fdccb; white-space: nowrap; } .catalog-card__stock strong { color: #58e5bd; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { min-width: 0; } .order-card__body > strong { display: -webkit-box; overflow: hidden; color: #eef2fc; line-height: 1.42; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; } .order-status { flex: 0 0 auto; max-width: 120px; padding: 6px 9px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .035em; text-align: center; text-transform: uppercase; white-space: nowrap; } .order-status--processing { color: #ffc75a; background: rgba(255,199,90,.08); } .order-status--in_delivery { color: #65b5ff; background: rgba(101,181,255,.08); } .order-status--delivered { color: #4ee6bd; background: rgba(78,230,189,.08); } .order-status--cancelled, .order-status--problem { color: #ff969b; background: rgba(255,150,155,.08); } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div:not(.catalog-card__actions) { min-width: 0; flex: 1 1 auto; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .catalog-card { cursor: pointer; transition: border-color .18s,box-shadow .18s,transform .18s,opacity .18s; } .catalog-card:hover,.catalog-card:focus-visible { border-color: rgba(91,123,255,.58); box-shadow: inset 0 1px rgba(255,255,255,.04),0 14px 34px rgba(6,16,48,.26); transform: translateY(-2px); outline: none; } .catalog-card:focus-visible { box-shadow: inset 0 1px rgba(255,255,255,.04),0 0 0 3px rgba(75,115,255,.22),0 14px 34px rgba(6,16,48,.26); } .catalog-card--archived { border-color: rgba(125,143,188,.2); background: linear-gradient(145deg,rgba(24,36,67,.88),rgba(13,20,44,.94)); } .catalog-card--archived .market-mark,.catalog-card--archived .catalog-card__instruction { opacity: .72; } .catalog-card__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; } .catalog-card__open,.catalog-card__instruction,.catalog-card__archive-action { display: grid; width: 39px; height: 39px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(126,151,217,.3); border-radius: 12px; color: #9cadd5; background: rgba(17,28,57,.72); transition: color .18s,border-color .18s,background .18s,transform .18s,box-shadow .18s; } .catalog-card__open svg,.catalog-card__instruction svg,.catalog-card__archive-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .catalog-card__instruction { color: #f4f7ff; border-color: rgba(230,236,255,.34); } .catalog-card__instruction--filled { color: #fff; border-color: rgba(83,125,255,.74); background: linear-gradient(145deg,rgba(30,77,224,.96),rgba(74,111,255,.88)); box-shadow: 0 8px 20px rgba(32,77,220,.22); } .catalog-card__archive-action { cursor: pointer; color: #98a8ce; } .catalog-card__archive-action:hover,.catalog-card__archive-action:focus-visible { color: #fff; border-color: rgba(111,139,255,.68); background: rgba(45,75,175,.48); outline: none; } .catalog-card__archive-action--restore { color: #8ca7ff; border-color: rgba(83,125,255,.42); background: rgba(40,75,188,.2); } .catalog-card__archive-action:disabled { opacity: .42; cursor: not-allowed; } .catalog-card:hover .catalog-card__open,.catalog-card:focus-visible .catalog-card__open { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); transform: translateY(-1px); } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__facts { display: flex; min-width: 0; align-items: center; gap: 18px; } .catalog-card__stock { color: #9fdccb; white-space: nowrap; } .catalog-card__stock strong { color: #58e5bd; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { min-width: 0; } .order-card__body > strong { display: -webkit-box; overflow: hidden; color: #eef2fc; line-height: 1.42; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; } .order-status { flex: 0 0 auto; max-width: 120px; padding: 6px 9px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .035em; text-align: center; text-transform: uppercase; white-space: nowrap; } .order-status--processing { color: #ffc75a; background: rgba(255,199,90,.08); } .order-status--in_delivery { color: #65b5ff; background: rgba(101,181,255,.08); } .order-status--delivered { color: #4ee6bd; background: rgba(78,230,189,.08); } .order-status--cancelled, .order-status--problem { color: #ff969b; background: rgba(255,150,155,.08); } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.catalog-card__open { cursor: pointer; } .catalog-card__open:focus-visible { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); outline: 3px solid rgba(75,115,255,.2); outline-offset: 2px; }
+.catalog-state-switch { display: inline-flex; width: fit-content; gap: 5px; margin: 1px 0 3px; padding: 5px; border: 1px solid rgba(139,158,208,.25); border-radius: 16px; background: rgba(11,19,44,.58); } .catalog-state-switch button { display: flex; min-height: 45px; align-items: center; gap: 9px; padding: 0 18px; border: 1px solid transparent; border-radius: 12px; color: #aeb9d3; background: transparent; font: inherit; font-size: 14px; font-weight: 850; } .catalog-state-switch button:hover { color: #eef3ff; background: rgba(45,62,104,.38); } .catalog-state-switch button.active { color: #fff; border-color: rgba(98,130,255,.72); background: linear-gradient(135deg,#2255e8,#4a72ff); box-shadow: 0 9px 22px rgba(28,70,210,.22); } .catalog-state-switch small { min-width: 26px; padding: 3px 7px; border-radius: 999px; color: #aebbd9; background: rgba(123,143,194,.13); font-size: 11px; text-align: center; } .catalog-state-switch button.active small { color: #fff; background: rgba(7,21,71,.2); } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 7px; border: 1px solid rgba(116,141,207,.28); border-radius: 999px; color: #9cadcf; font-size: 9px; font-weight: 850; letter-spacing: .03em; text-transform: uppercase; vertical-align: 1px; }
 @media (max-width:900px) { .connection-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 147px; } .app-brand span { display: none; } .profile-button { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 26px; } .seller-nav { width: 100%; gap: 4px; } .seller-nav__item { flex: 1; padding: 0 9px; font-size: 13px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .connection-grid, .snapshot-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
+@media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
 </style>

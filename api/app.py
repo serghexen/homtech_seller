@@ -11,12 +11,13 @@ from pydantic import BaseModel, Field
 
 from domains.local_auth import AuthenticatedUser, create_access_token, decode_access_token, hash_password, normalize_email, verify_password
 from domains.marketplace_connections_api import mount_marketplace_connection_routes
+from domains.marketplace_catalog_actions_api import mount_marketplace_catalog_action_routes
 from domains.marketplace_key_pools_api import mount_marketplace_key_pool_routes
 from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.22")
+app = FastAPI(title="HomTech Seller API", version="0.0.23")
 
 
 def cors_origins() -> list[str]:
@@ -255,6 +256,13 @@ def logout() -> Response:
 
 # Подключает изолированный модуль магазинов после определения локальной авторизации и workspace-прав.
 mount_marketplace_connection_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+mount_marketplace_catalog_action_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

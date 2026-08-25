@@ -43,6 +43,16 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("code_hash text NOT NULL UNIQUE", joined)
         self.assertNotIn("fulfillment", joined.lower())
 
+    def test_catalog_archive_migration_keeps_marketplace_state_separate(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260825_01_catalog_archive.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(statements), 2)
+        self.assertIn("ADD COLUMN IF NOT EXISTS is_archived", statements[0])
+        self.assertIn("is_present, is_archived", statements[1])
+
 
 if __name__ == "__main__":
     unittest.main()

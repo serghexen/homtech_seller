@@ -31,9 +31,27 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
 
         self.assertEqual(synced, 2)
         statements = [" ".join(call.args[0].split()) for call in cursor.execute.call_args_list]
-        self.assertTrue(any("is_present=true, archived_at=NULL" in statement for statement in statements))
+        self.assertTrue(any("is_archived=EXCLUDED.is_archived" in statement for statement in statements))
         archive_call = next(call for call in cursor.execute.call_args_list if "SET is_present=false" in call.args[0])
         self.assertEqual(archive_call.args[1], (7, ["10", "11"]))
+
+    @patch("domains.marketplace_sync_service.fetch_marketplace_stocks", return_value={})
+    @patch("domains.marketplace_sync_service.fetch_marketplace_catalog")
+    def test_catalog_sync_keeps_archived_items_but_does_not_request_their_stock(self, fetch_catalog, fetch_stocks) -> None:
+        fetch_catalog.return_value = [
+            {"offer": {"offerId": "LIVE", "name": "Активный", "archived": False}},
+            {"offer": {"offerId": "OLD", "name": "Архивный", "archived": True}},
+        ]
+        cursor = MagicMock()
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        synced = sync_catalog_connection(connection, (7, "yandex_market", "Store", "", 77, 202, "token", None))
+
+        self.assertEqual(synced, 2)
+        self.assertEqual(fetch_stocks.call_args.kwargs["offer_ids"], ["LIVE"])
+        upserts = [call for call in cursor.execute.call_args_list if "INSERT INTO seller.catalog_items" in call.args[0]]
+        self.assertEqual([call.args[1][-2:] for call in upserts], [(False, False), (True, True)])
 
     @patch("domains.marketplace_sync_service.fetch_marketplace_catalog", return_value=[{"unexpected": "payload"}])
     def test_catalog_sync_does_not_archive_on_unknown_payload(self, _fetch_catalog) -> None:

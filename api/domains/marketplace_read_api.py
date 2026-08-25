@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -37,6 +37,7 @@ class MarketplaceCatalogItemOut(BaseModel):
     offer_id: str = ""
     sku: str = ""
     title: str = ""
+    archived: bool = False
     primary_image: str = ""
     market_sku: str = ""
     price: str = ""
@@ -68,6 +69,8 @@ class MarketplaceCatalogListOut(BaseModel):
     total: int
     page: int
     page_size: int
+    active_total: int = 0
+    archived_total: int = 0
 
 
 class MarketplaceCatalogStockRefreshIn(BaseModel):
@@ -241,13 +244,15 @@ def optional_datetime(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def normalize_catalog_item(provider_code: str, payload: dict[str, Any]) -> dict[str, str] | None:
+def normalize_catalog_item(provider_code: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     # Выделяет стабильные поля карточки, а исходный ответ сохраняется отдельно для будущего расширения.
     if provider_code == "ozon":
         external_product_id = first_text(payload.get("product_id"), payload.get("id"), payload.get("offer_id"))
         offer_id = first_text(payload.get("offer_id"), payload.get("offer_code"))
         sku = first_text(payload.get("sku"), payload.get("fbo_sku"), payload.get("fbs_sku"), offer_id)
         title = first_text(payload.get("name"), payload.get("title"))
+        visibility = str(payload.get("visibility") or "").strip().upper()
+        is_archived = bool(payload.get("archived")) or visibility == "ARCHIVED"
     elif provider_code == "yandex_market":
         offer = payload.get("offer") if isinstance(payload.get("offer"), dict) else {}
         mapping = payload.get("mapping") if isinstance(payload.get("mapping"), dict) else {}
@@ -256,6 +261,7 @@ def normalize_catalog_item(provider_code: str, payload: dict[str, Any]) -> dict[
         # Для продавца важнее его SKU offerId, а marketSku остаётся в исходном снимке для будущих деталей.
         sku = offer_id or first_text(mapping.get("marketSku"))
         title = first_text(offer.get("name"), mapping.get("marketSkuName"))
+        is_archived = bool(offer.get("archived"))
     else:
         return None
     if not external_product_id:
@@ -265,6 +271,7 @@ def normalize_catalog_item(provider_code: str, payload: dict[str, Any]) -> dict[
         "offer_id": offer_id,
         "sku": sku,
         "title": title,
+        "is_archived": is_archived,
     }
 
 
@@ -371,26 +378,44 @@ def mount_marketplace_read_routes(
     def list_catalog(
         connection_id: int | None = Query(default=None, gt=0),
         query: str = Query(default="", max_length=160),
+        state: Literal["active", "archived"] = Query(default="active"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=24, ge=1, le=100),
         user: AuthenticatedUser = Depends(current_user),
     ) -> MarketplaceCatalogListOut:
         # Отдаёт постраничный снимок своего workspace, чтобы длинный каталог не превращался в бесконечный список.
         search = str(query or "").strip()
-        conditions = ["connection.workspace_id=%s", "item.is_present=true"]
-        params: list[Any] = []
+        scope_conditions = ["connection.workspace_id=%s", "item.is_present=true"]
+        scope_params: list[Any] = []
         if connection_id:
-            conditions.append("item.connection_id=%s")
-            params.append(connection_id)
+            scope_conditions.append("item.connection_id=%s")
+            scope_params.append(connection_id)
+        conditions = [*scope_conditions, "item.is_archived=%s"]
+        params: list[Any] = [*scope_params, state == "archived"]
         search_condition, search_params = ilike_search_condition(search, CATALOG_SEARCH_EXPRESSIONS)
         if search_condition:
             conditions.append(search_condition)
             params.extend(search_params)
         where = " AND ".join(conditions)
+        scope_where = " AND ".join(scope_conditions)
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             base_params = [seller_user.workspace_id, *params]
+            count_params = [seller_user.workspace_id, *scope_params]
             with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*) FILTER (WHERE item.is_archived=false),
+                           COUNT(*) FILTER (WHERE item.is_archived=true)
+                    FROM seller.catalog_items AS item
+                    JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    WHERE {scope_where}
+                    """,
+                    count_params,
+                )
+                catalog_counts = cursor.fetchone() or (0, 0)
+                active_total = int(catalog_counts[0] or 0)
+                archived_total = int(catalog_counts[1] or 0)
                 cursor.execute(
                     f"SELECT COUNT(*) FROM seller.catalog_items AS item JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id WHERE {where}",
                     base_params,
@@ -421,7 +446,7 @@ def mount_marketplace_read_routes(
                            settings.sales_limit_reserved, settings.sales_limit_remaining,
                            settings.sales_limit_exhausted_at, settings.archived_by_sales_limit,
                            settings.source_updated_at, settings.imported_at,
-                           local_settings.updated_at
+                           local_settings.updated_at, item.is_archived
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     LEFT JOIN seller.yandex_product_settings_snapshot AS settings
@@ -447,6 +472,7 @@ def mount_marketplace_read_routes(
             items.append(MarketplaceCatalogItemOut(
                 connection_id=int(row[0]), provider_code=provider_code, store_name=str(row[2]), external_product_id=str(row[3]),
                 offer_id=str(row[4] or ""), sku=str(row[5] or ""), title=str(row[6] or ""), synced_at=row[7],
+                archived=bool(row[26]),
                 primary_image=catalog_primary_image(provider_code, row[8]),
                 stock_settings_available=has_settings,
                 sales_metrics_available=has_imported_settings,
@@ -470,6 +496,7 @@ def mount_marketplace_read_routes(
         return MarketplaceCatalogListOut(
             items=items,
             total=total, page=page, page_size=page_size,
+            active_total=active_total, archived_total=archived_total,
         )
 
     @app.post("/marketplaces/catalog/settings", response_model=MarketplaceCatalogSettingsOut)
@@ -547,7 +574,7 @@ def mount_marketplace_read_routes(
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE connection.id=%s AND connection.workspace_id=%s AND connection.status='active'
-                      AND item.is_present=true AND item.offer_id=%s
+                      AND item.is_present=true AND item.is_archived=false AND item.offer_id=%s
                     LIMIT 1
                     """,
                     (credentials_secret(), payload.connection_id, seller_user.workspace_id, offer_id),

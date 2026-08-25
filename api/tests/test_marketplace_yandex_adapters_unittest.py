@@ -6,7 +6,7 @@ import unittest
 import urllib.parse
 from unittest.mock import patch
 
-from domains.marketplace_catalog_service import _fetch_yandex_catalog, _fetch_yandex_stocks
+from domains.marketplace_catalog_service import _fetch_yandex_catalog, _fetch_yandex_stocks, update_yandex_catalog_archive
 from domains.marketplace_connection_verification import discover_yandex_market_stores
 
 
@@ -45,16 +45,55 @@ class YandexMarketplaceAdaptersTests(unittest.TestCase):
                 }
             },
             {"result": {"offerMappings": [{"offer": {"offerId": "two"}}], "paging": {}}},
+            {"result": {"offerMappings": [{"offer": {"offerId": "old"}}], "paging": {}}},
         ]
 
-        rows = _fetch_yandex_catalog(business_id=77, token="test-api-key")
+        rows = _fetch_yandex_catalog(business_id=77, campaign_id=202, token="test-api-key")
 
-        self.assertEqual([row["offer"]["offerId"] for row in rows], ["one", "two"])
-        self.assertEqual(request_json.call_count, 2)
+        self.assertEqual([row["offer"]["offerId"] for row in rows], ["one", "two", "old"])
+        self.assertEqual([row["offer"]["archived"] for row in rows], [False, False, True])
+        self.assertEqual(request_json.call_count, 3)
         first_query = urllib.parse.parse_qs(urllib.parse.urlparse(request_json.call_args_list[0].args[0]).query)
         second_query = urllib.parse.parse_qs(urllib.parse.urlparse(request_json.call_args_list[1].args[0]).query)
         self.assertEqual(first_query, {"limit": ["100"]})
         self.assertEqual(second_query, {"limit": ["100"], "pageToken": ["catalog /+="]})
+        self.assertEqual([call.kwargs["payload"] for call in request_json.call_args_list], [
+            {"archived": False}, {"archived": False}, {"archived": True},
+        ])
+
+    @patch("domains.marketplace_catalog_service._request_json")
+    def test_catalog_keeps_only_selected_campaign_when_yandex_returns_campaigns(self, request_json) -> None:
+        request_json.side_effect = [
+            {"result": {"offerMappings": [
+                {"offer": {"offerId": "ours", "campaigns": [{"campaignId": 202}]}},
+                {"offer": {"offerId": "other", "campaigns": [{"campaignId": 303}]}},
+            ], "paging": {}}},
+            {"result": {"offerMappings": [], "paging": {}}},
+        ]
+
+        rows = _fetch_yandex_catalog(business_id=77, campaign_id=202, token="test-api-key")
+
+        self.assertEqual([row["offer"]["offerId"] for row in rows], ["ours"])
+
+    @patch("domains.marketplace_catalog_service._request_json", return_value={"status": "OK"})
+    def test_archive_action_uses_offer_id_without_stock_payload(self, request_json) -> None:
+        update_yandex_catalog_archive(
+            business_id=77,
+            token="test-api-key",
+            offer_id="MRKT-1",
+            archived=True,
+        )
+
+        self.assertTrue(request_json.call_args.args[0].endswith("/v2/businesses/77/offer-mappings/archive"))
+        self.assertEqual(request_json.call_args.kwargs["payload"], {"offerIds": ["MRKT-1"]})
+
+        update_yandex_catalog_archive(
+            business_id=77,
+            token="test-api-key",
+            offer_id="MRKT-1",
+            archived=False,
+        )
+        self.assertTrue(request_json.call_args.args[0].endswith("/v2/businesses/77/offer-mappings/unarchive"))
 
     @patch("domains.marketplace_catalog_service._request_json")
     def test_stocks_are_read_in_batches_and_sum_only_available(self, request_json) -> None:

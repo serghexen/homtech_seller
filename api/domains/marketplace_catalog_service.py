@@ -12,7 +12,7 @@ from .marketplace_connection_verification import OZON_SELLER_BASE_URL, YANDEX_MA
 
 
 def _request_json(url: str, *, method: str, headers: dict[str, str], payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    # Выполняет только запросы чтения к маркетплейсу и не пишет секреты в ошибку или журнал.
+    # Выполняет ограниченные JSON-запросы адаптера и не пишет секреты в ошибку или журнал.
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None,
@@ -71,31 +71,58 @@ def _fetch_ozon_catalog(*, client_id: str, token: str) -> list[dict[str, Any]]:
     return [{**row, **details.get(str(row.get("product_id") or row.get("id") or ""), {})} for row in rows]
 
 
-def _fetch_yandex_catalog(*, business_id: int, token: str) -> list[dict[str, Any]]:
-    # Читает карточки кабинета Яндекс Маркета постранично и не вызывает методы изменения офферов.
+def _fetch_yandex_catalog(*, business_id: int, campaign_id: int | None, token: str) -> list[dict[str, Any]]:
+    # Читает активные и архивные карточки выбранного магазина постранично, не изменяя офферы.
     rows: list[dict[str, Any]] = []
-    page_token = ""
-    for _page in range(1000):
-        query: dict[str, int | str] = {"limit": 100}
-        if page_token:
-            query["pageToken"] = page_token
-        payload = _request_json(
-            f"{YANDEX_MARKET_BASE_URL}/v2/businesses/{business_id}/offer-mappings?{urllib.parse.urlencode(query)}",
-            method="POST", headers={"Api-Key": token}, payload={"archived": False},
-        )
-        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        items = result.get("offerMappings") if isinstance(result.get("offerMappings"), list) else []
-        rows.extend(item for item in items if isinstance(item, dict))
-        paging = result.get("paging") if isinstance(result.get("paging"), dict) else {}
-        next_page_token = str(paging.get("nextPageToken") or "").strip()
-        if not next_page_token:
-            break
-        if next_page_token == page_token:
-            raise HTTPException(502, "Яндекс Маркет не продвинул постраничное чтение каталога")
-        page_token = next_page_token
-    else:
-        raise HTTPException(502, "Каталог Яндекс Маркета превысил безопасный лимит страниц")
+    for archived in (False, True):
+        page_token = ""
+        for _page in range(1000):
+            query: dict[str, int | str] = {"limit": 100}
+            if page_token:
+                query["pageToken"] = page_token
+            payload = _request_json(
+                f"{YANDEX_MARKET_BASE_URL}/v2/businesses/{business_id}/offer-mappings?{urllib.parse.urlencode(query)}",
+                method="POST", headers={"Api-Key": token}, payload={"archived": archived},
+            )
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            items = result.get("offerMappings") if isinstance(result.get("offerMappings"), list) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                offer = item.get("offer") if isinstance(item.get("offer"), dict) else {}
+                campaigns = offer.get("campaigns") if isinstance(offer.get("campaigns"), list) else []
+                campaign_ids = {
+                    int(campaign.get("campaignId"))
+                    for campaign in campaigns
+                    if isinstance(campaign, dict) and str(campaign.get("campaignId") or "").isdigit()
+                }
+                if campaign_id is not None and campaign_ids and campaign_id not in campaign_ids:
+                    continue
+                rows.append({**item, "offer": {**offer, "archived": archived}})
+            paging = result.get("paging") if isinstance(result.get("paging"), dict) else {}
+            next_page_token = str(paging.get("nextPageToken") or "").strip()
+            if not next_page_token:
+                break
+            if next_page_token == page_token:
+                raise HTTPException(502, "Яндекс Маркет не продвинул постраничное чтение каталога")
+            page_token = next_page_token
+        else:
+            raise HTTPException(502, "Каталог Яндекс Маркета превысил безопасный лимит страниц")
     return rows
+
+
+def update_yandex_catalog_archive(
+    *, business_id: int, token: str, offer_id: str, archived: bool,
+) -> dict[str, Any]:
+    # Использует штатные archive/unarchive методы Яндекса и не меняет остатки либо содержимое карточки.
+    normalized_offer_id = str(offer_id or "").strip()
+    if not normalized_offer_id:
+        raise HTTPException(400, "Не удалось определить SKU карточки")
+    action = "archive" if archived else "unarchive"
+    return _request_json(
+        f"{YANDEX_MARKET_BASE_URL}/v2/businesses/{business_id}/offer-mappings/{action}",
+        method="POST", headers={"Api-Key": token}, payload={"offerIds": [normalized_offer_id]},
+    )
 
 
 def _fetch_yandex_stocks(*, campaign_id: int, token: str, offer_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -137,12 +164,14 @@ def _fetch_yandex_stocks(*, campaign_id: int, token: str, offer_ids: list[str]) 
     return stocks_by_offer
 
 
-def fetch_marketplace_catalog(*, provider_code: str, token: str, client_id: str, business_id: int | None) -> list[dict[str, Any]]:
+def fetch_marketplace_catalog(
+    *, provider_code: str, token: str, client_id: str, business_id: int | None, campaign_id: int | None,
+) -> list[dict[str, Any]]:
     # Выбирает строго read-only адаптер нужного маркетплейса и не предоставляет операций отправки.
     if provider_code == "ozon":
         return _fetch_ozon_catalog(client_id=client_id, token=token)
     if provider_code == "yandex_market" and business_id:
-        return _fetch_yandex_catalog(business_id=business_id, token=token)
+        return _fetch_yandex_catalog(business_id=business_id, campaign_id=campaign_id, token=token)
     raise HTTPException(400, "Для чтения каталога не хватает реквизитов подключенного магазина")
 
 

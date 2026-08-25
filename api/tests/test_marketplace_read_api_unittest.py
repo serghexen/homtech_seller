@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from pydantic import ValidationError
 
+from domains.marketplace_catalog_actions_api import mount_marketplace_catalog_action_routes
 from domains.marketplace_read_api import (
     CATALOG_SEARCH_EXPRESSIONS,
     ORDER_SEARCH_EXPRESSIONS,
@@ -45,6 +46,7 @@ class MarketplaceReadApiTests(unittest.TestCase):
             "offer_id": "PSN-250-TRY",
             "sku": "5204479032",
             "title": "PSN 250 TRY",
+            "is_archived": False,
         })
 
     def test_yandex_catalog_uses_seller_offer_as_sku(self) -> None:
@@ -56,6 +58,14 @@ class MarketplaceReadApiTests(unittest.TestCase):
         self.assertEqual(result["external_product_id"], "MRKT-SKI3HKAA")
         self.assertEqual(result["sku"], "MRKT-SKI3HKAA")
         self.assertEqual(result["title"], "Apex Legends")
+        self.assertFalse(result["is_archived"])
+
+    def test_yandex_catalog_preserves_archive_state(self) -> None:
+        result = normalize_catalog_item(
+            "yandex_market",
+            {"offer": {"offerId": "OLD-SKU", "name": "Архивный товар", "archived": True}},
+        )
+        self.assertTrue(result["is_archived"])
 
     def test_yandex_catalog_uses_saved_first_picture(self) -> None:
         # Изображение берётся из локального raw_payload, поэтому открытие карточки не вызывает API Маркета повторно.
@@ -131,6 +141,18 @@ class MarketplaceReadApiTests(unittest.TestCase):
             user_with_workspace=lambda *_args: None,
         )
         route = next(route for route in app.routes if route.path == "/marketplaces/catalog/stock/refresh")
+        self.assertEqual(route.methods, {"POST"})
+
+    def test_mounts_explicit_catalog_archive_action(self) -> None:
+        app = FastAPI()
+        mount_marketplace_catalog_action_routes(
+            app,
+            database_url=lambda: "",
+            psycopg=None,
+            current_user=lambda: None,
+            user_with_workspace=lambda *_args: None,
+        )
+        route = next(route for route in app.routes if route.path == "/marketplaces/catalog/archive")
         self.assertEqual(route.methods, {"POST"})
 
     def test_mounts_local_catalog_settings_save_without_marketplace_action(self) -> None:

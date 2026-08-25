@@ -41,17 +41,18 @@ def load_active_connection(connection, connection_id: int) -> tuple[Any, ...]:
 
 
 def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
-    # Атомарно заменяет актуальную часть снимка, сохраняя исчезнувшие карточки как архив.
+    # Атомарно обновляет полный снимок и отличает исчезнувшие карточки от штатного архива маркетплейса.
     connection_id, provider_code, _name, client_id, business_id, campaign_id, token, _last_sync = connection_row
     rows = fetch_marketplace_catalog(
         provider_code=str(provider_code),
         token=str(token),
         client_id=str(client_id or ""),
         business_id=int(business_id) if str(business_id or "").isdigit() else None,
+        campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
     )
     normalized_candidates = [(normalize_catalog_item(str(provider_code), item), item) for item in rows if isinstance(item, dict)]
     if len(normalized_candidates) != len(rows) or any(item is None for item, _payload in normalized_candidates):
-        # При изменении внешнего контракта безопаснее откатить снимок, чем ошибочно архивировать рабочий каталог.
+        # При изменении внешнего контракта безопаснее откатить снимок, чем ошибочно скрыть рабочий каталог.
         raise RuntimeError("Маркетплейс вернул неполный или неизвестный формат каталога")
     normalized_rows = [(item, payload) for item, payload in normalized_candidates if item is not None]
     current_product_ids = [str(item["external_product_id"]) for item, _payload in normalized_rows]
@@ -60,7 +61,7 @@ def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
         provider_code=str(provider_code),
         token=str(token),
         campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
-        offer_ids=[str(item["offer_id"]) for item, _payload in normalized_rows],
+        offer_ids=[str(item["offer_id"]) for item, _payload in normalized_rows if not item["is_archived"]],
     )
     with connection.cursor() as cursor:
         for item, raw_payload in normalized_rows:
@@ -78,11 +79,15 @@ def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
                 """
                 INSERT INTO seller.catalog_items(
                     connection_id, external_product_id, offer_id, sku, title, raw_payload,
-                    is_present, archived_at, synced_at
-                ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, true, NULL, now())
+                    is_present, is_archived, archived_at, synced_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s::jsonb, true, %s,
+                    CASE WHEN %s THEN now() ELSE NULL END, now()
+                )
                 ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
                     offer_id=EXCLUDED.offer_id, sku=EXCLUDED.sku, title=EXCLUDED.title,
-                    raw_payload=EXCLUDED.raw_payload, is_present=true, archived_at=NULL, synced_at=now()
+                    raw_payload=EXCLUDED.raw_payload, is_present=true,
+                    is_archived=EXCLUDED.is_archived, archived_at=EXCLUDED.archived_at, synced_at=now()
                 """,
                 (
                     connection_id,
@@ -91,6 +96,8 @@ def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
                     item["sku"],
                     item["title"],
                     json.dumps(persisted_payload, ensure_ascii=False),
+                    item["is_archived"],
+                    item["is_archived"],
                 ),
             )
         cursor.execute(
