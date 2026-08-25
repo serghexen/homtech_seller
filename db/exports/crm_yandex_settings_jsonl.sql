@@ -9,6 +9,8 @@ COPY (
     'manual_stock_limit', settings.manual_stock_limit,
     'published_stock', settings.published_stock,
     'activation_instruction', settings.activation_instruction,
+    'support_message', settings.support_error_message,
+    'support_message_delivery_enabled', settings.support_message_delivery_enabled,
     'sales_limit', settings.sales_limit,
     'sales_limit_daily_extra', settings.sales_limit_daily_extra,
     'sales_limit_day', settings.sales_limit_day,

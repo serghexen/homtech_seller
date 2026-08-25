@@ -120,6 +120,7 @@ class MarketplaceReadApiTests(unittest.TestCase):
             manual_stock_limit=5,
             published_stock=5,
             activation_instruction="Активируйте код в магазине.",
+            pool_issue_enabled=True,
             sales_limit=None,
             sales_limit_used=0,
             sales_limit_reserved=0,
@@ -129,6 +130,7 @@ class MarketplaceReadApiTests(unittest.TestCase):
         self.assertEqual(item.available_stock, 3)
         self.assertEqual(item.manual_stock_limit, 5)
         self.assertTrue(item.stock_settings_available)
+        self.assertTrue(item.pool_issue_enabled)
         self.assertIsNone(item.sales_limit)
 
     def test_mounts_interactive_readonly_stock_refresh(self) -> None:
@@ -175,8 +177,10 @@ class MarketplaceReadApiTests(unittest.TestCase):
             sales_limit=10,
             sales_limit_daily_extra=2,
             activation_instruction="Первая строка\nВторая строка",
+            pool_issue_enabled=True,
         )
         self.assertEqual(valid.sales_limit, 10)
+        self.assertTrue(valid.pool_issue_enabled)
         with self.assertRaises(ValidationError):
             MarketplaceCatalogSettingsIn(
                 connection_id=1,

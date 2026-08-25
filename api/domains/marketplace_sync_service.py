@@ -9,6 +9,11 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from domains.fulfillment_service import (
+    automatic_pool_reservation_enabled,
+    observe_order_fulfillments,
+    reserve_pool_keys,
+)
 from domains.marketplace_catalog_service import fetch_marketplace_catalog, fetch_marketplace_stocks
 from domains.marketplace_orders_service import fetch_marketplace_orders
 from domains.marketplace_read_api import catalog_payload_with_stock, normalize_catalog_item, normalize_order_items
@@ -126,10 +131,43 @@ def sync_orders_connection(
         synced_after=last_successful_sync_at if isinstance(last_successful_sync_at, datetime) else None,
         synced_before=sync_started_at,
     )
+    saved_items = save_order_snapshots(
+        connection,
+        connection_id=int(connection_id),
+        provider_code=str(provider_code),
+        rows=rows,
+    )
+    if str(provider_code) == "yandex_market":
+        # Polling остаётся страховочной сеткой: пропущенный webhook не должен оставить резерв у отменённого заказа.
+        seen_order_ids: set[str] = set()
+        for row in rows:
+            order_id = str(row.get("orderId") or row.get("id") or "").strip() if isinstance(row, dict) else ""
+            if not order_id or order_id in seen_order_ids:
+                continue
+            seen_order_ids.add(order_id)
+            fulfillment_ids = observe_order_fulfillments(
+                connection,
+                connection_id=int(connection_id),
+                external_order_id=order_id,
+            )
+            if automatic_pool_reservation_enabled():
+                for fulfillment_id in fulfillment_ids:
+                    reserve_pool_keys(connection, fulfillment_id=fulfillment_id)
+    return saved_items
+
+
+def save_order_snapshots(
+    connection,
+    *,
+    connection_id: int,
+    provider_code: str,
+    rows: list[dict[str, Any]],
+) -> int:
+    # Единообразно сохраняет полную синхронизацию и точечное webhook-обновление без продвижения watermark.
     normalized_rows = [
         (item, raw_payload)
         for raw_payload in rows if isinstance(raw_payload, dict)
-        for item in normalize_order_items(str(provider_code), raw_payload)
+        for item in normalize_order_items(provider_code, raw_payload)
     ]
     with connection.cursor() as cursor:
         for item, raw_payload in normalized_rows:

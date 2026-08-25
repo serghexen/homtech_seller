@@ -1,0 +1,273 @@
+<script setup>
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+
+import { keyCountLabel, parseKeyLines } from '../utils/keyPool.js'
+
+const props = defineProps({
+  order: { type: Object, required: true },
+  detail: { type: Object, default: null },
+  loading: { type: Boolean, default: false },
+  actionLoading: { type: Boolean, default: false },
+  error: { type: String, default: '' },
+})
+
+const emit = defineEmits(['close', 'prepare', 'prepare-manual', 'prepare-support', 'release', 'send', 'cancel-send'])
+const sendConfirmation = ref(false)
+const manualEntryOpen = ref(false)
+const manualCodesRaw = ref('')
+
+watch(() => props.detail?.outbound_state, () => { sendConfirmation.value = false })
+watch(() => props.detail?.fulfillment_status, (status) => {
+  if (status === 'reserved') {
+    manualEntryOpen.value = false
+    manualCodesRaw.value = ''
+  }
+})
+
+const statusPresentation = computed(() => {
+  const status = props.detail?.fulfillment_status || 'not_prepared'
+  return {
+    not_prepared: { label: 'Не подготовлена', tone: 'idle', copy: 'Ключи к заказу ещё не закреплены.' },
+    pending: { label: 'Ожидает подготовки', tone: 'idle', copy: 'Локальная выдача создана, комплект пока свободен.' },
+    manual_required: { label: 'Нужен комплект', tone: 'warning', copy: props.detail?.last_error || 'В пуле пока нет полного комплекта.' },
+    reserved: {
+      label: props.detail?.delivery_source === 'support_message' ? 'Сообщение подготовлено' : 'Комплект закреплён',
+      tone: 'ready',
+      copy: props.detail?.delivery_source === 'support_message'
+        ? 'Снимок сообщения поддержки зафиксирован в Seller и ещё не отправлен.'
+        : 'Ключи зарезервированы внутри Seller и не отправлены покупателю.',
+    },
+    supplier_required: { label: 'Нужен поставщик', tone: 'warning', copy: 'Для продолжения потребуется Supplier Hub.' },
+    sending: { label: 'Отправляется', tone: 'active', copy: 'Состояние отправки нельзя откатывать автоматически.' },
+    submitted: { label: 'Передано', tone: 'active', copy: 'Результат передан маркетплейсу и ожидает подтверждения.' },
+    unknown: { label: 'Нужна сверка', tone: 'warning', copy: 'Результат внешней отправки пока неизвестен.' },
+    delivered: { label: 'Доставлено', tone: 'ready', copy: 'Маркетплейс подтвердил доставку.' },
+    closed_external: { label: 'Закрыто внешней системой', tone: 'muted', copy: 'Этот заказ был завершён вне Seller.' },
+    cancelled: { label: 'Отменено', tone: 'muted', copy: 'Заказ отменён, локальный резерв отсутствует.' },
+    failed: { label: 'Ошибка', tone: 'warning', copy: props.detail?.last_error || 'Подготовку нужно проверить вручную.' },
+  }[status] || { label: 'Неизвестно', tone: 'muted', copy: 'Состояние пока не распознано.' }
+})
+
+const missingKeys = computed(() => Math.max(0, Number(props.detail?.quantity || props.order.quantity || 0) - Number(props.detail?.free_count || 0)))
+const canPrepareCompleteSet = computed(() => Boolean(props.detail?.can_prepare) && missingKeys.value === 0)
+const manualCodes = computed(() => parseKeyLines(manualCodesRaw.value))
+const manualCodesComplete = computed(() => manualCodes.value.length === Number(props.detail?.quantity || 0))
+const preparedCount = computed(() => props.detail?.delivery_source === 'support_message'
+  ? Number(props.detail?.quantity || 0)
+  : Number(props.detail?.reserved_count || 0))
+const outboundPresentation = computed(() => {
+  if (props.detail?.fulfillment_status === 'delivered') return 'Яндекс подтвердил доставку. Зарезервированный комплект окончательно списан из пула.'
+  return ({
+  queued: 'Отправка ожидает worker. Пока она не началась, её можно отменить.',
+  preparing: 'Worker проверяет комплект и инструкцию перед внешним запросом.',
+  sending: 'Запрос выполняется. Автоматический откат и повтор уже запрещены.',
+  submitted: 'Яндекс принял комплект. Ожидаем подтверждение заказа уведомлением или сверкой.',
+  unknown: 'Нельзя отправлять повторно: сначала сверьте заказ в кабинете Яндекса.',
+  failed: props.detail?.outbound_last_error || 'Яндекс однозначно отклонил запрос. Комплект сохранён в резерве.',
+  cancelled: 'Постановка в очередь отменена. Комплект остался в резерве.',
+  }[props.detail?.outbound_state] || '')
+})
+
+function closeOnEscape(event) {
+  if (event.key === 'Escape' && !props.actionLoading) emit('close')
+}
+
+onMounted(() => window.addEventListener('keydown', closeOnEscape))
+onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="fulfillment-card" appear>
+      <div class="fulfillment-backdrop" @click.self="!actionLoading && emit('close')">
+        <section class="fulfillment-card" role="dialog" aria-modal="true" aria-labelledby="fulfillment-title">
+          <header class="fulfillment-card__header">
+            <div>
+              <span>Локальная подготовка</span>
+              <h2 id="fulfillment-title">Заказ №{{ order.external_order_id }}</h2>
+            </div>
+            <button type="button" aria-label="Закрыть" :disabled="actionLoading" @click="emit('close')">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+            </button>
+          </header>
+
+          <div v-if="loading" class="fulfillment-card__loading">
+            <span class="fulfillment-card__pulse" />
+            Проверяем локальную выдачу и пул ключей…
+          </div>
+
+          <template v-else-if="detail">
+            <section class="fulfillment-product">
+              <div class="fulfillment-product__index">{{ String(detail.quantity).padStart(2, '0') }}</div>
+              <div>
+                <small>{{ detail.store_name }} · Яндекс Маркет</small>
+                <h3>{{ detail.title || order.title || 'Товар без названия' }}</h3>
+                <p>SKU: <strong>{{ detail.offer_id || order.offer_id || order.sku || '—' }}</strong></p>
+              </div>
+            </section>
+
+            <section class="fulfillment-state" :class="`fulfillment-state--${statusPresentation.tone}`">
+              <div class="fulfillment-state__signal"><span /></div>
+              <div>
+                <small>Состояние выдачи</small>
+                <strong>{{ statusPresentation.label }}</strong>
+                <p>{{ statusPresentation.copy }}</p>
+              </div>
+            </section>
+
+            <div class="fulfillment-metrics">
+              <article>
+                <span>Нужно для заказа</span>
+                <strong>{{ detail.quantity }}</strong>
+                <small>ключей</small>
+              </article>
+              <article>
+                <span>Свободно в пуле</span>
+                <strong>{{ detail.free_count }}</strong>
+                <small>доступно сейчас</small>
+              </article>
+              <article :class="{ 'is-ready': preparedCount }">
+                <span>{{ detail.delivery_source === 'support_message' ? 'Подготовлено' : 'Закреплено' }}</span>
+                <strong>{{ preparedCount }}</strong>
+                <small>{{ detail.delivery_source === 'support_message' ? 'сообщений' : 'только внутри Seller' }}</small>
+              </article>
+            </div>
+
+            <div class="fulfillment-safety" :class="{ 'is-outbound': detail.outbound_state }">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3" /><rect x="5" y="10" width="14" height="10" rx="3" /><path d="M12 14v2" /></svg>
+              <div>
+                <strong>{{ detail.outbound_state ? 'Внешняя отправка' : 'Защищённая подготовка' }}</strong>
+                <p v-if="detail.outbound_state">{{ outboundPresentation }}</p>
+                <p v-else>Открытые коды не появятся в браузере. Отправка начнётся только после отдельного подтверждения оператора.</p>
+              </div>
+            </div>
+
+            <div v-if="!detail.manual_actions_enabled" class="fulfillment-feature-lock">
+              <span>Режим просмотра</span>
+              Ручная подготовка выключена общим переключателем сервиса. Ни резерв, ни снятие резерва сейчас недоступны.
+            </div>
+
+            <section v-else-if="detail.can_prepare_manual" class="fulfillment-preparation">
+              <header>
+                <div><small>Источник выдачи</small><strong>Выберите, что подготовить для этого заказа</strong></div>
+                <span>Без отправки</span>
+              </header>
+              <div class="fulfillment-preparation__choices">
+                <button type="button" :disabled="actionLoading || !canPrepareCompleteSet" :title="canPrepareCompleteSet ? 'Закрепить ключи из пула' : `Не хватает: ${missingKeys}`" @click="emit('prepare')">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10a5 5 0 1 1 4.6 5" /><path d="m9 14-6 6M5 18l2 2M8 15l2 2" /></svg>
+                  <span><strong>Из пула</strong><small>{{ canPrepareCompleteSet ? `${detail.quantity} шт. доступно` : `Не хватает ${missingKeys}` }}</small></span>
+                </button>
+                <button type="button" :class="{ 'is-active': manualEntryOpen }" :disabled="actionLoading" @click="manualEntryOpen = !manualEntryOpen">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11-4-4L4 16z" /><path d="m13 7 4 4" /></svg>
+                  <span><strong>Ввести вручную</strong><small>Ровно {{ detail.quantity }} шт.</small></span>
+                </button>
+                <button type="button" :disabled="actionLoading || !detail.can_prepare_support" :title="detail.support_message_configured ? 'Подготовить сохранённое сообщение' : 'Сначала заполните сообщение в карточке товара'" @click="emit('prepare-support')">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 3z" /><path d="M8 9h8M8 12h5" /></svg>
+                  <span><strong>Через поддержку</strong><small>{{ detail.support_message_configured ? 'Сообщение настроено' : 'Текст не настроен' }}</small></span>
+                </button>
+              </div>
+              <div v-if="manualEntryOpen" class="fulfillment-manual-entry">
+                <label>
+                  <span>Ключи — по одному на строку</span>
+                  <textarea v-model="manualCodesRaw" :disabled="actionLoading" spellcheck="false" autocomplete="off" placeholder="AAAA-BBBB-CCCC" />
+                  <small :class="{ 'is-complete': manualCodesComplete }">{{ keyCountLabel(manualCodes.length) }} из {{ detail.quantity }}</small>
+                </label>
+                <button type="button" :disabled="actionLoading || !manualCodesComplete" @click="emit('prepare-manual', manualCodes)">
+                  {{ actionLoading ? 'Защищаем…' : 'Защифровать и закрепить' }}
+                </button>
+              </div>
+              <p>Подготовка не отправляет данные в Яндекс. Перед отправкой появится отдельное подтверждение.</p>
+            </section>
+
+            <p v-if="error" class="fulfillment-card__error">{{ error }}</p>
+
+            <footer class="fulfillment-card__actions">
+              <p v-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
+              <p v-else-if="detail.can_prepare_manual">Выберите источник выше. После подготовки комплект можно будет проверить и отправить.</p>
+              <p v-else-if="detail.can_send && !sendConfirmation">Комплект готов. Отправка — отдельное необратимое действие.</p>
+              <p v-else-if="detail.can_send">Проверьте заказ: после подтверждения worker передаст комплект в Яндекс.</p>
+              <p v-else-if="detail.can_cancel_send">Задание ещё не взято worker-ом, поэтому его можно безопасно отменить.</p>
+              <p v-else-if="detail.can_release">Резерв можно безопасно снять, пока отправка не поставлена в очередь.</p>
+              <p v-else>Для этого состояния локальные действия недоступны.</p>
+              <button
+                v-if="detail.can_cancel_send"
+                class="fulfillment-action fulfillment-action--release"
+                type="button"
+                :disabled="actionLoading"
+                @click="emit('cancel-send')"
+              >
+                {{ actionLoading ? 'Отменяем…' : 'Отменить отправку' }}
+              </button>
+              <button
+                v-else-if="detail.can_send && sendConfirmation"
+                class="fulfillment-action fulfillment-action--send"
+                type="button"
+                :disabled="actionLoading"
+                @click="emit('send')"
+              >
+                {{ actionLoading ? 'Ставим в очередь…' : 'Подтвердить отправку' }}
+              </button>
+              <button
+                v-else-if="detail.can_send"
+                class="fulfillment-action"
+                type="button"
+                :disabled="actionLoading"
+                @click="sendConfirmation = true"
+              >
+                Отправить в Яндекс
+              </button>
+              <button
+                v-else-if="detail.can_release"
+                class="fulfillment-action fulfillment-action--release"
+                type="button"
+                :disabled="actionLoading"
+                @click="emit('release')"
+              >
+                {{ actionLoading ? 'Снимаем резерв…' : 'Снять резерв' }}
+              </button>
+              <button v-else-if="detail.can_prepare_manual" class="fulfillment-action fulfillment-action--quiet" type="button" :disabled="actionLoading" @click="emit('close')">Закрыть</button>
+              <button v-else class="fulfillment-action fulfillment-action--quiet" type="button" @click="emit('close')">Закрыть</button>
+            </footer>
+          </template>
+
+          <p v-else class="fulfillment-card__error">{{ error || 'Не удалось прочитать локальную выдачу' }}</p>
+        </section>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.fulfillment-backdrop { position: fixed; z-index: 12; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2,6,19,.76); backdrop-filter: blur(10px); }
+.fulfillment-card { width: min(100%,760px); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid rgba(125,151,220,.34); border-radius: 29px; color: #edf2ff; background: radial-gradient(circle at 100% 0,rgba(64,101,230,.18),transparent 36%),linear-gradient(145deg,#14213f,#0a1026 72%); box-shadow: 0 36px 120px rgba(0,0,0,.52); }
+.fulfillment-card__header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 26px 28px 22px; border-bottom: 1px solid rgba(137,158,208,.18); }
+.fulfillment-card__header span { color: #7795ff; font-size: 10px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }
+.fulfillment-card__header h2 { margin: 6px 0 0; font-size: clamp(25px,4vw,38px); letter-spacing: -.055em; }
+.fulfillment-card__header button { display: grid; width: 42px; height: 42px; place-items: center; padding: 0; border: 1px solid rgba(139,160,210,.28); border-radius: 13px; color: #aebbd7; background: rgba(18,30,60,.72); }
+.fulfillment-card__header svg,.fulfillment-safety svg { width: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.fulfillment-card__loading { min-height: 360px; display: grid; place-content: center; justify-items: center; gap: 18px; color: #aebad5; }
+.fulfillment-card__pulse { width: 42px; aspect-ratio: 1; border: 2px solid rgba(84,123,255,.28); border-top-color: #6d8cff; border-radius: 50%; animation: fulfillment-spin .85s linear infinite; }
+.fulfillment-product { display: grid; grid-template-columns: 60px minmax(0,1fr); align-items: center; gap: 18px; margin: 26px 28px 18px; }
+.fulfillment-product__index { display: grid; width: 60px; height: 60px; place-items: center; border: 1px solid rgba(84,128,255,.56); border-radius: 18px; color: #83a0ff; background: rgba(41,74,177,.22); font: 900 15px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.fulfillment-product small,.fulfillment-product p { color: #aab6d1; }
+.fulfillment-product h3 { margin: 5px 0 7px; font-size: 19px; line-height: 1.3; letter-spacing: -.025em; }
+.fulfillment-product p { margin: 0; font-size: 12px; }.fulfillment-product p strong { color: #e8edfb; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+.fulfillment-state { display: grid; grid-template-columns: 42px minmax(0,1fr); gap: 14px; margin: 0 28px 18px; padding: 17px; border: 1px solid rgba(137,158,208,.21); border-radius: 18px; background: rgba(11,20,44,.7); }
+.fulfillment-state__signal { display: grid; place-items: center; }.fulfillment-state__signal > span { width: 12px; aspect-ratio: 1; border-radius: 50%; color: #8da0c9; background: currentColor; box-shadow: 0 0 0 7px color-mix(in srgb,currentColor 12%,transparent); }
+.fulfillment-state small { display: block; margin-bottom: 4px; color: #8f9dbb; font-size: 9px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }.fulfillment-state strong { font-size: 16px; }.fulfillment-state p { margin: 5px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.45; }
+.fulfillment-state--ready { border-color: rgba(77,225,188,.38); }.fulfillment-state--ready .fulfillment-state__signal > span { color: #50e6bd; }.fulfillment-state--warning { border-color: rgba(255,192,89,.34); }.fulfillment-state--warning .fulfillment-state__signal > span { color: #ffc55d; }.fulfillment-state--active .fulfillment-state__signal > span { color: #6f91ff; }
+.fulfillment-metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 11px; margin: 0 28px 18px; }.fulfillment-metrics article { padding: 16px; border: 1px solid rgba(137,158,208,.18); border-radius: 17px; background: rgba(17,28,57,.56); }.fulfillment-metrics article.is-ready { border-color: rgba(74,226,188,.35); background: rgba(24,74,74,.25); }.fulfillment-metrics span,.fulfillment-metrics small { display: block; color: #8f9dbb; font-size: 10px; }.fulfillment-metrics strong { display: block; margin: 8px 0 4px; font-size: 29px; line-height: 1; letter-spacing: -.05em; }
+.fulfillment-safety { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; margin: 0 28px 18px; padding: 15px; border: 1px dashed rgba(101,134,221,.33); border-radius: 16px; color: #8ea8f2; background: rgba(26,48,105,.17); }.fulfillment-safety p { margin: 4px 0 0; color: #9faccc; font-size: 11px; line-height: 1.5; }
+.fulfillment-safety.is-outbound { border-style: solid; border-color: rgba(101,134,221,.42); }
+.fulfillment-feature-lock { margin: 0 28px 18px; padding: 12px 14px; border: 1px solid rgba(255,194,91,.25); border-radius: 14px; color: #b9c2d8; background: rgba(77,57,28,.22); font-size: 11px; line-height: 1.5; }.fulfillment-feature-lock span { display: inline-flex; margin-right: 7px; padding: 3px 7px; border-radius: 999px; color: #ffd178; background: rgba(255,193,82,.1); font-size: 9px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
+.fulfillment-preparation { margin: 0 28px 18px; padding: 17px; border: 1px solid rgba(92,129,239,.3); border-radius: 19px; background: rgba(11,22,50,.66); }.fulfillment-preparation > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 13px; }.fulfillment-preparation > header small,.fulfillment-preparation > header strong { display: block; }.fulfillment-preparation > header small { margin-bottom: 4px; color: #7f91b8; font-size: 9px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }.fulfillment-preparation > header strong { font-size: 13px; }.fulfillment-preparation > header > span { flex: 0 0 auto; padding: 5px 8px; border: 1px solid rgba(91,130,255,.28); border-radius: 999px; color: #8da8ff; font-size: 8px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.fulfillment-preparation__choices { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; }.fulfillment-preparation__choices > button { display: grid; grid-template-columns: 29px minmax(0,1fr); align-items: center; gap: 9px; min-height: 70px; padding: 11px; text-align: left; border: 1px solid rgba(128,151,210,.24); border-radius: 14px; color: #dce5f8; background: rgba(25,39,75,.62); }.fulfillment-preparation__choices > button:hover:not(:disabled),.fulfillment-preparation__choices > button.is-active { border-color: rgba(88,128,255,.66); background: rgba(37,70,171,.28); }.fulfillment-preparation__choices svg { width: 24px; fill: none; stroke: #83a0ff; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }.fulfillment-preparation__choices strong,.fulfillment-preparation__choices small { display: block; }.fulfillment-preparation__choices strong { font-size: 11px; }.fulfillment-preparation__choices small { margin-top: 4px; color: #8999ba; font-size: 9px; line-height: 1.3; }.fulfillment-preparation__choices button:disabled { opacity: .45; cursor: not-allowed; }
+.fulfillment-manual-entry { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 11px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(133,155,210,.15); }.fulfillment-manual-entry label { display: grid; gap: 6px; }.fulfillment-manual-entry label > span { color: #aebad4; font-size: 10px; font-weight: 750; }.fulfillment-manual-entry textarea { min-height: 80px; padding: 10px 11px; border: 1px solid rgba(133,155,210,.28); border-radius: 11px; color: #edf2ff; background: rgba(5,11,27,.72); font: 11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize: vertical; }.fulfillment-manual-entry small { justify-self: end; color: #8797b8; font-size: 9px; }.fulfillment-manual-entry small.is-complete { color: #55dfb9; }.fulfillment-manual-entry > button { min-height: 44px; padding: 0 14px; border: 1px solid rgba(84,125,255,.55); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#2253de,#466fff); font-size: 10px; font-weight: 850; }.fulfillment-manual-entry > button:disabled { opacity: .45; cursor: not-allowed; }.fulfillment-preparation > p { margin: 12px 0 0; color: #8292b3; font-size: 9px; line-height: 1.5; }
+.fulfillment-card__error { margin: 0 28px 18px; color: #ffaaa8; font-size: 13px; }
+.fulfillment-card__actions { display: flex; min-height: 88px; align-items: center; justify-content: flex-end; gap: 18px; padding: 18px 28px 24px; border-top: 1px solid rgba(137,158,208,.16); }.fulfillment-card__actions p { min-width: 0; flex: 1; margin: 0; color: #9faccc; font-size: 12px; line-height: 1.45; }
+.fulfillment-action { min-height: 50px; padding: 0 19px; border: 1px solid rgba(91,130,255,.64); border-radius: 14px; color: #fff; background: linear-gradient(135deg,#2355e7,#4b73ff); box-shadow: 0 13px 32px rgba(32,77,220,.24); font-weight: 850; }.fulfillment-action--release { color: #ffb0ae; border-color: rgba(255,150,155,.34); background: rgba(92,37,53,.48); box-shadow: none; }.fulfillment-action--quiet { color: #c7d1e7; border-color: rgba(139,160,210,.28); background: rgba(26,38,71,.65); box-shadow: none; }.fulfillment-action:disabled { opacity: .46; cursor: not-allowed; box-shadow: none; }
+.fulfillment-action--send { background: linear-gradient(135deg,#1944cc,#3e68ff); }
+.fulfillment-card-enter-active,.fulfillment-card-leave-active { transition: opacity .2s ease; }.fulfillment-card-enter-active .fulfillment-card,.fulfillment-card-leave-active .fulfillment-card { transition: transform .22s ease,opacity .2s ease; }.fulfillment-card-enter-from,.fulfillment-card-leave-to { opacity: 0; }.fulfillment-card-enter-from .fulfillment-card,.fulfillment-card-leave-to .fulfillment-card { opacity: 0; transform: translateY(12px) scale(.985); }
+@keyframes fulfillment-spin { to { transform: rotate(360deg); } }
+@media (max-width:620px) { .fulfillment-backdrop { padding: 10px; }.fulfillment-card { max-height: calc(100vh - 20px); border-radius: 22px; }.fulfillment-card__header,.fulfillment-card__actions { padding-right: 18px; padding-left: 18px; }.fulfillment-product,.fulfillment-state,.fulfillment-metrics,.fulfillment-safety,.fulfillment-feature-lock,.fulfillment-preparation,.fulfillment-card__error { margin-right: 18px; margin-left: 18px; }.fulfillment-metrics,.fulfillment-preparation__choices { grid-template-columns: 1fr; }.fulfillment-manual-entry { grid-template-columns: 1fr; }.fulfillment-card__actions { align-items: stretch; flex-direction: column; }.fulfillment-action { width: 100%; } }
+</style>

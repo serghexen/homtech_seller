@@ -37,6 +37,8 @@ COPY (
     'manual_stock_limit', settings.manual_stock_limit,
     'published_stock', settings.published_stock,
     'activation_instruction', settings.activation_instruction,
+    'support_message', settings.support_error_message,
+    'support_message_delivery_enabled', settings.support_message_delivery_enabled,
     'sales_limit', settings.sales_limit,
     'sales_limit_daily_extra', settings.sales_limit_daily_extra,
     'sales_limit_day', settings.sales_limit_day,
@@ -69,8 +71,9 @@ COPY (
 COMMIT;
 ```
 
-Результат — JSONL: одна самостоятельная JSON-строка на товар. Тексты инструкций
-экранируются JSON и не выводятся в журнал импорта.
+Результат — JSONL: одна самостоятельная JSON-строка на товар. Тексты инструкций и
+сообщений поддержки экранируются JSON и не выводятся в журнал импорта. Флаг отправки
+сообщения переносится отдельно: заполненный текст из CRM не включает выдачу автоматически.
 
 ## 3. Проверка и применение
 
@@ -103,6 +106,27 @@ python scripts/import_crm_yandex_settings.py \
 
 Повторный запуск идемпотентен. Пока CRM остаётся источником редактирования, экспорт и
 импорт можно безопасно повторять как одностороннюю синхронизацию CRM → Seller.
+
+Если нужно доимпортировать только сообщения поддержки и не захватывать изменившиеся
+остатки, лимиты или инструкции, тот же JSONL передаётся специализированному скрипту:
+
+```bash
+python scripts/import_crm_yandex_support_messages.py \
+  --input /secure/path/joycards-settings.jsonl \
+  --source-store-code joycards \
+  --campaign-id 149196813 \
+  --expected-count 371
+
+python scripts/import_crm_yandex_support_messages.py \
+  --input /secure/path/joycards-settings.jsonl \
+  --source-store-code joycards \
+  --campaign-id 149196813 \
+  --expected-count 371 \
+  --apply
+```
+
+Он изменяет только `support_message` и `support_message_delivery_enabled`. Заполненный
+в CRM текст с выключенным флагом остаётся выключенным в Seller.
 
 Перед финальным импортом нужно выполнить новую синхронизацию каталога: Seller получает
 как активные, так и архивные предложения Яндекс Маркета. Если после этого CRM всё ещё

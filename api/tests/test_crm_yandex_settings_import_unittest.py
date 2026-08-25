@@ -15,6 +15,8 @@ class CrmYandexSettingsImportTests(unittest.TestCase):
             "manual_stock_limit": 5,
             "published_stock": 4,
             "activation_instruction": "Активируйте код в магазине.",
+            "support_message": "Напишите в поддержку.",
+            "support_message_delivery_enabled": False,
             "sales_limit": None,
             "sales_limit_daily_extra": 0,
             "sales_limit_day": "2026-08-24",
@@ -37,6 +39,8 @@ class CrmYandexSettingsImportTests(unittest.TestCase):
         self.assertEqual(rows[0].activation_instruction, "Первая строка\nВторая строка")
         self.assertIsNone(rows[0].sales_limit)
         self.assertIsNone(rows[0].sales_limit_remaining)
+        self.assertEqual(rows[0].support_message, "Напишите в поддержку.")
+        self.assertFalse(rows[0].support_message_delivery_enabled)
 
     def test_missing_catalog_offers_are_strict_by_default(self):
         row = read_source_rows(io.StringIO(json.dumps(self.source_payload()) + "\n"))[0]

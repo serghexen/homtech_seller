@@ -49,6 +49,9 @@ class MarketplaceCatalogItemOut(BaseModel):
     manual_stock_limit: int | None = None
     published_stock: int | None = None
     activation_instruction: str = ""
+    support_message: str = ""
+    support_message_delivery_enabled: bool = False
+    pool_issue_enabled: bool = False
     sales_limit: int | None = None
     sales_limit_daily_extra: int | None = None
     sales_limit_day: date | None = None
@@ -93,6 +96,9 @@ class MarketplaceCatalogSettingsIn(BaseModel):
     sales_limit: int | None = Field(default=None, ge=1, le=1_000_000)
     sales_limit_daily_extra: int = Field(default=0, ge=0, le=1_000_000)
     activation_instruction: str = Field(default="", max_length=10_000)
+    support_message: str = Field(default="", max_length=2_000)
+    support_message_delivery_enabled: bool = False
+    pool_issue_enabled: bool = False
 
 
 class MarketplaceCatalogSettingsOut(BaseModel):
@@ -103,6 +109,9 @@ class MarketplaceCatalogSettingsOut(BaseModel):
     sales_limit_daily_extra: int
     sales_limit_day: date
     activation_instruction: str
+    support_message: str
+    support_message_delivery_enabled: bool
+    pool_issue_enabled: bool
     settings_saved_at: datetime
 
 
@@ -446,7 +455,13 @@ def mount_marketplace_read_routes(
                            settings.sales_limit_reserved, settings.sales_limit_remaining,
                            settings.sales_limit_exhausted_at, settings.archived_by_sales_limit,
                            settings.source_updated_at, settings.imported_at,
-                           local_settings.updated_at, item.is_archived
+                           local_settings.updated_at, item.is_archived,
+                           CASE WHEN COALESCE(local_settings.support_message_overridden, false)
+                             THEN local_settings.support_message ELSE COALESCE(settings.support_message, '') END,
+                           CASE WHEN COALESCE(local_settings.support_message_overridden, false)
+                             THEN local_settings.support_message_delivery_enabled
+                             ELSE COALESCE(settings.support_message_delivery_enabled, false) END,
+                           COALESCE(local_settings.pool_issue_enabled, false)
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     LEFT JOIN seller.yandex_product_settings_snapshot AS settings
@@ -491,6 +506,9 @@ def mount_marketplace_read_routes(
                 settings_source_updated_at=row[23] if has_imported_settings else None,
                 settings_imported_at=row[24] if has_imported_settings else None,
                 settings_saved_at=row[25] if has_local_settings else None,
+                support_message=str(row[27] or "") if has_settings else "",
+                support_message_delivery_enabled=bool(row[28]) if has_settings else False,
+                pool_issue_enabled=bool(row[29]) if has_local_settings else False,
                 **details,
             ))
         return MarketplaceCatalogListOut(
@@ -507,6 +525,7 @@ def mount_marketplace_read_routes(
         # Сохраняет только локальные параметры Seller. Здесь намеренно нет токена и вызова API маркетплейса.
         product_id = str(payload.external_product_id).strip()
         instruction = str(payload.activation_instruction or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        support_message = str(payload.support_message or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
@@ -529,23 +548,31 @@ def mount_marketplace_read_routes(
                     INSERT INTO seller.product_card_settings (
                       connection_id, external_product_id, manual_stock_limit,
                       sales_limit, sales_limit_daily_extra, sales_limit_day, activation_instruction,
-                      updated_by_user_id
-                    ) VALUES (%s,%s,%s,%s,%s,CURRENT_DATE,%s,%s)
+                      support_message, support_message_delivery_enabled, support_message_overridden,
+                      pool_issue_enabled, updated_by_user_id
+                    ) VALUES (%s,%s,%s,%s,%s,CURRENT_DATE,%s,%s,%s,true,%s,%s)
                     ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
                       manual_stock_limit=EXCLUDED.manual_stock_limit,
                       sales_limit=EXCLUDED.sales_limit,
                       sales_limit_daily_extra=EXCLUDED.sales_limit_daily_extra,
                       sales_limit_day=CURRENT_DATE,
                       activation_instruction=EXCLUDED.activation_instruction,
+                      support_message=EXCLUDED.support_message,
+                      support_message_delivery_enabled=EXCLUDED.support_message_delivery_enabled,
+                      support_message_overridden=true,
+                      pool_issue_enabled=EXCLUDED.pool_issue_enabled,
                       updated_by_user_id=EXCLUDED.updated_by_user_id,
                       updated_at=now()
                     RETURNING connection_id, external_product_id, manual_stock_limit,
                               sales_limit, sales_limit_daily_extra, sales_limit_day,
-                              activation_instruction, updated_at
+                              activation_instruction, support_message,
+                              support_message_delivery_enabled, pool_issue_enabled, updated_at
                     """,
                     (
                         payload.connection_id, product_id, payload.manual_stock_limit,
-                        payload.sales_limit, payload.sales_limit_daily_extra, instruction,
+                        payload.sales_limit, payload.sales_limit_daily_extra, instruction, support_message,
+                        payload.support_message_delivery_enabled,
+                        payload.pool_issue_enabled,
                         seller_user.id,
                     ),
                 )
@@ -554,7 +581,9 @@ def mount_marketplace_read_routes(
             connection_id=int(row[0]), external_product_id=str(row[1]),
             manual_stock_limit=int(row[2]), sales_limit=int(row[3]) if row[3] is not None else None,
             sales_limit_daily_extra=int(row[4]), sales_limit_day=row[5],
-            activation_instruction=str(row[6] or ""), settings_saved_at=row[7],
+            activation_instruction=str(row[6] or ""), support_message=str(row[7] or ""),
+            support_message_delivery_enabled=bool(row[8]), pool_issue_enabled=bool(row[9]),
+            settings_saved_at=row[10],
         )
 
     @app.post("/marketplaces/catalog/stock/refresh", response_model=MarketplaceCatalogStockOut)

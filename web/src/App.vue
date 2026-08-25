@@ -6,6 +6,7 @@ import ozonLogo from './assets/ozon-logo.png'
 import yandexMarketLogo from './assets/yandex-market-logo.png'
 import HamsterLoader from './components/HamsterLoader.vue'
 import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
+import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
 import {
   isSyncJobActive,
@@ -74,6 +75,11 @@ const selectedProductKeyPoolLoading = ref(false)
 const selectedProductKeyPoolSaving = ref(false)
 const selectedProductKeyPoolError = ref('')
 const selectedProductKeyPoolNotice = ref('')
+const selectedOrderItem = ref(null)
+const selectedOrderFulfillment = ref(null)
+const selectedOrderFulfillmentLoading = ref(false)
+const selectedOrderFulfillmentActionLoading = ref(false)
+const selectedOrderFulfillmentError = ref('')
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 let catalogRequestSequence = 0
@@ -122,6 +128,12 @@ function providerLogo(providerCode) {
 function hasProductInstruction(item) {
   // Литеральные переносы из старой CRM не должны считаться содержательной инструкцией сами по себе.
   return Boolean(normalizeEscapedLineBreaks(item?.activation_instruction).trim())
+}
+
+function isDigitalYandexOrder(item) {
+  // Выдача ключей относится только к цифровым DBS-заказам Яндекс Маркета.
+  return item?.provider_code === 'yandex_market'
+    && String(item?.delivery_type || '').trim().toUpperCase() === 'DIGITAL'
 }
 
 async function openProductCard(item) {
@@ -347,6 +359,9 @@ async function saveSelectedProductSettings(settings) {
       sales_limit_daily_extra: result.sales_limit_daily_extra,
       sales_limit_day: result.sales_limit_day,
       activation_instruction: result.activation_instruction,
+      support_message: result.support_message,
+      support_message_delivery_enabled: result.support_message_delivery_enabled,
+      pool_issue_enabled: result.pool_issue_enabled,
       settings_saved_at: result.settings_saved_at,
     }
     Object.assign(selectedCatalogItem.value, savedSettings)
@@ -397,6 +412,76 @@ function orderStatus(status) {
     cancelled: 'Отменён',
     problem: 'Проблема',
   }[status] || 'Проблема'
+}
+
+async function openOrderFulfillment(item) {
+  // Открывает отдельную безопасную карточку подготовки, не выполняя резерв по самому клику.
+  selectedOrderItem.value = item
+  selectedOrderFulfillment.value = null
+  selectedOrderFulfillmentError.value = ''
+  await loadOrderFulfillment()
+}
+
+function closeOrderFulfillment() {
+  if (selectedOrderFulfillmentActionLoading.value) return
+  selectedOrderItem.value = null
+  selectedOrderFulfillment.value = null
+  selectedOrderFulfillmentLoading.value = false
+  selectedOrderFulfillmentError.value = ''
+}
+
+async function loadOrderFulfillment() {
+  const item = selectedOrderItem.value
+  if (!item) return
+  const identity = `${item.connection_id}:${item.external_order_id}:${item.external_item_id}`
+  selectedOrderFulfillmentLoading.value = true
+  selectedOrderFulfillmentError.value = ''
+  try {
+    const query = queryString({
+      connection_id: item.connection_id,
+      external_order_id: item.external_order_id,
+      external_item_id: item.external_item_id,
+    })
+    const result = await apiRequest(`/marketplaces/orders/fulfillment?${query}`)
+    if (selectedOrderItem.value && `${selectedOrderItem.value.connection_id}:${selectedOrderItem.value.external_order_id}:${selectedOrderItem.value.external_item_id}` === identity) {
+      selectedOrderFulfillment.value = result
+    }
+  } catch (requestError) {
+    selectedOrderFulfillmentError.value = requestError.message || 'Не удалось прочитать локальную выдачу'
+  } finally {
+    selectedOrderFulfillmentLoading.value = false
+  }
+}
+
+async function updateOrderFulfillment(action, extra = {}) {
+  // Даже действие send только создаёт долговечное задание; значения ключей браузеру и API не возвращаются.
+  const item = selectedOrderItem.value
+  if (!item || selectedOrderFulfillmentActionLoading.value) return
+  selectedOrderFulfillmentActionLoading.value = true
+  selectedOrderFulfillmentError.value = ''
+  try {
+    selectedOrderFulfillment.value = await apiRequest(`/marketplaces/orders/fulfillment/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        connection_id: item.connection_id,
+        external_order_id: item.external_order_id,
+        external_item_id: item.external_item_id,
+        ...extra,
+      }),
+    })
+  } catch (requestError) {
+    const fallback = {
+      prepare: 'Не удалось закрепить комплект',
+      'prepare-manual': 'Не удалось закрепить ручной комплект',
+      'prepare-support': 'Не удалось подготовить сообщение поддержки',
+      release: 'Не удалось снять резерв',
+      send: 'Не удалось поставить отправку в очередь',
+      'cancel-send': 'Не удалось отменить отправку',
+    }
+    selectedOrderFulfillmentError.value = requestError.message || fallback[action] || 'Не удалось выполнить действие'
+  } finally {
+    selectedOrderFulfillmentActionLoading.value = false
+  }
 }
 
 function formatDate(value) {
@@ -1159,7 +1244,7 @@ onMounted(async () => {
           </div>
           <div v-else class="snapshot-grid">
             <article v-for="item in orders" :key="`${item.connection_id}-${item.external_order_id}-${item.external_item_id}`" class="snapshot-card order-card">
-              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span></div>
+              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="isDigitalYandexOrder(item) && item.status === 'processing' && !isConnectionDisabled(item.connection_id)" class="order-card__fulfillment" type="button" title="Подготовить локальную выдачу" aria-label="Подготовить локальную выдачу" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
               <div class="order-card__body"><strong>{{ item.title || 'Товар без названия' }}</strong></div>
               <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.updated_at || item.created_at || item.synced_at">{{ formatDate(item.updated_at || item.created_at || item.synced_at) }}</time></div>
             </article>
@@ -1220,6 +1305,22 @@ onMounted(async () => {
       @add-keys="addSelectedProductKeys"
       @save-settings="saveSelectedProductSettings"
       @close="closeProductCard"
+    />
+
+    <OrderFulfillmentModal
+      v-if="selectedOrderItem"
+      :order="selectedOrderItem"
+      :detail="selectedOrderFulfillment"
+      :loading="selectedOrderFulfillmentLoading"
+      :action-loading="selectedOrderFulfillmentActionLoading"
+      :error="selectedOrderFulfillmentError"
+      @prepare="updateOrderFulfillment('prepare')"
+      @prepare-manual="(codes) => updateOrderFulfillment('prepare-manual', { codes })"
+      @prepare-support="updateOrderFulfillment('prepare-support')"
+      @release="updateOrderFulfillment('release')"
+      @send="updateOrderFulfillment('send')"
+      @cancel-send="updateOrderFulfillment('cancel-send')"
+      @close="closeOrderFulfillment"
     />
 
     <CatalogArchiveConfirm
@@ -1286,6 +1387,7 @@ onMounted(async () => {
 .orders-filter-row { display: flex; flex-wrap: wrap; align-items: end; gap: 18px; padding: 16px 18px; border: 1px solid rgba(144,160,204,.17); border-radius: 18px; background: rgba(14,22,48,.52); box-shadow: inset 0 1px rgba(255,255,255,.02); } .orders-filter-row__period { position: relative; display: flex; align-items: end; gap: 9px; } .orders-filter-row__period > span:first-child, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .orders-filter-row__period > span:first-child { position: absolute; top: 0; left: 0; } .orders-filter-row__period label { padding-top: 19px; } .orders-filter-row label { display: grid; gap: 7px; min-width: 150px; } .orders-filter-row .status-select { position: relative; min-width: 175px; } .orders-filter-row .status-select::after { content: ''; position: absolute; right: 17px; bottom: 22px; width: 7px; height: 7px; border-right: 2px solid #8794b2; border-bottom: 2px solid #8794b2; transform: rotate(45deg); pointer-events: none; } .orders-filter-row select { padding-right: 42px; appearance: none; -webkit-appearance: none; } .date-divider { padding-bottom: 17px; color: #71809f; } .orders-filter-row__actions { display: flex; align-items: flex-end; gap: 9px; } .filter-apply, .filter-reset { height: 52px; min-height: 52px; } .filter-reset { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 1px solid rgba(255,150,155,.34); border-radius: 14px; color: #ffaaa8; background: rgba(255,150,155,.07); font-weight: 800; transition: border-color .2s, background .2s, transform .2s; } .filter-reset svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .filter-reset:hover { border-color: rgba(255,170,168,.62); background: rgba(255,150,155,.13); transform: translateY(-1px); } .order-filters-enter-active, .order-filters-leave-active { overflow: hidden; transition: opacity .18s ease,transform .18s ease; } .order-filters-enter-from, .order-filters-leave-to { opacity: 0; transform: translateY(-6px); } .snapshot-count { margin: 3px 0 0; color: #9eabc7; font-size: 13px; font-weight: 750; }
 .snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div:not(.catalog-card__actions) { min-width: 0; flex: 1 1 auto; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .catalog-card { cursor: pointer; transition: border-color .18s,box-shadow .18s,transform .18s,opacity .18s; } .catalog-card:hover,.catalog-card:focus-visible { border-color: rgba(91,123,255,.58); box-shadow: inset 0 1px rgba(255,255,255,.04),0 14px 34px rgba(6,16,48,.26); transform: translateY(-2px); outline: none; } .catalog-card:focus-visible { box-shadow: inset 0 1px rgba(255,255,255,.04),0 0 0 3px rgba(75,115,255,.22),0 14px 34px rgba(6,16,48,.26); } .catalog-card--archived { border-color: rgba(125,143,188,.2); background: linear-gradient(145deg,rgba(24,36,67,.88),rgba(13,20,44,.94)); } .catalog-card--archived .market-mark,.catalog-card--archived .catalog-card__instruction { opacity: .72; } .catalog-card__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; } .catalog-card__open,.catalog-card__instruction,.catalog-card__archive-action { display: grid; width: 39px; height: 39px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(126,151,217,.3); border-radius: 12px; color: #9cadd5; background: rgba(17,28,57,.72); transition: color .18s,border-color .18s,background .18s,transform .18s,box-shadow .18s; } .catalog-card__open svg,.catalog-card__instruction svg,.catalog-card__archive-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .catalog-card__instruction { color: #f4f7ff; border-color: rgba(230,236,255,.34); } .catalog-card__instruction--filled { color: #fff; border-color: rgba(83,125,255,.74); background: linear-gradient(145deg,rgba(30,77,224,.96),rgba(74,111,255,.88)); box-shadow: 0 8px 20px rgba(32,77,220,.22); } .catalog-card__archive-action { cursor: pointer; color: #98a8ce; } .catalog-card__archive-action:hover,.catalog-card__archive-action:focus-visible { color: #fff; border-color: rgba(111,139,255,.68); background: rgba(45,75,175,.48); outline: none; } .catalog-card__archive-action--restore { color: #8ca7ff; border-color: rgba(83,125,255,.42); background: rgba(40,75,188,.2); } .catalog-card__archive-action:disabled { opacity: .42; cursor: not-allowed; } .catalog-card:hover .catalog-card__open,.catalog-card:focus-visible .catalog-card__open { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); transform: translateY(-1px); } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__facts { display: flex; min-width: 0; align-items: center; gap: 18px; } .catalog-card__stock { color: #9fdccb; white-space: nowrap; } .catalog-card__stock strong { color: #58e5bd; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { min-width: 0; } .order-card__body > strong { display: -webkit-box; overflow: hidden; color: #eef2fc; line-height: 1.42; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; } .order-status { flex: 0 0 auto; max-width: 120px; padding: 6px 9px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .035em; text-align: center; text-transform: uppercase; white-space: nowrap; } .order-status--processing { color: #ffc75a; background: rgba(255,199,90,.08); } .order-status--in_delivery { color: #65b5ff; background: rgba(101,181,255,.08); } .order-status--delivered { color: #4ee6bd; background: rgba(78,230,189,.08); } .order-status--cancelled, .order-status--problem { color: #ff969b; background: rgba(255,150,155,.08); } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 .catalog-card__open { cursor: pointer; } .catalog-card__open:focus-visible { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); outline: 3px solid rgba(75,115,255,.2); outline-offset: 2px; }
+.snapshot-card__head > .order-card__actions { display: flex; min-width: auto; flex: 0 0 auto; align-items: center; gap: 7px; } .order-card__fulfillment { display: grid; width: 36px; height: 36px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(92,132,255,.5); border-radius: 11px; color: #94aaff; background: rgba(37,68,163,.25); transition: color .18s,border-color .18s,background .18s,transform .18s; } .order-card__fulfillment svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; } .order-card__fulfillment:hover,.order-card__fulfillment:focus-visible { color: #fff; border-color: rgba(102,139,255,.78); background: rgba(54,88,195,.5); transform: translateY(-1px); outline: none; }
 .catalog-state-switch { display: inline-flex; width: fit-content; gap: 5px; margin: 1px 0 3px; padding: 5px; border: 1px solid rgba(139,158,208,.25); border-radius: 16px; background: rgba(11,19,44,.58); } .catalog-state-switch button { display: flex; min-height: 45px; align-items: center; gap: 9px; padding: 0 18px; border: 1px solid transparent; border-radius: 12px; color: #aeb9d3; background: transparent; font: inherit; font-size: 14px; font-weight: 850; } .catalog-state-switch button:hover { color: #eef3ff; background: rgba(45,62,104,.38); } .catalog-state-switch button.active { color: #fff; border-color: rgba(98,130,255,.72); background: linear-gradient(135deg,#2255e8,#4a72ff); box-shadow: 0 9px 22px rgba(28,70,210,.22); } .catalog-state-switch small { min-width: 26px; padding: 3px 7px; border-radius: 999px; color: #aebbd9; background: rgba(123,143,194,.13); font-size: 11px; text-align: center; } .catalog-state-switch button.active small { color: #fff; background: rgba(7,21,71,.2); } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 7px; border: 1px solid rgba(116,141,207,.28); border-radius: 999px; color: #9cadcf; font-size: 9px; font-weight: 850; letter-spacing: .03em; text-transform: uppercase; vertical-align: 1px; }
 @media (max-width:900px) { .connection-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 147px; } .app-brand span { display: none; } .profile-button { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 26px; } .seller-nav { width: 100%; gap: 4px; } .seller-nav__item { flex: 1; padding: 0 9px; font-size: 13px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .connection-grid, .snapshot-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }

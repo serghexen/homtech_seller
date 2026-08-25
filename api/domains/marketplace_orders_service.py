@@ -252,6 +252,32 @@ def _fetch_yandex_market_orders(
     return list(rows_by_order.values())
 
 
+def fetch_yandex_market_order(
+    *, business_id: int, campaign_id: int, order_id: int, token: str,
+) -> dict[str, Any]:
+    # Читает ровно один заказ после webhook и не вызывает методы выдачи или изменения статуса.
+    normalized_order_id = int(order_id)
+    payload = _request_json(
+        f"{YANDEX_MARKET_BASE_URL}/v1/businesses/{int(business_id)}/orders?limit=1",
+        headers={"Api-Key": token},
+        payload={
+            "campaignIds": [int(campaign_id)],
+            "orderIds": [normalized_order_id],
+            "programTypes": ["DBS"],
+        },
+    )
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    orders = result.get("orders") if isinstance(result, dict) and isinstance(result.get("orders"), list) else []
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        returned_order_id = str(order.get("orderId") or order.get("id") or "").strip()
+        returned_campaign_id = str(order.get("campaignId") or "").strip()
+        if returned_order_id == str(normalized_order_id) and returned_campaign_id == str(campaign_id):
+            return order
+    raise HTTPException(404, f"Яндекс Маркет не вернул заказ {normalized_order_id} для выбранного магазина")
+
+
 def fetch_marketplace_orders(
     *, provider_code: str, token: str, client_id: str, business_id: int | None, campaign_id: int | None,
     synced_after: datetime | None = None, synced_before: datetime | None = None,

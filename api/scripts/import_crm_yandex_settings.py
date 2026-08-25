@@ -21,6 +21,7 @@ import psycopg
 
 MAX_OFFER_ID_LENGTH = 256
 MAX_INSTRUCTION_LENGTH = 5000
+MAX_SUPPORT_MESSAGE_LENGTH = 2000
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
@@ -31,6 +32,8 @@ class SourceSettings:
     manual_stock_limit: int
     published_stock: int
     activation_instruction: str
+    support_message: str
+    support_message_delivery_enabled: bool
     sales_limit: int | None
     sales_limit_daily_extra: int
     sales_limit_day: date | None
@@ -114,6 +117,9 @@ def normalize_source_row(payload: dict[str, Any]) -> SourceSettings:
     instruction = str(payload.get("activation_instruction") or "").strip()
     if len(instruction) > MAX_INSTRUCTION_LENGTH:
         raise ValueError(f"activation_instruction is longer than {MAX_INSTRUCTION_LENGTH} characters")
+    support_message = str(payload.get("support_message") or "").strip()
+    if len(support_message) > MAX_SUPPORT_MESSAGE_LENGTH:
+        raise ValueError(f"support_message is longer than {MAX_SUPPORT_MESSAGE_LENGTH} characters")
     sales_limit = optional_positive_int(payload.get("sales_limit"), field="sales_limit")
     remaining_value = payload.get("sales_limit_remaining")
     remaining = None if sales_limit is None else nonnegative_int(remaining_value, field="sales_limit_remaining")
@@ -125,6 +131,10 @@ def normalize_source_row(payload: dict[str, Any]) -> SourceSettings:
         manual_stock_limit=nonnegative_int(payload.get("manual_stock_limit"), field="manual_stock_limit"),
         published_stock=nonnegative_int(payload.get("published_stock"), field="published_stock"),
         activation_instruction=instruction,
+        support_message=support_message,
+        support_message_delivery_enabled=boolean_value(
+            payload.get("support_message_delivery_enabled", False), field="support_message_delivery_enabled",
+        ),
         sales_limit=sales_limit,
         sales_limit_daily_extra=nonnegative_int(payload.get("sales_limit_daily_extra"), field="sales_limit_daily_extra"),
         sales_limit_day=optional_date(payload.get("sales_limit_day"), field="sales_limit_day"),
@@ -242,6 +252,7 @@ def existing_settings(connection, connection_id: int) -> dict[str, tuple[Any, ..
             """
             SELECT external_product_id, source_store_code, external_product_id,
                    manual_stock_limit, published_stock, activation_instruction,
+                   support_message, support_message_delivery_enabled,
                    sales_limit, sales_limit_daily_extra, sales_limit_day, sales_limit_revision,
                    sales_limit_used, sales_limit_reserved, sales_limit_remaining,
                    sales_limit_exhausted_at, archived_by_sales_limit, last_stock_sync_at,
@@ -268,6 +279,8 @@ def db_values(row: SourceSettings, external_product_id: str) -> tuple[Any, ...]:
         row.manual_stock_limit,
         row.published_stock,
         row.activation_instruction,
+        row.support_message,
+        row.support_message_delivery_enabled,
         row.sales_limit,
         row.sales_limit_daily_extra,
         row.sales_limit_day,
@@ -287,19 +300,22 @@ def import_rows(connection, connection_id: int, prepared_rows: Iterable[tuple[So
         INSERT INTO seller.yandex_product_settings_snapshot(
           connection_id, external_product_id, source_store_code,
           manual_stock_limit, published_stock, activation_instruction,
+          support_message, support_message_delivery_enabled,
           sales_limit, sales_limit_daily_extra, sales_limit_day, sales_limit_revision,
           sales_limit_used, sales_limit_reserved, sales_limit_remaining,
           sales_limit_exhausted_at, archived_by_sales_limit, last_stock_sync_at,
           source_updated_at, imported_at
         ) VALUES (
           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-          %s, %s, %s, %s, %s, %s, %s, now()
+          %s, %s, %s, %s, %s, %s, %s, %s, %s, now()
         )
         ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
           source_store_code=EXCLUDED.source_store_code,
           manual_stock_limit=EXCLUDED.manual_stock_limit,
           published_stock=EXCLUDED.published_stock,
           activation_instruction=EXCLUDED.activation_instruction,
+          support_message=EXCLUDED.support_message,
+          support_message_delivery_enabled=EXCLUDED.support_message_delivery_enabled,
           sales_limit=EXCLUDED.sales_limit,
           sales_limit_daily_extra=EXCLUDED.sales_limit_daily_extra,
           sales_limit_day=EXCLUDED.sales_limit_day,
@@ -317,6 +333,8 @@ def import_rows(connection, connection_id: int, prepared_rows: Iterable[tuple[So
           seller.yandex_product_settings_snapshot.manual_stock_limit,
           seller.yandex_product_settings_snapshot.published_stock,
           seller.yandex_product_settings_snapshot.activation_instruction,
+          seller.yandex_product_settings_snapshot.support_message,
+          seller.yandex_product_settings_snapshot.support_message_delivery_enabled,
           seller.yandex_product_settings_snapshot.sales_limit,
           seller.yandex_product_settings_snapshot.sales_limit_daily_extra,
           seller.yandex_product_settings_snapshot.sales_limit_day,
@@ -330,7 +348,8 @@ def import_rows(connection, connection_id: int, prepared_rows: Iterable[tuple[So
           seller.yandex_product_settings_snapshot.source_updated_at
         ) IS DISTINCT FROM (
           EXCLUDED.source_store_code, EXCLUDED.manual_stock_limit, EXCLUDED.published_stock,
-          EXCLUDED.activation_instruction, EXCLUDED.sales_limit, EXCLUDED.sales_limit_daily_extra,
+          EXCLUDED.activation_instruction, EXCLUDED.support_message,
+          EXCLUDED.support_message_delivery_enabled, EXCLUDED.sales_limit, EXCLUDED.sales_limit_daily_extra,
           EXCLUDED.sales_limit_day, EXCLUDED.sales_limit_revision, EXCLUDED.sales_limit_used,
           EXCLUDED.sales_limit_reserved, EXCLUDED.sales_limit_remaining,
           EXCLUDED.sales_limit_exhausted_at, EXCLUDED.archived_by_sales_limit,

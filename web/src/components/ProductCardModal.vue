@@ -32,7 +32,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys'])
-const openSection = ref('')
+const openSection = ref('delivery')
+const openDeliveryMethod = ref('')
 const imageFailed = ref(false)
 const settingsFormError = ref('')
 const settingsForm = reactive({
@@ -41,6 +42,9 @@ const settingsForm = reactive({
   sales_limit: props.item.sales_limit !== null && props.item.sales_limit !== '' ? Math.max(1, Number(props.item.sales_limit) || 1) : 1,
   sales_limit_daily_extra: Math.max(0, Number(props.item.sales_limit_daily_extra) || 0),
   activation_instruction: normalizeEscapedLineBreaks(props.item.activation_instruction).trim(),
+  support_message: normalizeEscapedLineBreaks(props.item.support_message).trim(),
+  support_message_delivery_enabled: Boolean(props.item.support_message_delivery_enabled),
+  pool_issue_enabled: Boolean(props.item.pool_issue_enabled),
 })
 const keyPoolForm = reactive({ codes_raw: '', expires_at: '' })
 const keyPoolFormError = ref('')
@@ -62,6 +66,12 @@ const hasActivationInstruction = computed(() => Boolean(settingsForm.activation_
 const activationInstructionDescription = computed(() => {
   return hasActivationInstruction.value ? 'Текст для покупателя заполнен' : 'Текст для покупателя не указан'
 })
+const deliveryPriority = computed(() => [
+  ...(settingsForm.pool_issue_enabled ? ['Список ключей'] : []),
+  ...(settingsForm.support_message_delivery_enabled ? ['Поддержка'] : []),
+  'Ручной ввод',
+])
+const deliveryDescription = computed(() => `Приоритет: ${deliveryPriority.value.join(' → ')}`)
 const normalizedSettings = computed(() => normalizeProductSettings(settingsForm))
 const savedSettings = computed(() => normalizeProductSettings({
   manual_stock_limit: Math.max(0, Number(props.item.manual_stock_limit) || 0),
@@ -69,9 +79,13 @@ const savedSettings = computed(() => normalizeProductSettings({
   sales_limit: props.item.sales_limit,
   sales_limit_daily_extra: Math.max(0, Number(props.item.sales_limit_daily_extra) || 0),
   activation_instruction: normalizeEscapedLineBreaks(props.item.activation_instruction),
+  support_message: normalizeEscapedLineBreaks(props.item.support_message),
+  support_message_delivery_enabled: Boolean(props.item.support_message_delivery_enabled),
+  pool_issue_enabled: Boolean(props.item.pool_issue_enabled),
 }))
 const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.value, savedSettings.value))
 const instructionLength = computed(() => settingsForm.activation_instruction.length)
+const supportMessageLength = computed(() => settingsForm.support_message.length)
 const keyPoolDraftCodes = computed(() => parseKeyLines(keyPoolForm.codes_raw))
 const keyPoolDraftDirty = computed(() => Boolean(keyPoolForm.codes_raw.trim() || keyPoolForm.expires_at))
 const keyPoolPageCount = computed(() => Math.max(1, Math.ceil((Number(props.keyPool.total) || 0) / (Number(props.keyPool.page_size) || 20))))
@@ -84,26 +98,22 @@ const detailFields = computed(() => [
 
 const workSections = computed(() => [
   {
-    id: 'stock',
+    id: 'delivery',
     number: '01',
+    title: 'Выдача',
+    description: deliveryDescription.value,
+  },
+  {
+    id: 'stock',
+    number: '02',
     title: 'Остаток',
     description: 'Актуальное количество, доступное для продажи на маркетплейсе',
   },
   {
     id: 'instruction',
-    number: '02',
+    number: '03',
     title: 'Инструкция',
     description: activationInstructionDescription.value,
-  },
-  {
-    id: 'key_pool',
-    number: '03',
-    title: 'Ключи',
-    description: props.keyPoolLoading
-      ? 'Загружаем сохранённый пул'
-      : props.keyPool.total
-        ? `${keyCountLabel(props.keyPool.free_count)} доступно, ${keyCountLabel(props.keyPool.total)} всего`
-        : 'Пул пока пуст',
   },
   {
     id: 'orders',
@@ -148,12 +158,19 @@ function toggleSection(sectionId) {
   openSection.value = openSection.value === sectionId ? '' : sectionId
 }
 
+function toggleDeliveryMethod(methodId) {
+  openDeliveryMethod.value = openDeliveryMethod.value === methodId ? '' : methodId
+}
+
 function resetSettingsForm() {
   settingsForm.manual_stock_limit = savedSettings.value.manual_stock_limit
   settingsForm.sales_limit_enabled = savedSettings.value.sales_limit !== null
   settingsForm.sales_limit = savedSettings.value.sales_limit || 1
   settingsForm.sales_limit_daily_extra = savedSettings.value.sales_limit_daily_extra
   settingsForm.activation_instruction = savedSettings.value.activation_instruction
+  settingsForm.support_message = savedSettings.value.support_message
+  settingsForm.support_message_delivery_enabled = savedSettings.value.support_message_delivery_enabled
+  settingsForm.pool_issue_enabled = savedSettings.value.pool_issue_enabled
   settingsFormError.value = ''
 }
 
@@ -199,6 +216,10 @@ watch(() => props.keyPoolNotice, (notice) => {
   keyPoolForm.codes_raw = ''
   keyPoolForm.expires_at = ''
   keyPoolFormError.value = ''
+})
+
+watch(() => settingsForm.support_message, (message) => {
+  if (!message.trim()) settingsForm.support_message_delivery_enabled = false
 })
 
 function close() {
@@ -329,7 +350,53 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                       </label>
                     </section>
                   </div>
-                  <div v-else-if="section.id === 'key_pool'" class="product-key-pool">
+                  <div v-else-if="section.id === 'delivery'" class="product-delivery">
+                    <header class="product-delivery__summary">
+                      <div>
+                        <span>Порядок выдачи</span>
+                        <strong>{{ deliveryPriority.join(' → ') }}</strong>
+                        <p>Seller проверит включённые способы сверху вниз. Ручной ввод всегда остаётся последним безопасным вариантом.</p>
+                      </div>
+                      <span class="product-delivery__local-badge">Настройка без запуска</span>
+                    </header>
+
+                    <div class="product-delivery__methods">
+                      <article class="product-delivery-method is-future">
+                        <div class="product-delivery-method__head">
+                          <span class="product-delivery-method__number">01</span>
+                          <span class="product-delivery-method__icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /></svg>
+                          </span>
+                          <div class="product-delivery-method__copy">
+                            <strong>Автовыдача от поставщика</strong>
+                            <small>Получить ключ через Supplier Hub</small>
+                          </div>
+                          <span class="product-delivery-method__status">После Supplier Hub</span>
+                          <span class="product-delivery-switch is-disabled" aria-label="Автовыдача от поставщика пока недоступна"><span></span></span>
+                        </div>
+                      </article>
+
+                      <article class="product-delivery-method" :class="{ 'is-enabled': settingsForm.pool_issue_enabled, 'is-expanded': openDeliveryMethod === 'pool' }">
+                        <div class="product-delivery-method__head product-delivery-method__head--expandable">
+                          <span class="product-delivery-method__number">02</span>
+                          <button class="product-delivery-method__open" type="button" :aria-expanded="openDeliveryMethod === 'pool'" @click="toggleDeliveryMethod('pool')">
+                            <span class="product-delivery-method__icon" aria-hidden="true">
+                              <svg viewBox="0 0 24 24"><path d="M7 10a5 5 0 1 1 4.6 5" /><path d="m9 14-6 6M5 18l2 2M8 15l2 2" /></svg>
+                            </span>
+                            <span class="product-delivery-method__copy">
+                              <strong>Список ключей</strong>
+                              <small>{{ keyPoolLoading ? 'Проверяем пул…' : `${keyCountLabel(keyPool.free_count || 0)} доступно · ${keyCountLabel(keyPool.total || 0)} всего` }}</small>
+                            </span>
+                            <svg class="product-delivery-method__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+                          </button>
+                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.pool_issue_enabled }" title="Использовать сохранённый пул вторым способом">
+                            <input v-model="settingsForm.pool_issue_enabled" type="checkbox" />
+                            <span aria-hidden="true"></span>
+                            <span class="sr-only">Использовать список ключей</span>
+                          </label>
+                        </div>
+
+                        <div v-if="openDeliveryMethod === 'pool'" class="product-delivery-method__panel product-key-pool">
                     <div class="product-key-pool__stats" aria-label="Состояние пула ключей">
                       <section class="product-key-pool__stat product-key-pool__stat--free">
                         <span>Доступно</span><strong>{{ keyPool.free_count || 0 }}</strong><small>готовы к будущей выдаче</small>
@@ -400,7 +467,57 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
                     <p class="stock-readonly__notice">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                      Seller пока только хранит пул. Автоматическая и ручная выдача ключей отключены.
+                      Включение способа сохраняет приоритет карточки, но не запускает выдачу и ничего не отправляет в Яндекс.
+                    </p>
+                        </div>
+                      </article>
+
+                      <article class="product-delivery-method" :class="{ 'is-enabled': settingsForm.support_message_delivery_enabled, 'is-expanded': openDeliveryMethod === 'support' }">
+                        <div class="product-delivery-method__head product-delivery-method__head--expandable">
+                          <span class="product-delivery-method__number">03</span>
+                          <button class="product-delivery-method__open" type="button" :aria-expanded="openDeliveryMethod === 'support'" @click="toggleDeliveryMethod('support')">
+                            <span class="product-delivery-method__icon" aria-hidden="true">
+                              <svg viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 3z" /><path d="M8 9h8M8 12h5" /></svg>
+                            </span>
+                            <span class="product-delivery-method__copy">
+                              <strong>Выдача через поддержку</strong>
+                              <small>{{ settingsForm.support_message.trim() ? 'Сообщение покупателю заполнено' : 'Нужно заполнить сообщение покупателю' }}</small>
+                            </span>
+                            <svg class="product-delivery-method__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+                          </button>
+                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.support_message_delivery_enabled, 'is-disabled': !settingsForm.support_message.trim() }" :title="settingsForm.support_message.trim() ? 'Использовать сообщение после списка ключей' : 'Сначала заполните сообщение'">
+                            <input v-model="settingsForm.support_message_delivery_enabled" type="checkbox" :disabled="!settingsForm.support_message.trim()" />
+                            <span aria-hidden="true"></span>
+                            <span class="sr-only">Использовать выдачу через поддержку</span>
+                          </label>
+                        </div>
+                        <div v-if="openDeliveryMethod === 'support'" class="product-delivery-method__panel product-delivery-support">
+                          <label>
+                            <span>Сообщение покупателю</span>
+                            <textarea v-model="settingsForm.support_message" maxlength="2000" placeholder="Например: чтобы получить код, напишите в поддержку заказа" />
+                            <small>{{ supportMessageLength.toLocaleString('ru-RU') }} / 2 000</small>
+                          </label>
+                          <p>Текст хранится как шаблон карточки. Он попадёт в выдачу только при включённом способе.</p>
+                        </div>
+                      </article>
+
+                      <article class="product-delivery-method is-manual">
+                        <div class="product-delivery-method__head">
+                          <span class="product-delivery-method__number">04</span>
+                          <span class="product-delivery-method__icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16z" /><path d="m13 7 4 4" /></svg>
+                          </span>
+                          <div class="product-delivery-method__copy">
+                            <strong>Ручной ввод</strong>
+                            <small>Заказ попадёт оператору, если предыдущие способы не дали ключ</small>
+                          </div>
+                          <span class="product-delivery-method__status is-safe">Всегда последний</span>
+                        </div>
+                      </article>
+                    </div>
+
+                    <p class="product-delivery__notice">
+                      Сейчас сохраняется только политика карточки. Общие переключатели Seller остаются выключены, поэтому автоматическая выдача не начнётся.
                     </p>
                   </div>
                   <div v-else class="product-orders">
@@ -1404,6 +1521,67 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-size: 9px;
 }
 
+.product-instruction__editor > p {
+  margin: 0;
+  color: #7889ad;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.product-instruction__support-switch {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 8px;
+  color: #aab8d6;
+  cursor: pointer;
+}
+
+.product-instruction__support-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.product-instruction__support-switch > span {
+  position: relative;
+  width: 31px;
+  height: 18px;
+  border: 1px solid rgba(128, 151, 210, .35);
+  border-radius: 999px;
+  background: rgba(8, 15, 34, .72);
+}
+
+.product-instruction__support-switch > span::after {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: #8e9bb8;
+  content: '';
+  transition: transform .16s ease, background .16s ease;
+}
+
+.product-instruction__support-switch input:checked + span {
+  border-color: rgba(70, 112, 255, .7);
+  background: rgba(41, 82, 222, .45);
+}
+
+.product-instruction__support-switch input:checked + span::after {
+  background: #edf2ff;
+  transform: translateX(13px);
+}
+
+.product-instruction__support-switch input:disabled ~ * {
+  opacity: .45;
+}
+
+.product-instruction__support-switch strong {
+  font-size: 10px;
+}
+
 .product-instruction__content--empty {
   border-color: rgba(126, 151, 217, .22);
   border-style: dashed;
@@ -1609,6 +1787,320 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .product-card-leave-to .product-card-modal {
   opacity: 0;
   transform: translateY(10px) scale(.985);
+}
+
+.product-delivery {
+  display: grid;
+  gap: 13px;
+}
+
+.product-delivery__summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 16px;
+  border: 1px solid rgba(83, 125, 255, .32);
+  border-radius: 14px;
+  background: radial-gradient(circle at 100% 0, rgba(70, 112, 255, .16), transparent 48%), rgba(8, 15, 34, .5);
+}
+
+.product-delivery__summary > div {
+  display: grid;
+  gap: 5px;
+}
+
+.product-delivery__summary span:first-child {
+  color: #7f94c5;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.product-delivery__summary strong {
+  color: #edf2ff;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.product-delivery__summary p {
+  margin: 0;
+  color: #8999bb;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.product-delivery__local-badge {
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  border: 1px solid rgba(126, 151, 217, .28);
+  border-radius: 999px;
+  color: #a7b5d2 !important;
+  background: rgba(26, 39, 72, .72);
+  font-size: 8px !important;
+  letter-spacing: .07em !important;
+  white-space: nowrap;
+}
+
+.product-delivery__methods {
+  display: grid;
+  gap: 8px;
+}
+
+.product-delivery-method {
+  overflow: hidden;
+  border: 1px solid rgba(126, 151, 217, .21);
+  border-radius: 15px;
+  background: rgba(8, 15, 34, .48);
+  transition: border-color .18s, background .18s, box-shadow .18s;
+}
+
+.product-delivery-method.is-enabled {
+  border-color: rgba(83, 125, 255, .52);
+  background: linear-gradient(145deg, rgba(34, 70, 181, .12), rgba(8, 15, 34, .54));
+}
+
+.product-delivery-method.is-expanded {
+  box-shadow: 0 16px 38px rgba(1, 5, 17, .18);
+}
+
+.product-delivery-method.is-future {
+  border-style: dashed;
+  opacity: .72;
+}
+
+.product-delivery-method.is-manual {
+  border-color: rgba(126, 151, 217, .16);
+}
+
+.product-delivery-method__head {
+  display: grid;
+  grid-template-columns: 42px 36px minmax(0, 1fr) auto auto;
+  min-height: 68px;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+}
+
+.product-delivery-method__head--expandable {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+}
+
+.product-delivery-method__head--expandable .product-delivery-method__open {
+  grid-column: 2;
+}
+
+.product-delivery-method__head--expandable .product-delivery-switch {
+  grid-column: 3;
+}
+
+.product-delivery-method__number {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid rgba(74, 213, 180, .38);
+  border-radius: 11px;
+  color: #52dfbd;
+  background: rgba(35, 137, 121, .12);
+  font: 900 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.product-delivery-method__icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(126, 151, 217, .25);
+  border-radius: 10px;
+  color: #93a8d8;
+  background: rgba(31, 45, 78, .6);
+}
+
+.product-delivery-method.is-enabled .product-delivery-method__icon {
+  color: #87a0ff;
+  border-color: rgba(83, 125, 255, .48);
+  background: rgba(39, 75, 190, .18);
+}
+
+.product-delivery-method__icon svg,
+.product-delivery-method__chevron {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.product-delivery-method__copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.product-delivery-method__copy strong {
+  color: #dfe7f8;
+  font-size: 12px;
+}
+
+.product-delivery-method__copy small {
+  overflow: hidden;
+  color: #8292b3;
+  font-size: 9px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.product-delivery-method__open {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 18px;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 0;
+  border: 0;
+  color: #91a3ca;
+  background: transparent;
+  text-align: left;
+}
+
+.product-delivery-method__chevron {
+  transition: transform .18s;
+}
+
+.product-delivery-method.is-expanded .product-delivery-method__chevron {
+  transform: rotate(180deg);
+}
+
+.product-delivery-method__status {
+  padding: 6px 8px;
+  border: 1px solid rgba(126, 151, 217, .22);
+  border-radius: 999px;
+  color: #91a0be;
+  background: rgba(30, 42, 72, .66);
+  font-size: 8px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.product-delivery-method__status.is-safe {
+  color: #9fb1d7;
+}
+
+.product-delivery-switch {
+  position: relative;
+  display: inline-flex;
+  width: 38px;
+  height: 22px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.product-delivery-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.product-delivery-switch > span:first-of-type {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border: 1px solid rgba(126, 151, 217, .34);
+  border-radius: 999px;
+  background: rgba(40, 51, 80, .9);
+  transition: border-color .16s, background .16s;
+}
+
+.product-delivery-switch > span:first-of-type::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #8a96b0;
+  content: '';
+  transition: transform .16s, background .16s;
+}
+
+.product-delivery-switch.is-active > span:first-of-type {
+  border-color: rgba(69, 108, 255, .72);
+  background: rgba(36, 78, 221, .68);
+}
+
+.product-delivery-switch.is-active > span:first-of-type::after {
+  background: #f1f4ff;
+  transform: translateX(16px);
+}
+
+.product-delivery-switch.is-disabled {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+.product-delivery-method__panel {
+  padding: 14px;
+  border-top: 1px solid rgba(126, 151, 217, .15);
+  background: rgba(5, 11, 27, .28);
+}
+
+.product-delivery-support {
+  display: grid;
+  gap: 8px;
+}
+
+.product-delivery-support label {
+  display: grid;
+  gap: 7px;
+}
+
+.product-delivery-support label > span {
+  color: #dce5f7;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.product-delivery-support textarea {
+  min-height: 110px;
+  padding: 11px 12px;
+  border: 1px solid rgba(126, 151, 217, .28);
+  border-radius: 11px;
+  outline: none;
+  color: #eef3ff;
+  background: rgba(5, 11, 26, .72);
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.product-delivery-support textarea:focus {
+  border-color: rgba(83, 125, 255, .78);
+  box-shadow: 0 0 0 3px rgba(75, 115, 255, .12);
+}
+
+.product-delivery-support small {
+  justify-self: end;
+  color: #7183aa;
+  font-size: 9px;
+}
+
+.product-delivery-support p,
+.product-delivery__notice {
+  margin: 0;
+  color: #7889ad;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.product-delivery__notice {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(126, 151, 217, .055);
 }
 
 .product-key-pool {
@@ -2015,6 +2507,37 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
   .product-instruction__content {
     grid-template-columns: 1fr;
+  }
+
+  .product-delivery__summary {
+    flex-direction: column;
+  }
+
+  .product-delivery-method__head {
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+    gap: 9px;
+  }
+
+  .product-delivery-method__head > .product-delivery-method__icon {
+    display: none;
+  }
+
+  .product-delivery-method__head > .product-delivery-method__copy {
+    grid-column: 2;
+  }
+
+  .product-delivery-method__open {
+    grid-template-columns: 34px minmax(0, 1fr) 16px;
+  }
+
+  .product-delivery-method__status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .product-delivery-switch {
+    grid-column: 3;
+    grid-row: 1;
   }
 
   .product-key-pool__stats,

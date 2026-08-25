@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
-from scripts.import_crm_key_pools import INSERT_IMPORTED_KEY_SQL, normalized_source_key, seller_key_hash
+from scripts.import_crm_key_pools import (
+    INSERT_IMPORTED_KEY_SQL,
+    ensure_target_import_writable,
+    normalized_source_key,
+    seller_key_hash,
+    source_inflight_count,
+)
 
 
 class CrmKeyPoolImportTests(unittest.TestCase):
@@ -40,6 +48,39 @@ class CrmKeyPoolImportTests(unittest.TestCase):
 
     def test_import_insert_has_placeholder_for_every_parameter(self):
         self.assertEqual(INSERT_IMPORTED_KEY_SQL.count("%s"), 13)
+
+    def test_apply_guard_rejects_store_after_seller_owns_fulfillment(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (False, False, True, True)
+        target = MagicMock()
+        target.cursor.return_value = nullcontext(cursor)
+
+        with self.assertRaisesRegex(RuntimeError, "ownership has already started"):
+            ensure_target_import_writable(target, connection_id=7)
+
+        self.assertEqual(cursor.execute.call_args.args[1], (7,))
+
+    def test_apply_guard_allows_final_import_before_cutover(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (False, False, False, False)
+        target = MagicMock()
+        target.cursor.return_value = nullcontext(cursor)
+
+        ensure_target_import_writable(target, connection_id=7)
+
+    def test_inflight_preflight_counts_without_decrypting_keys(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (3,)
+        source = MagicMock()
+        source.cursor.return_value = nullcontext(cursor)
+
+        count = source_inflight_count(source, marketplace="yandex_market", store_code="joycards")
+
+        self.assertEqual(count, 3)
+        sql = cursor.execute.call_args.args[0]
+        self.assertNotIn("pgp_sym_decrypt", sql)
+        self.assertIn("status IN ('reserved', 'sending')", sql)
+        source.commit.assert_called_once_with()
 
 
 if __name__ == "__main__":

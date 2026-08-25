@@ -6,10 +6,13 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from domains.marketplace_orders_service import (
     MarketplacePaginationError,
     _fetch_ozon_orders,
     _fetch_yandex_market_orders,
+    fetch_yandex_market_order,
     fetch_marketplace_orders,
     normalize_marketplace_order_status,
 )
@@ -137,6 +140,44 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
                 synced_after=datetime(2026, 8, 24, 0, 5, tzinfo=timezone.utc),
                 synced_before=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
             )
+
+    @patch("domains.marketplace_orders_service._request_json")
+    def test_yandex_webhook_reads_exactly_one_order(self, request_json) -> None:
+        # Webhook использует orderIds и не перечитывает историю либо соседние заказы магазина.
+        request_json.return_value = {
+            "result": {
+                "orders": [
+                    {"orderId": 123, "campaignId": 20, "items": [{"id": 1, "offerId": "SKU-1"}]},
+                ]
+            }
+        }
+
+        order = fetch_yandex_market_order(
+            business_id=10,
+            campaign_id=20,
+            order_id=123,
+            token="secret",
+        )
+
+        self.assertEqual(order["orderId"], 123)
+        self.assertTrue(request_json.call_args.args[0].endswith("/v1/businesses/10/orders?limit=1"))
+        self.assertEqual(
+            request_json.call_args.kwargs["payload"],
+            {"campaignIds": [20], "orderIds": [123], "programTypes": ["DBS"]},
+        )
+
+    @patch("domains.marketplace_orders_service._request_json", return_value={"result": {"orders": []}})
+    def test_yandex_webhook_retries_when_order_is_not_visible_yet(self, _request_json) -> None:
+        # HTTP 404 попадёт в retry очереди: уведомление может прийти немного раньше доступности заказа в API.
+        with self.assertRaises(HTTPException) as raised:
+            fetch_yandex_market_order(
+                business_id=10,
+                campaign_id=20,
+                order_id=123,
+                token="secret",
+            )
+
+        self.assertEqual(raised.exception.status_code, 404)
 
     @patch("domains.marketplace_orders_service._fetch_ozon_fbo_orders", return_value=[])
     @patch("domains.marketplace_orders_service._fetch_ozon_digital_orders", return_value=[])

@@ -53,6 +53,74 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("ADD COLUMN IF NOT EXISTS is_archived", statements[0])
         self.assertIn("is_present, is_archived", statements[1])
 
+    def test_yandex_webhook_inbox_starts_paused_and_is_idempotent(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260825_02_yandex_webhook_inbox.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertEqual(len(statements), 5)
+        self.assertIn("ADD COLUMN IF NOT EXISTS webhook_processing_enabled", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.yandex_webhook_events", joined)
+        self.assertIn("processing_state text NOT NULL DEFAULT 'paused'", joined)
+        self.assertIn("CREATE UNIQUE INDEX CONCURRENTLY", joined)
+        self.assertIn("event_fingerprint", joined)
+
+    def test_fulfillment_foundation_starts_with_all_reservation_switches_off(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260825_03_fulfillment_foundation.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertEqual(len(statements), 10)
+        self.assertIn("fulfillment_reservation_enabled boolean NOT NULL DEFAULT false", joined)
+        self.assertIn("pool_issue_enabled boolean NOT NULL DEFAULT false", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.order_fulfillments", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.fulfillment_key_reservations", joined)
+        self.assertIn("WHERE state='reserved'", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.fulfillment_events", joined)
+
+    def test_yandex_outbound_migration_starts_disabled_and_has_uncertain_state(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260825_04_yandex_fulfillment_outbox.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertEqual(len(statements), 4)
+        self.assertIn("fulfillment_outbound_enabled boolean NOT NULL DEFAULT false", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.fulfillment_outbound_jobs", joined)
+        self.assertIn("'submitted', 'unknown', 'failed'", joined)
+        self.assertIn("fulfillment_id bigint NOT NULL UNIQUE", joined)
+        self.assertNotIn("code_ciphertext", joined)
+
+    def test_manual_and_support_migration_keeps_support_snapshot_separate(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260825_05_manual_and_support_fulfillment.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertEqual(len(statements), 6)
+        self.assertIn("ADD COLUMN IF NOT EXISTS support_message", joined)
+        self.assertIn("ADD COLUMN IF NOT EXISTS support_message_snapshot", joined)
+        self.assertIn("'manual', 'support_message'", joined)
+        self.assertIn("char_length(support_message_snapshot) <= 2000", joined)
+
+    def test_support_import_migration_preserves_source_enablement_and_local_override(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260825_06_support_message_import.sql"
+
+        statements = split_sql_statements(migration.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertEqual(len(statements), 6)
+        self.assertIn("yandex_product_settings_snapshot", joined)
+        self.assertIn("support_message_delivery_enabled", joined)
+        self.assertIn("support_message_overridden", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

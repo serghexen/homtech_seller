@@ -5,13 +5,18 @@ from __future__ import annotations
 import unittest
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 from fastapi import HTTPException
 
 from domains.marketplace_orders_service import MarketplacePaginationError
 from domains.marketplace_sync_jobs_api import parse_job_ids
-from domains.marketplace_sync_service import execute_sync_job, sync_catalog_connection
+from domains.marketplace_sync_service import (
+    execute_sync_job,
+    save_order_snapshots,
+    sync_catalog_connection,
+    sync_orders_connection,
+)
 from worker import advisory_lock_key, is_transient_sync_error, retry_delay_seconds
 
 
@@ -72,6 +77,76 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
         self.assertEqual(synced, 0)
         archive_call = next(call for call in cursor.execute.call_args_list if "SET is_present=false" in call.args[0])
         self.assertEqual(archive_call.args[1], (7, []))
+
+    def test_targeted_order_snapshot_uses_same_idempotent_upsert(self) -> None:
+        # Полная синхронизация и webhook не расходятся в структуре сохранённых позиций.
+        cursor = MagicMock()
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        saved = save_order_snapshots(
+            connection,
+            connection_id=7,
+            provider_code="yandex_market",
+            rows=[{
+                "orderId": 123,
+                "campaignId": 20,
+                "status": "PROCESSING",
+                "items": [{"id": 9, "offerId": "SKU-1", "offerName": "Товар", "count": 1}],
+            }],
+        )
+
+        self.assertEqual(saved, 1)
+        upsert = cursor.execute.call_args
+        self.assertIn("ON CONFLICT (connection_id, external_order_id, external_item_id) DO UPDATE", upsert.args[0])
+        self.assertEqual(upsert.args[1][0:4], (7, "123", "9", "SKU-1"))
+
+    @patch("domains.marketplace_sync_service.reserve_pool_keys")
+    @patch("domains.marketplace_sync_service.automatic_pool_reservation_enabled", return_value=False)
+    @patch("domains.marketplace_sync_service.observe_order_fulfillments", return_value=[81])
+    @patch("domains.marketplace_sync_service.save_order_snapshots", return_value=1)
+    @patch("domains.marketplace_sync_service.fetch_marketplace_orders")
+    def test_yandex_polling_reconciles_each_order_without_reserving_when_global_switch_is_off(
+        self, fetch_orders, save_snapshots, observe_fulfillments, _reservation_enabled, reserve_keys,
+    ) -> None:
+        rows = [{"orderId": 123}, {"orderId": 123}]
+        fetch_orders.return_value = rows
+        connection = Mock()
+        started_at = datetime.now(timezone.utc)
+
+        saved = sync_orders_connection(
+            connection,
+            (7, "yandex_market", "Store", "", "216", "149", "token", None),
+            sync_started_at=started_at,
+        )
+
+        self.assertEqual(saved, 1)
+        save_snapshots.assert_called_once_with(
+            connection, connection_id=7, provider_code="yandex_market", rows=rows,
+        )
+        observe_fulfillments.assert_called_once_with(connection, connection_id=7, external_order_id="123")
+        reserve_keys.assert_not_called()
+
+    @patch("domains.marketplace_sync_service.reserve_pool_keys")
+    @patch("domains.marketplace_sync_service.automatic_pool_reservation_enabled", return_value=True)
+    @patch("domains.marketplace_sync_service.observe_order_fulfillments", return_value=[81, 82])
+    @patch("domains.marketplace_sync_service.save_order_snapshots", return_value=2)
+    @patch("domains.marketplace_sync_service.fetch_marketplace_orders", return_value=[{"orderId": 123}])
+    def test_yandex_polling_applies_safe_reservation_gates_when_enabled(
+        self, _fetch_orders, _save_snapshots, _observe, _reservation_enabled, reserve_keys,
+    ) -> None:
+        connection = Mock()
+
+        sync_orders_connection(
+            connection,
+            (7, "yandex_market", "Store", "", "216", "149", "token", None),
+            sync_started_at=datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(
+            reserve_keys.call_args_list,
+            [call(connection, fulfillment_id=81), call(connection, fulfillment_id=82)],
+        )
 
     def test_parses_and_deduplicates_polling_job_ids(self) -> None:
         self.assertEqual(parse_job_ids("7, 8,7,9"), [7, 8, 9])

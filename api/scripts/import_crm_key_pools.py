@@ -129,9 +129,70 @@ def target_tables_ready(target) -> bool:
             """
             SELECT to_regclass('seller.marketplace_key_pools') IS NOT NULL
                AND to_regclass('seller.marketplace_keys') IS NOT NULL
+               AND to_regclass('seller.order_fulfillments') IS NOT NULL
+               AND to_regclass('seller.fulfillment_key_reservations') IS NOT NULL
             """
         )
         return bool(cursor.fetchone()[0])
+
+
+def source_inflight_count(source, *, marketplace: str, store_code: str) -> int:
+    # Проверяет незавершённые CRM-резервы без чтения и расшифровки самих ключей.
+    with source.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM app.marketplace_manual_keys AS manual_key
+            JOIN app.marketplace_manual_key_pools AS pool ON pool.id=manual_key.pool_id
+            WHERE pool.marketplace=%s AND lower(pool.store_code)=lower(%s)
+              AND manual_key.status IN ('reserved', 'sending')
+            """,
+            (marketplace, store_code),
+        )
+        count = int(cursor.fetchone()[0] or 0)
+    source.commit()
+    return count
+
+
+def ensure_target_import_writable(target, *, connection_id: int) -> None:
+    # После начала выдач Seller повторный импорт не вправе перезаписывать состояния тех же ключей из CRM.
+    with target.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT marketplace_connection.fulfillment_reservation_enabled,
+                   EXISTS (
+                     SELECT 1
+                     FROM seller.product_card_settings AS settings
+                     WHERE settings.connection_id=marketplace_connection.id
+                       AND settings.pool_issue_enabled=true
+                   ),
+                   EXISTS (
+                     SELECT 1
+                     FROM seller.order_fulfillments AS fulfillment
+                     WHERE fulfillment.connection_id=marketplace_connection.id
+                       AND fulfillment.status IN ('reserved', 'sending', 'submitted', 'unknown', 'delivered')
+                   ),
+                   EXISTS (
+                     SELECT 1
+                     FROM seller.fulfillment_key_reservations AS reservation
+                     JOIN seller.order_fulfillments AS fulfillment
+                       ON fulfillment.id=reservation.fulfillment_id
+                     WHERE fulfillment.connection_id=marketplace_connection.id
+                       AND reservation.state IN ('reserved', 'consumed')
+                   )
+            FROM seller.marketplace_connections AS marketplace_connection
+            WHERE marketplace_connection.id=%s
+            """,
+            (connection_id,),
+        )
+        state = cursor.fetchone()
+    if not state:
+        raise RuntimeError(f"Seller connection id={connection_id} no longer exists")
+    if any(bool(value) for value in state):
+        raise RuntimeError(
+            "Seller fulfillment ownership has already started for this store; "
+            "CRM key-pool import is blocked to prevent two systems from changing the same key states"
+        )
 
 
 def read_source_batch(source, *, marketplace: str, store_code: str, secret: str, after_id: int, limit: int) -> list[SourceKey]:
@@ -300,9 +361,22 @@ def main() -> int:
             cursor.execute("SET lock_timeout='500ms'")
         source.commit()
         connection_id, display_name = target_connection(target, args.target_campaign_id)
-        catalog = target_catalog(target, connection_id)
         if not target_tables_ready(target):
-            raise RuntimeError("Seller key pool tables are missing; apply database migrations first")
+            raise RuntimeError("Seller fulfillment tables are missing; apply database migrations first")
+        catalog = target_catalog(target, connection_id)
+        inflight_count = source_inflight_count(
+            source,
+            marketplace=args.marketplace,
+            store_code=args.source_store_code,
+        )
+        totals["inflight"] = inflight_count
+        if args.apply:
+            if inflight_count:
+                raise RuntimeError(
+                    f"CRM still owns {inflight_count} reserved/sending keys; "
+                    "finish or release them before the final import"
+                )
+            ensure_target_import_writable(target, connection_id=connection_id)
         after_id = 0
         while True:
             rows = read_source_batch(
@@ -335,7 +409,8 @@ def main() -> int:
     print(
         f"{mode}: store={display_name!r}, read={totals['read']}, added={totals['added']}, "
         f"updated={totals['updated']}, unchanged={totals['unchanged']}, "
-        f"duplicates={totals['duplicates']}, missing_products={totals['missing_products']}"
+        f"duplicates={totals['duplicates']}, missing_products={totals['missing_products']}, "
+        f"crm_inflight={totals['inflight']}"
     )
     return 0
 

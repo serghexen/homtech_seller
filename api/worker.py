@@ -13,6 +13,9 @@ import psycopg
 from fastapi import HTTPException
 
 from domains.marketplace_sync_service import execute_sync_job, record_connection_error
+from domains.yandex_market_webhook_processor import build_yandex_market_webhook_processor
+from domains.yandex_market_webhooks_api import webhook_processing_enabled
+from domains.yandex_market_outbound import build_yandex_outbound_processor
 
 
 SYNC_LOCK_NAMESPACE = 20_260_824
@@ -40,6 +43,15 @@ def poll_seconds() -> float:
 
 def stale_seconds() -> int:
     return max(60, min(int(os.getenv("SYNC_JOB_STALE_SECONDS", "300")), 86_400))
+
+
+def webhook_batch_size() -> int:
+    # Ограничивает число webhook между обычными заданиями, чтобы ни одна очередь не голодала.
+    return max(1, min(int(os.getenv("YANDEX_MARKET_WEBHOOK_BATCH_SIZE", "10")), 100))
+
+
+def outbound_batch_size() -> int:
+    return max(1, min(int(os.getenv("YANDEX_MARKET_OUTBOUND_BATCH_SIZE", "5")), 50))
 
 
 def advisory_lock_key(connection_id: int) -> int:
@@ -241,16 +253,35 @@ def run_worker() -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    print("Seller sync worker started", flush=True)
+    process_yandex_webhook = build_yandex_market_webhook_processor(
+        database_url=database_url,
+        psycopg=psycopg,
+        processing_enabled=webhook_processing_enabled,
+    )
+    outbound = build_yandex_outbound_processor(database_url=database_url, psycopg=psycopg)
+    print("Seller worker started", flush=True)
     while not stopping:
         try:
+            requeued_outbound, unknown_outbound = outbound.recover_stale()
+            if requeued_outbound or unknown_outbound:
+                print(
+                    f"Recovered outbound jobs: requeued={requeued_outbound}, unknown={unknown_outbound}",
+                    flush=True,
+                )
+            processed_outbound = outbound.process_pending_jobs(outbound_batch_size())
+            if processed_outbound:
+                print(f"Processed Yandex outbound jobs: {processed_outbound}", flush=True)
+            processed_webhooks = process_yandex_webhook.process_pending_events(webhook_batch_size())
+            if processed_webhooks:
+                print(f"Processed Yandex webhook events: {processed_webhooks}", flush=True)
             with psycopg.connect(database_url()) as lock_connection:
                 recovered = recover_stale_jobs(lock_connection)
                 if recovered:
                     print(f"Recovered stale sync jobs: {recovered}", flush=True)
                 job = claim_next_job(lock_connection)
                 if not job:
-                    time.sleep(poll_seconds())
+                    if not processed_webhooks and not processed_outbound:
+                        time.sleep(poll_seconds())
                     continue
                 try:
                     synced_items = execute_sync_job(
@@ -273,7 +304,7 @@ def run_worker() -> int:
         except Exception as exc:
             print(f"Worker loop error: {exc}", flush=True)
             time.sleep(poll_seconds())
-    print("Seller sync worker stopped", flush=True)
+    print("Seller worker stopped", flush=True)
     return 0
 
 

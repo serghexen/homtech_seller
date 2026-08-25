@@ -14,6 +14,9 @@ test('normalizes local product settings without marketplace fields', () => {
     sales_limit: '10',
     sales_limit_daily_extra: '2',
     activation_instruction: ' Первая строка\r\nВторая строка ',
+    support_message: ' Обратитесь\r\nв поддержку ',
+    support_message_delivery_enabled: true,
+    pool_issue_enabled: true,
   })
 
   assert.deepEqual(result, {
@@ -21,6 +24,9 @@ test('normalizes local product settings without marketplace fields', () => {
     sales_limit: null,
     sales_limit_daily_extra: 2,
     activation_instruction: 'Первая строка\nВторая строка',
+    support_message: 'Обратитесь\nв поддержку',
+    support_message_delivery_enabled: true,
+    pool_issue_enabled: true,
   })
 })
 
@@ -31,12 +37,15 @@ test('validates numeric limits before saving', () => {
     sales_limit: 0,
     sales_limit_daily_extra: 0,
     activation_instruction: '',
+    support_message: '',
+    support_message_delivery_enabled: false,
+    pool_issue_enabled: false,
   })
   assert.match(validateProductSettings(invalid), /Заданный остаток/)
 })
 
 test('detects unsaved settings changes', () => {
-  const saved = { manual_stock_limit: 5, sales_limit: null, sales_limit_daily_extra: 0, activation_instruction: '' }
+  const saved = { manual_stock_limit: 5, sales_limit: null, sales_limit_daily_extra: 0, activation_instruction: '', support_message: '', support_message_delivery_enabled: false, pool_issue_enabled: false }
   assert.equal(productSettingsEqual(saved, { ...saved }), true)
   assert.equal(productSettingsEqual(saved, { ...saved, manual_stock_limit: 6 }), false)
 })
