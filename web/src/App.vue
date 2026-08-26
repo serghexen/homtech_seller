@@ -551,6 +551,7 @@ async function updateOrderFulfillment(action, extra = {}) {
       release: 'Не удалось снять резерв',
       send: 'Не удалось поставить отправку в очередь',
       'cancel-send': 'Не удалось отменить отправку',
+      'resolve-unknown': 'Не удалось зафиксировать результат сверки',
     }
     selectedOrderFulfillmentError.value = requestError.message || fallback[action] || 'Не удалось выполнить действие'
   } finally {
@@ -1401,6 +1402,7 @@ onMounted(async () => {
       @release="updateOrderFulfillment('release')"
       @send="updateOrderFulfillment('send')"
       @cancel-send="updateOrderFulfillment('cancel-send')"
+      @resolve-unknown="(resolution) => updateOrderFulfillment('resolve-unknown', { resolution })"
       @close="closeOrderFulfillment"
     />
 

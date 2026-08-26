@@ -100,6 +100,17 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
                     _consume_reserved_keys(
                         cursor, fulfillment_id=fulfillment_id, reservation_ref=current_ref,
                     )
+                    # Подтверждённый Маркетом DELIVERED автоматически снимает
+                    # неопределённость сетевого ответа: ручная сверка уже не нужна.
+                    cursor.execute(
+                        """
+                        UPDATE seller.fulfillment_outbound_jobs
+                        SET state='submitted', submitted_at=COALESCE(submitted_at, now()),
+                            last_error='', lock_token=NULL, locked_until=NULL, updated_at=now()
+                        WHERE fulfillment_id=%s AND state IN ('sending', 'unknown')
+                        """,
+                        (fulfillment_id,),
+                    )
                 else:
                     # Если Seller не начинал отправку, Маркет завершил заказ другой системой: локальные ключи освобождаем.
                     _release_reserved_keys(

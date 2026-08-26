@@ -34,8 +34,22 @@ def enabled(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes"}
 
 
-def add_check(checks: list[dict[str, Any]], name: str, ok: bool, value: Any, *, final_only: bool = False) -> None:
-    checks.append({"name": name, "ok": bool(ok), "value": value, "final_only": final_only})
+def add_check(
+    checks: list[dict[str, Any]],
+    name: str,
+    ok: bool,
+    value: Any,
+    *,
+    final_only: bool = False,
+    warning_only: bool = False,
+) -> None:
+    checks.append({
+        "name": name,
+        "ok": bool(ok),
+        "value": value,
+        "final_only": final_only,
+        "warning_only": warning_only,
+    })
 
 
 def seller_checks(target, campaign_id: str, expected_count: int | None, quote_max_age_hours: int):
@@ -99,9 +113,11 @@ def seller_checks(target, campaign_id: str, expected_count: int | None, quote_ma
         add_check(checks, "seller_supplier_mappings_complete", incomplete == 0, {
             "supplier_enabled": supplier_enabled, "incomplete": incomplete,
         })
+        # CRM prices are confirmed manually. Their age remains visible for an
+        # operator, while completeness of quote/max_amount above is the blocker.
         add_check(checks, "seller_supplier_quotes_fresh", stale == 0, {
             "max_age_hours": quote_max_age_hours, "stale": stale,
-        })
+        }, warning_only=True)
         cursor.execute(
             """
             SELECT
@@ -199,14 +215,19 @@ def main() -> int:
     except Exception as exc:
         add_check(checks, "hub_reachable_and_ready_for_audit", False, str(exc)[:300])
 
-    preparation_blockers = [item["name"] for item in checks if not item["ok"] and not item["final_only"]]
-    final_blockers = [item["name"] for item in checks if not item["ok"]]
+    preparation_blockers = [
+        item["name"] for item in checks
+        if not item["ok"] and not item["final_only"] and not item["warning_only"]
+    ]
+    final_blockers = [item["name"] for item in checks if not item["ok"] and not item["warning_only"]]
+    warnings = [item["name"] for item in checks if not item["ok"] and item["warning_only"]]
     print(json.dumps({
         "operation": "read-only-no-purchase",
         "prepared_for_cutover_window": not preparation_blockers,
         "ready_to_switch_now": not final_blockers,
         "preparation_blockers": preparation_blockers,
         "final_blockers": final_blockers,
+        "warnings": warnings,
         "checks": checks,
     }, ensure_ascii=False, indent=2))
     return 0 if not final_blockers else 2

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -28,6 +28,11 @@ class FulfillmentIdentityIn(BaseModel):
 
 class FulfillmentManualKeysIn(FulfillmentIdentityIn):
     codes: list[str] = Field(min_length=1, max_length=100)
+
+
+class FulfillmentUnknownResolutionIn(FulfillmentIdentityIn):
+    resolution: Literal["accepted", "not_accepted"]
+    comment: str = Field(default="", max_length=500)
 
 
 class OrderFulfillmentOut(BaseModel):
@@ -57,6 +62,7 @@ class OrderFulfillmentOut(BaseModel):
     outbound_last_error: str = ""
     can_send: bool = False
     can_cancel_send: bool = False
+    can_resolve_unknown: bool = False
     can_prepare_manual: bool = False
     can_prepare_support: bool = False
     support_message_configured: bool = False
@@ -185,6 +191,10 @@ def mount_marketplace_fulfillment_routes(
                 and bool(str(row[19] or "").strip()) and outbound_state in {"", "failed", "cancelled"}
             ),
             can_cancel_send=bool(actions_enabled and can_manage and outbound_state == "queued"),
+            can_resolve_unknown=bool(
+                actions_enabled and can_manage and str(row[3]) == "yandex_market"
+                and fulfillment_status == "unknown" and outbound_state == "unknown"
+            ),
             can_prepare_manual=can_prepare_any,
             can_prepare_support=bool(can_prepare_any and support_message_configured),
             support_message_configured=support_message_configured,
@@ -461,6 +471,119 @@ def mount_marketplace_fulfillment_routes(
                     VALUES (%s,'outbound_cancelled','reserved','reserved')
                     """,
                     (detail.fulfillment_id,),
+                )
+                return read_fulfillment(
+                    cursor, identity=identity, workspace_id=seller_user.workspace_id, role_code=seller_user.role_code,
+                )
+
+    @app.post("/marketplaces/orders/fulfillment/resolve-unknown", response_model=OrderFulfillmentOut)
+    def resolve_unknown_order_fulfillment(
+        payload: FulfillmentUnknownResolutionIn,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> OrderFulfillmentOut:
+        """Фиксирует результат ручной сверки с Яндексом без внешнего HTTP-запроса."""
+
+        require_manual_feature_enabled()
+        identity = normalized_identity(payload.connection_id, payload.external_order_id, payload.external_item_id)
+        comment = str(payload.comment or "").strip()
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            if seller_user.role_code not in {"owner", "operator"}:
+                raise HTTPException(status_code=403, detail="Недостаточно прав для сверки отправки")
+            with connection.cursor() as cursor:
+                detail = read_fulfillment(
+                    cursor, identity=identity, workspace_id=seller_user.workspace_id, role_code=seller_user.role_code,
+                )
+                if not detail.fulfillment_id or not detail.can_resolve_unknown:
+                    raise HTTPException(status_code=409, detail="Эта отправка уже сверена или не находится в состоянии unknown")
+                cursor.execute(
+                    """
+                    SELECT fulfillment.status, fulfillment.reservation_ref, outbound.state
+                    FROM seller.order_fulfillments AS fulfillment
+                    JOIN seller.fulfillment_outbound_jobs AS outbound
+                      ON outbound.fulfillment_id=fulfillment.id
+                    WHERE fulfillment.id=%s
+                    FOR UPDATE OF fulfillment, outbound
+                    """,
+                    (detail.fulfillment_id,),
+                )
+                state = cursor.fetchone()
+                if not state or str(state[0]) != "unknown" or str(state[2]) != "unknown":
+                    raise HTTPException(status_code=409, detail="Состояние изменилось; обновите карточку заказа")
+
+                if payload.resolution == "accepted":
+                    cursor.execute(
+                        """
+                        UPDATE seller.fulfillment_outbound_jobs
+                        SET state='submitted', submitted_at=COALESCE(submitted_at, now()),
+                            last_error='', lock_token=NULL, locked_until=NULL, updated_at=now()
+                        WHERE fulfillment_id=%s AND state='unknown'
+                        """,
+                        (detail.fulfillment_id,),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE seller.order_fulfillments
+                        SET status='submitted', submitted_at=COALESCE(submitted_at, now()),
+                            last_error='', updated_at=now()
+                        WHERE id=%s AND status='unknown'
+                        """,
+                        (detail.fulfillment_id,),
+                    )
+                    event_type, target_status = "outbound_unknown_resolved_accepted", "submitted"
+                else:
+                    if detail.order_status != "processing":
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Повтор можно разрешить только пока заказ остаётся в обработке",
+                        )
+                    cursor.execute(
+                        """
+                        UPDATE seller.marketplace_keys AS key
+                        SET status='reserved', updated_at=now()
+                        WHERE key.id IN (
+                          SELECT reservation.key_id
+                          FROM seller.fulfillment_key_reservations AS reservation
+                          WHERE reservation.fulfillment_id=%s AND reservation.state='reserved'
+                        )
+                          AND key.status='sending' AND key.issued_order_ref=%s
+                        """,
+                        (detail.fulfillment_id, str(state[1])),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE seller.fulfillment_outbound_jobs
+                        SET state='failed', failed_at=now(),
+                            last_error='Оператор подтвердил, что Яндекс не получил данные',
+                            lock_token=NULL, locked_until=NULL, updated_at=now()
+                        WHERE fulfillment_id=%s AND state='unknown'
+                        """,
+                        (detail.fulfillment_id,),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE seller.order_fulfillments
+                        SET status='reserved',
+                            last_error='Оператор разрешил повторную отправку после сверки', updated_at=now()
+                        WHERE id=%s AND status='unknown'
+                        """,
+                        (detail.fulfillment_id,),
+                    )
+                    event_type, target_status = "outbound_unknown_resolved_not_accepted", "reserved"
+
+                cursor.execute(
+                    """
+                    INSERT INTO seller.fulfillment_events(
+                      fulfillment_id, event_type, from_status, to_status, details
+                    ) VALUES (
+                      %s,%s,'unknown',%s,
+                      jsonb_build_object('resolution', %s, 'user_id', %s, 'comment', %s)
+                    )
+                    """,
+                    (
+                        detail.fulfillment_id, event_type, target_status,
+                        payload.resolution, seller_user.id, comment,
+                    ),
                 )
                 return read_fulfillment(
                     cursor, identity=identity, workspace_id=seller_user.workspace_id, role_code=seller_user.role_code,

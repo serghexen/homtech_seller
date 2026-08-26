@@ -11,12 +11,16 @@ const props = defineProps({
   error: { type: String, default: '' },
 })
 
-const emit = defineEmits(['close', 'prepare', 'prepare-manual', 'prepare-support', 'release', 'send', 'cancel-send'])
+const emit = defineEmits(['close', 'prepare', 'prepare-manual', 'prepare-support', 'release', 'send', 'cancel-send', 'resolve-unknown'])
 const sendConfirmation = ref(false)
 const manualEntryOpen = ref(false)
 const manualCodesRaw = ref('')
+const unknownResolution = ref('')
 
-watch(() => props.detail?.outbound_state, () => { sendConfirmation.value = false })
+watch(() => props.detail?.outbound_state, () => {
+  sendConfirmation.value = false
+  unknownResolution.value = ''
+})
 watch(() => props.detail?.fulfillment_status, (status) => {
   if (status === 'reserved') {
     manualEntryOpen.value = false
@@ -142,6 +146,48 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               </div>
             </div>
 
+            <section v-if="detail.can_resolve_unknown" class="fulfillment-reconciliation">
+              <header>
+                <div class="fulfillment-reconciliation__mark">!</div>
+                <div>
+                  <small>Ручная сверка</small>
+                  <strong>Проверьте заказ в кабинете Яндекса</strong>
+                  <p>Seller не получил однозначный ответ и не станет повторять отправку самостоятельно.</p>
+                </div>
+              </header>
+              <div class="fulfillment-reconciliation__choices">
+                <button
+                  type="button"
+                  :class="{ 'is-selected': unknownResolution === 'accepted' }"
+                  :disabled="actionLoading"
+                  @click="unknownResolution = 'accepted'"
+                >
+                  <span class="fulfillment-reconciliation__icon">✓</span>
+                  <span><strong>Данные получены</strong><small>Яндекс показывает переданный ключ</small></span>
+                </button>
+                <button
+                  type="button"
+                  :class="{ 'is-selected': unknownResolution === 'not_accepted' }"
+                  :disabled="actionLoading"
+                  @click="unknownResolution = 'not_accepted'"
+                >
+                  <span class="fulfillment-reconciliation__icon">↻</span>
+                  <span><strong>Данные не получены</strong><small>Вернуть комплект в резерв</small></span>
+                </button>
+              </div>
+              <div v-if="unknownResolution" class="fulfillment-reconciliation__confirm">
+                <p v-if="unknownResolution === 'accepted'">Комплект останется заблокированным. Seller будет ожидать подтверждение доставки от Яндекса.</p>
+                <p v-else>Комплект вернётся в защищённый резерв. Повторная отправка всё равно потребует отдельного подтверждения.</p>
+                <button
+                  type="button"
+                  :disabled="actionLoading"
+                  @click="emit('resolve-unknown', unknownResolution)"
+                >
+                  {{ actionLoading ? 'Фиксируем…' : 'Подтвердить результат сверки' }}
+                </button>
+              </div>
+            </section>
+
             <div v-if="!detail.manual_actions_enabled" class="fulfillment-feature-lock">
               <span>Режим просмотра</span>
               Ручная подготовка выключена общим переключателем сервиса. Ни резерв, ни снятие резерва сейчас недоступны.
@@ -182,7 +228,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
             <p v-if="error" class="fulfillment-card__error">{{ error }}</p>
 
             <footer class="fulfillment-card__actions">
-              <p v-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
+              <p v-if="detail.can_resolve_unknown">Сначала завершите ручную сверку выше. Повтор без подтверждения заблокирован.</p>
+              <p v-else-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
               <p v-else-if="detail.can_prepare_manual">Выберите источник выше. После подготовки комплект можно будет проверить и отправить.</p>
               <p v-else-if="detail.can_send && !sendConfirmation">Комплект готов. Отправка — отдельное необратимое действие.</p>
               <p v-else-if="detail.can_send">Проверьте заказ: после подтверждения worker передаст комплект в Яндекс.</p>
@@ -259,6 +306,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .fulfillment-metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 11px; margin: 0 28px 18px; }.fulfillment-metrics article { padding: 16px; border: 1px solid rgba(137,158,208,.18); border-radius: 17px; background: rgba(17,28,57,.56); }.fulfillment-metrics article.is-ready { border-color: rgba(74,226,188,.35); background: rgba(24,74,74,.25); }.fulfillment-metrics span,.fulfillment-metrics small { display: block; color: #8f9dbb; font-size: 10px; }.fulfillment-metrics strong { display: block; margin: 8px 0 4px; font-size: 29px; line-height: 1; letter-spacing: -.05em; }
 .fulfillment-safety { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; margin: 0 28px 18px; padding: 15px; border: 1px dashed rgba(101,134,221,.33); border-radius: 16px; color: #8ea8f2; background: rgba(26,48,105,.17); }.fulfillment-safety p { margin: 4px 0 0; color: #9faccc; font-size: 11px; line-height: 1.5; }
 .fulfillment-safety.is-outbound { border-style: solid; border-color: rgba(101,134,221,.42); }
+.fulfillment-reconciliation { margin: 0 28px 18px; padding: 17px; border: 1px solid rgba(255,190,82,.38); border-radius: 19px; background: radial-gradient(circle at 100% 0,rgba(255,181,62,.12),transparent 38%),rgba(48,35,20,.28); box-shadow: inset 0 1px rgba(255,255,255,.025); }.fulfillment-reconciliation > header { display: grid; grid-template-columns: 38px minmax(0,1fr); align-items: start; gap: 12px; }.fulfillment-reconciliation__mark { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid rgba(255,198,95,.5); border-radius: 12px; color: #ffd078; background: rgba(255,183,61,.12); font: 900 17px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }.fulfillment-reconciliation header small,.fulfillment-reconciliation header strong { display: block; }.fulfillment-reconciliation header small { margin-bottom: 4px; color: #e2ad56; font-size: 9px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }.fulfillment-reconciliation header strong { color: #fff2d7; font-size: 14px; }.fulfillment-reconciliation header p { margin: 5px 0 0; color: #c8b998; font-size: 11px; line-height: 1.5; }.fulfillment-reconciliation__choices { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; margin-top: 14px; }.fulfillment-reconciliation__choices button { display: grid; grid-template-columns: 30px minmax(0,1fr); align-items: center; gap: 10px; min-height: 66px; padding: 11px; text-align: left; border: 1px solid rgba(199,175,128,.22); border-radius: 14px; color: #e8ddc7; background: rgba(17,24,44,.62); }.fulfillment-reconciliation__choices button.is-selected { border-color: rgba(255,201,99,.7); background: rgba(117,75,25,.34); box-shadow: 0 0 0 2px rgba(255,190,73,.08); }.fulfillment-reconciliation__choices strong,.fulfillment-reconciliation__choices small { display: block; }.fulfillment-reconciliation__choices strong { font-size: 11px; }.fulfillment-reconciliation__choices small { margin-top: 4px; color: #a89d88; font-size: 9px; line-height: 1.3; }.fulfillment-reconciliation__icon { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid rgba(255,202,105,.32); border-radius: 10px; color: #ffd078; background: rgba(255,190,76,.08); font-weight: 900; }.fulfillment-reconciliation__confirm { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 11px; padding: 11px 12px; border: 1px dashed rgba(255,199,96,.32); border-radius: 13px; background: rgba(10,15,29,.48); }.fulfillment-reconciliation__confirm p { margin: 0; color: #c7bba4; font-size: 9px; line-height: 1.45; }.fulfillment-reconciliation__confirm button { min-height: 40px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(255,196,87,.58); border-radius: 11px; color: #1a1308; background: linear-gradient(135deg,#ffc55d,#ffe08c); font-size: 9px; font-weight: 900; }
 .fulfillment-feature-lock { margin: 0 28px 18px; padding: 12px 14px; border: 1px solid rgba(255,194,91,.25); border-radius: 14px; color: #b9c2d8; background: rgba(77,57,28,.22); font-size: 11px; line-height: 1.5; }.fulfillment-feature-lock span { display: inline-flex; margin-right: 7px; padding: 3px 7px; border-radius: 999px; color: #ffd178; background: rgba(255,193,82,.1); font-size: 9px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
 .fulfillment-preparation { margin: 0 28px 18px; padding: 17px; border: 1px solid rgba(92,129,239,.3); border-radius: 19px; background: rgba(11,22,50,.66); }.fulfillment-preparation > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 13px; }.fulfillment-preparation > header small,.fulfillment-preparation > header strong { display: block; }.fulfillment-preparation > header small { margin-bottom: 4px; color: #7f91b8; font-size: 9px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }.fulfillment-preparation > header strong { font-size: 13px; }.fulfillment-preparation > header > span { flex: 0 0 auto; padding: 5px 8px; border: 1px solid rgba(91,130,255,.28); border-radius: 999px; color: #8da8ff; font-size: 8px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
 .fulfillment-preparation__choices { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; }.fulfillment-preparation__choices > button { display: grid; grid-template-columns: 29px minmax(0,1fr); align-items: center; gap: 9px; min-height: 70px; padding: 11px; text-align: left; border: 1px solid rgba(128,151,210,.24); border-radius: 14px; color: #dce5f8; background: rgba(25,39,75,.62); }.fulfillment-preparation__choices > button:hover:not(:disabled),.fulfillment-preparation__choices > button.is-active { border-color: rgba(88,128,255,.66); background: rgba(37,70,171,.28); }.fulfillment-preparation__choices svg { width: 24px; fill: none; stroke: #83a0ff; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }.fulfillment-preparation__choices strong,.fulfillment-preparation__choices small { display: block; }.fulfillment-preparation__choices strong { font-size: 11px; }.fulfillment-preparation__choices small { margin-top: 4px; color: #8999ba; font-size: 9px; line-height: 1.3; }.fulfillment-preparation__choices button:disabled { opacity: .45; cursor: not-allowed; }
@@ -269,5 +317,5 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .fulfillment-action--send { background: linear-gradient(135deg,#1944cc,#3e68ff); }
 .fulfillment-card-enter-active,.fulfillment-card-leave-active { transition: opacity .2s ease; }.fulfillment-card-enter-active .fulfillment-card,.fulfillment-card-leave-active .fulfillment-card { transition: transform .22s ease,opacity .2s ease; }.fulfillment-card-enter-from,.fulfillment-card-leave-to { opacity: 0; }.fulfillment-card-enter-from .fulfillment-card,.fulfillment-card-leave-to .fulfillment-card { opacity: 0; transform: translateY(12px) scale(.985); }
 @keyframes fulfillment-spin { to { transform: rotate(360deg); } }
-@media (max-width:620px) { .fulfillment-backdrop { padding: 10px; }.fulfillment-card { max-height: calc(100vh - 20px); border-radius: 22px; }.fulfillment-card__header,.fulfillment-card__actions { padding-right: 18px; padding-left: 18px; }.fulfillment-product,.fulfillment-state,.fulfillment-metrics,.fulfillment-safety,.fulfillment-feature-lock,.fulfillment-preparation,.fulfillment-card__error { margin-right: 18px; margin-left: 18px; }.fulfillment-metrics,.fulfillment-preparation__choices { grid-template-columns: 1fr; }.fulfillment-manual-entry { grid-template-columns: 1fr; }.fulfillment-card__actions { align-items: stretch; flex-direction: column; }.fulfillment-action { width: 100%; } }
+@media (max-width:620px) { .fulfillment-backdrop { padding: 10px; }.fulfillment-card { max-height: calc(100vh - 20px); border-radius: 22px; }.fulfillment-card__header,.fulfillment-card__actions { padding-right: 18px; padding-left: 18px; }.fulfillment-product,.fulfillment-state,.fulfillment-metrics,.fulfillment-safety,.fulfillment-reconciliation,.fulfillment-feature-lock,.fulfillment-preparation,.fulfillment-card__error { margin-right: 18px; margin-left: 18px; }.fulfillment-metrics,.fulfillment-preparation__choices,.fulfillment-reconciliation__choices { grid-template-columns: 1fr; }.fulfillment-manual-entry { grid-template-columns: 1fr; }.fulfillment-reconciliation__confirm { align-items: stretch; flex-direction: column; }.fulfillment-reconciliation__confirm button { width: 100%; }.fulfillment-card__actions { align-items: stretch; flex-direction: column; }.fulfillment-action { width: 100%; } }
 </style>

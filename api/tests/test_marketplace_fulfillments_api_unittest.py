@@ -8,7 +8,11 @@ from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, HTTPException
 
-from domains.marketplace_fulfillments_api import FulfillmentIdentityIn, mount_marketplace_fulfillment_routes
+from domains.marketplace_fulfillments_api import (
+    FulfillmentIdentityIn,
+    FulfillmentUnknownResolutionIn,
+    mount_marketplace_fulfillment_routes,
+)
 
 
 class MarketplaceFulfillmentsApiTests(unittest.TestCase):
@@ -35,7 +39,30 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         self.assertEqual(methods["/marketplaces/orders/fulfillment/release"], {"POST"})
         self.assertEqual(methods["/marketplaces/orders/fulfillment/send"], {"POST"})
         self.assertEqual(methods["/marketplaces/orders/fulfillment/cancel-send"], {"POST"})
-        self.assertEqual(len(methods), 7)
+        self.assertEqual(methods["/marketplaces/orders/fulfillment/resolve-unknown"], {"POST"})
+        self.assertEqual(len(methods), 8)
+
+    def test_unknown_resolution_contract_is_explicit(self) -> None:
+        accepted = FulfillmentUnknownResolutionIn(
+            connection_id=7, external_order_id="123", external_item_id="9", resolution="accepted",
+        )
+        rejected = FulfillmentUnknownResolutionIn(
+            connection_id=7, external_order_id="123", external_item_id="9", resolution="not_accepted",
+        )
+
+        self.assertEqual(accepted.resolution, "accepted")
+        self.assertEqual(rejected.resolution, "not_accepted")
+        with self.assertRaises(ValueError):
+            FulfillmentUnknownResolutionIn(
+                connection_id=7, external_order_id="123", external_item_id="9", resolution="retry",
+            )
+
+    def test_unknown_resolution_is_audited_and_does_not_call_yandex(self) -> None:
+        source = inspect.getsource(mount_marketplace_fulfillment_routes)
+        self.assertIn("outbound_unknown_resolved_accepted", source)
+        self.assertIn("outbound_unknown_resolved_not_accepted", source)
+        self.assertIn("Повтор можно разрешить только пока заказ остаётся в обработке", source)
+        self.assertNotIn("deliver_yandex", source)
 
     def test_api_never_decrypts_or_reads_codes(self) -> None:
         source = inspect.getsource(mount_marketplace_fulfillment_routes)
@@ -70,6 +97,7 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
             "/marketplaces/orders/fulfillment/release",
             "/marketplaces/orders/fulfillment/send",
             "/marketplaces/orders/fulfillment/cancel-send",
+            "/marketplaces/orders/fulfillment/resolve-unknown",
         ):
             endpoint = next(route.endpoint for route in app.routes if route.path == path)
             with self.assertRaises(HTTPException) as raised:
