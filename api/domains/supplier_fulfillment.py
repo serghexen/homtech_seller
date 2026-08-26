@@ -476,10 +476,10 @@ class SupplierFulfillmentProcessor:
                     """
                     INSERT INTO seller.marketplace_keys(
                       pool_id, code_ciphertext, code_hash, code_suffix, status,
-                      source_system, source_reference
+                      key_origin, source_system, source_reference
                     ) VALUES (
                       %s, pgp_sym_encrypt(%s,%s,'cipher-algo=aes256, compress-algo=0'),
-                      %s,%s,'free','supplier_hub',%s
+                      %s,%s,'free','order','supplier_hub',%s
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -527,7 +527,7 @@ class SupplierFulfillmentProcessor:
                     """
                     UPDATE seller.marketplace_keys
                     SET status='reserved', issued_order_ref=%s, reserved_at=now(), updated_at=now()
-                    WHERE id=ANY(%s) AND status='free'
+                    WHERE id=ANY(%s) AND key_origin='order' AND status='free'
                     RETURNING id
                     """,
                     (reservation_ref, key_ids),

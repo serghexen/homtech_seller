@@ -213,7 +213,7 @@ def reserve_pool_keys(
             """
             SELECT id
             FROM seller.marketplace_keys
-            WHERE pool_id=%s AND status='free'
+            WHERE pool_id=%s AND key_origin='pool' AND status='free'
               AND (expires_at IS NULL OR expires_at >= current_date)
             ORDER BY expires_at ASC NULLS LAST, created_at, id
             FOR UPDATE SKIP LOCKED
@@ -356,10 +356,10 @@ def prepare_manual_keys(
                 """
                 INSERT INTO seller.marketplace_keys(
                   pool_id, code_ciphertext, code_hash, code_suffix, status,
-                  issued_order_ref, reserved_at, created_by_user_id
+                  key_origin, issued_order_ref, reserved_at, created_by_user_id
                 ) VALUES (
                   %s, pgp_sym_encrypt(%s,%s,'cipher-algo=aes256, compress-algo=0'),
-                  %s,%s,'reserved',%s,now(),%s
+                  %s,%s,'reserved','order',%s,now(),%s
                 )
                 ON CONFLICT (code_hash) DO NOTHING
                 RETURNING id
@@ -470,7 +470,9 @@ def _release_reserved_keys(cursor, *, fulfillment_id: int, reservation_ref: str,
           RETURNING key_id
         )
         UPDATE seller.marketplace_keys AS key
-        SET status='free', issued_order_ref='', reserved_at=NULL, updated_at=now()
+        SET status=CASE WHEN key.key_origin='pool' THEN 'free' ELSE 'disabled' END,
+            issued_order_ref=CASE WHEN key.key_origin='pool' THEN '' ELSE key.issued_order_ref END,
+            reserved_at=NULL, updated_at=now()
         WHERE key.id IN (SELECT key_id FROM released)
           AND key.status='reserved' AND key.issued_order_ref=%s
         """,

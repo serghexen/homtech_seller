@@ -19,3 +19,13 @@ export function keyCountLabel(value) {
   const word = mod100 >= 11 && mod100 <= 14 ? 'ключей' : mod10 === 1 ? 'ключ' : mod10 >= 2 && mod10 <= 4 ? 'ключа' : 'ключей'
   return `${count} ${word}`
 }
+
+export function keyOrderLabel(key) {
+  // Предпочитает понятный номер заказа Seller, а для импортированной истории извлекает его из CRM-ссылки.
+  const orderId = String(key?.issued_order_id || '').trim()
+  if (orderId) return `Заказ ${orderId}`
+  const reference = String(key?.issued_order_ref || '').trim()
+  if (!reference) return '—'
+  const parts = reference.split(':').filter(Boolean)
+  return parts.length >= 3 ? `Заказ ${parts.at(-2)}` : reference
+}

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
-import { keyCountLabel, parseKeyLines } from '../utils/keyPool.js'
+import { keyCountLabel, keyOrderLabel, parseKeyLines } from '../utils/keyPool.js'
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
 import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
 
@@ -752,15 +752,23 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           </div>
                           <template v-else>
                             <div class="product-key-pool__list-head">
-                              <strong>Сохранённые ключи</strong><span>Открытые значения не загружаются в браузер</span>
+                              <div><strong>Ключи пула</strong><small>Здесь только ключи, добавленные через это окно</small></div>
+                              <span>Открытые значения не загружаются в браузер</span>
                             </div>
-                            <div class="product-key-pool__list">
-                              <article v-for="key in keyPool.items" :key="key.id" class="product-key-pool__item">
-                                <code>{{ key.masked_code }}</code>
-                                <span class="product-key-pool__status" :class="`product-key-pool__status--${key.status}`">{{ keyStatusLabel(key.status) }}</span>
-                                <time :datetime="key.created_at">{{ formatOrderDate(key.created_at) }}</time>
-                                <small>{{ key.expires_at ? `Действует до ${key.expires_at}` : 'Без срока действия' }}</small>
-                              </article>
+                            <div class="product-key-pool__table-wrap">
+                              <table class="product-key-pool__table">
+                                <thead>
+                                  <tr><th>Ключ</th><th>Статус</th><th>Активировать до</th><th>Заказ</th></tr>
+                                </thead>
+                                <tbody>
+                                  <tr v-for="key in keyPool.items" :key="key.id">
+                                    <td data-label="Ключ"><code>{{ key.masked_code }}</code><small>Добавлен {{ formatOrderDate(key.created_at) }}</small></td>
+                                    <td data-label="Статус"><span class="product-key-pool__status" :class="`product-key-pool__status--${key.status}`">{{ keyStatusLabel(key.status) }}</span></td>
+                                    <td data-label="Активировать до">{{ key.expires_at || '—' }}</td>
+                                    <td data-label="Заказ"><span :class="{ 'product-key-pool__order--empty': !key.issued_order_ref && !key.issued_order_id }">{{ keyOrderLabel(key) }}</span></td>
+                                  </tr>
+                                </tbody>
+                              </table>
                             </div>
                             <div v-if="keyPoolPageCount > 1" class="product-key-pool__pager">
                               <button type="button" :disabled="keyPoolLoading || keyPool.page <= 1" @click="emit('load-key-pool', keyPool.page - 1)">Назад</button>
@@ -2959,8 +2967,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 }
 
 .product-key-pool__list-head strong {
+  display: block;
   color: #dce5f8;
   font-size: 11px;
+}
+
+.product-key-pool__list-head small {
+  display: block;
+  margin-top: 2px;
+  color: #7182a7;
+  font-size: 8px;
 }
 
 .product-key-pool__list-head span,
@@ -2969,38 +2985,63 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-size: 9px;
 }
 
-.product-key-pool__list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.product-key-pool__table-wrap {
   max-height: 310px;
-  gap: 8px;
   overflow: auto;
-  padding-right: 3px;
-}
-
-.product-key-pool__item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px 10px;
-  padding: 11px 12px;
-  border: 1px solid rgba(126, 151, 217, .18);
-  border-radius: 11px;
+  border: 1px solid rgba(126, 151, 217, .2);
+  border-radius: 12px;
   background: rgba(8, 15, 34, .45);
 }
 
-.product-key-pool__item code {
+.product-key-pool__table {
+  width: 100%;
+  border-collapse: collapse;
+  color: #aebbd5;
+  font-size: 9px;
+}
+
+.product-key-pool__table th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding: 9px 11px;
+  color: #96a5c4;
+  background: #17233c;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: .045em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.product-key-pool__table td {
+  padding: 10px 11px;
+  border-top: 1px solid rgba(126, 151, 217, .14);
+  vertical-align: middle;
+}
+
+.product-key-pool__table tbody tr:hover {
+  background: rgba(68, 102, 194, .075);
+}
+
+.product-key-pool__table code {
+  display: block;
   overflow: hidden;
   color: #dfe8fb;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+  font-size: 10px;
   text-overflow: ellipsis;
 }
 
-.product-key-pool__item time,
-.product-key-pool__item small {
+.product-key-pool__table td > small {
+  display: block;
+  margin-top: 3px;
   color: #7182a7;
-  font-size: 8px;
+  font-size: 7px;
+}
+
+.product-key-pool__order--empty {
+  color: #657596;
 }
 
 .product-key-pool__status {
@@ -3183,9 +3224,58 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   }
 
   .product-key-pool__stats,
-  .product-key-pool__list,
   .product-key-pool__form {
     grid-template-columns: 1fr;
+  }
+
+  .product-key-pool__list-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .product-key-pool__table-wrap {
+    max-height: 420px;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+  }
+
+  .product-key-pool__table,
+  .product-key-pool__table tbody,
+  .product-key-pool__table tr,
+  .product-key-pool__table td {
+    display: block;
+  }
+
+  .product-key-pool__table thead {
+    display: none;
+  }
+
+  .product-key-pool__table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(126, 151, 217, .18);
+    border-radius: 11px;
+    background: rgba(8, 15, 34, .45);
+  }
+
+  .product-key-pool__table td {
+    min-width: 0;
+    padding: 9px 10px;
+    border-top: 0;
+  }
+
+  .product-key-pool__table td::before {
+    display: block;
+    margin-bottom: 4px;
+    color: #657596;
+    content: attr(data-label);
+    font-size: 7px;
+    font-weight: 850;
+    letter-spacing: .055em;
+    text-transform: uppercase;
   }
 
   .product-key-pool__stat {

@@ -19,6 +19,8 @@ class MarketplaceKeyOut(BaseModel):
     status: str
     expires_at: date | None = None
     issued_order_ref: str = ""
+    issued_order_id: str = ""
+    issued_item_id: str = ""
     issued_at: datetime | None = None
     created_at: datetime
 
@@ -144,19 +146,31 @@ def mount_marketplace_key_pool_routes(
               COUNT(*) FILTER (WHERE status='expired'),
               COUNT(*) FILTER (WHERE status='disabled'),
               COUNT(*)
-            FROM seller.marketplace_keys
-            WHERE pool_id=%s
+            FROM seller.marketplace_keys AS key
+            WHERE key.pool_id=%s AND key.key_origin='pool'
             """,
             (pool_id,),
         )
         stats = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
         cursor.execute(
             """
-            SELECT id, code_suffix, status, expires_at, issued_order_ref, issued_at, created_at
-            FROM seller.marketplace_keys
-            WHERE pool_id=%s
-            ORDER BY CASE status WHEN 'free' THEN 0 WHEN 'reserved' THEN 1 WHEN 'sending' THEN 2 ELSE 3 END,
-                     created_at DESC, id DESC
+            SELECT key.id, key.code_suffix, key.status, key.expires_at, key.issued_order_ref,
+                   key.issued_at, key.created_at,
+                   COALESCE(fulfillment.external_order_id, ''),
+                   COALESCE(fulfillment.external_item_id, '')
+            FROM seller.marketplace_keys AS key
+            LEFT JOIN LATERAL (
+              SELECT order_fulfillment.external_order_id, order_fulfillment.external_item_id
+              FROM seller.fulfillment_key_reservations AS reservation
+              JOIN seller.order_fulfillments AS order_fulfillment
+                ON order_fulfillment.id=reservation.fulfillment_id
+              WHERE reservation.key_id=key.id
+              ORDER BY reservation.id DESC
+              LIMIT 1
+            ) AS fulfillment ON true
+            WHERE key.pool_id=%s AND key.key_origin='pool'
+            ORDER BY CASE key.status WHEN 'free' THEN 0 WHEN 'reserved' THEN 1 WHEN 'sending' THEN 2 ELSE 3 END,
+                     key.created_at DESC, key.id DESC
             LIMIT %s OFFSET %s
             """,
             (pool_id, page_size, (page - 1) * page_size),
@@ -176,7 +190,9 @@ def mount_marketplace_key_pool_routes(
             items=[
                 MarketplaceKeyOut(
                     id=int(row[0]), masked_code=masked_code(row[1]), status=str(row[2]),
-                    expires_at=row[3], issued_order_ref=str(row[4] or ""), issued_at=row[5], created_at=row[6],
+                    expires_at=row[3], issued_order_ref=str(row[4] or ""),
+                    issued_at=row[5], created_at=row[6],
+                    issued_order_id=str(row[7] or ""), issued_item_id=str(row[8] or ""),
                 )
                 for row in rows
             ],
@@ -237,9 +253,11 @@ def mount_marketplace_key_pool_routes(
                     cursor.execute(
                         """
                         INSERT INTO seller.marketplace_keys (
-                          pool_id, code_ciphertext, code_hash, code_suffix, expires_at, created_by_user_id
+                          pool_id, code_ciphertext, code_hash, code_suffix, key_origin,
+                          expires_at, created_by_user_id
                         ) VALUES (
-                          %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256, compress-algo=0'), %s, %s, %s, %s
+                          %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256, compress-algo=0'),
+                          %s, %s, 'pool', %s, %s
                         )
                         ON CONFLICT (code_hash) DO NOTHING
                         RETURNING id

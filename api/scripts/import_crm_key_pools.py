@@ -22,10 +22,10 @@ INSERT_IMPORTED_KEY_SQL = """
     INSERT INTO seller.marketplace_keys (
       pool_id, code_ciphertext, code_hash, code_suffix, status, expires_at,
       issued_order_ref, reserved_at, issued_at, source_system, source_key_id,
-      created_at, updated_at
+      key_origin, created_at, updated_at
     ) VALUES (
       %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256, compress-algo=0'), %s, %s, %s, %s,
-      %s, %s, %s, 'crm', %s, %s, %s
+      %s, %s, %s, 'crm', %s, 'pool', %s, %s
     )
     ON CONFLICT DO NOTHING
     RETURNING id

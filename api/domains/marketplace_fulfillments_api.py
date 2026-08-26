@@ -111,6 +111,7 @@ def mount_marketplace_fulfillment_routes(
                      JOIN seller.marketplace_keys AS key ON key.pool_id=pool.id
                      WHERE pool.connection_id=item.connection_id
                        AND pool.external_product_id=item.offer_id
+                       AND key.key_origin='pool'
                        AND key.status='free'
                        AND (key.expires_at IS NULL OR key.expires_at >= current_date)
                    ), 0),

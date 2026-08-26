@@ -128,6 +128,7 @@ class FulfillmentServiceTests(unittest.TestCase):
         all_sql = "\n".join(sql for sql, _params in connection.scripted_cursor.executions)
         self.assertIn("FOR UPDATE SKIP LOCKED", all_sql)
         self.assertIn("expires_at ASC NULLS LAST", all_sql)
+        self.assertIn("key_origin='pool'", all_sql)
         self.assertNotIn("code_ciphertext", all_sql)
         self.assertNotIn("pgp_sym_decrypt", all_sql)
         self.assertEqual(
@@ -228,7 +229,25 @@ class FulfillmentServiceTests(unittest.TestCase):
         self.assertIn("pgp_sym_encrypt", all_sql)
         self.assertNotIn("pgp_sym_decrypt", all_sql)
         self.assertIn("delivery_source='manual'", all_sql)
+        self.assertIn("'order'", all_sql)
         self.assertEqual(connection.scripted_cursor.executemany_calls[0][1], [(71, 11, "order-ref")])
+
+    def test_release_returns_only_pool_keys_to_available_stock(self) -> None:
+        connection = ScriptedConnection([
+            (71, "reserved", "order-ref"),
+            None,
+            None,
+            None,
+        ])
+
+        release_pool_keys(connection, fulfillment_id=71)
+
+        release_sql = next(
+            sql for sql, _params in connection.scripted_cursor.executions
+            if "UPDATE seller.marketplace_keys AS key" in sql
+        )
+        self.assertIn("key.key_origin='pool' THEN 'free' ELSE 'disabled'", release_sql)
+        self.assertIn("key.key_origin='pool' THEN '' ELSE key.issued_order_ref", release_sql)
 
     def test_manual_set_must_match_order_quantity(self) -> None:
         connection = ScriptedConnection([
