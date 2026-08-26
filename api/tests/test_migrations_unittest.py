@@ -169,6 +169,18 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("WHERE btrim(seller.product_card_settings.activation_instruction) = ''", joined)
         self.assertNotIn("UPDATE app.", joined)
 
+    def test_playstation_instruction_is_copied_from_reference_card(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260826_05_copy_playstation_instruction.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("MRKT-9CTX61DE", joined)
+        self.assertEqual(joined.count("('MRKT-"), 25)
+        self.assertIn("activation_instruction = reference_instruction.value", joined)
+        self.assertIn("manual_stock_limit = imported_settings.manual_stock_limit", joined)
+        self.assertIn("sales_limit = imported_settings.sales_limit", joined)
+        self.assertNotIn("UPDATE app.", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
