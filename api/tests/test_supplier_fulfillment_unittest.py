@@ -15,7 +15,8 @@ def context(**overrides) -> FulfillmentContext:
     values = dict(
         fulfillment_id=81, connection_id=7, external_order_id="123", external_item_id="9",
         offer_id="SKU-1", quantity=1, status="pending", reservation_ref="7:123:9",
-        order_status="processing", delivery_type="DIGITAL", store_local_enabled=True,
+        order_status="processing", delivery_type="DIGITAL", provider_code="yandex_market",
+        activation_instruction="Активируйте код", store_local_enabled=True,
         store_supplier_enabled=True, supplier_issue_enabled=True, pool_issue_enabled=True,
         support_issue_enabled=True, support_message="Напишите в поддержку", mapping_id=11,
         service_id=11125, nominal_id="250", params={}, max_amount=Decimal("500"),
@@ -25,16 +26,17 @@ def context(**overrides) -> FulfillmentContext:
 
 
 class Processor(SupplierFulfillmentProcessor):
-    def __init__(self, result="blocked"):
+    def __init__(self, result="blocked", **context_overrides):
         self._database_url = lambda: "test"
         self._psycopg = Mock()
         self.result = result
         self.queued = []
         self.manual = []
         self.reset = []
+        self.context_overrides = context_overrides
 
     def _context(self, _fulfillment_id):
-        return context()
+        return context(**self.context_overrides)
 
     def _resolve_supplier(self, _context):
         return self.result
@@ -74,6 +76,26 @@ class SupplierFulfillmentTests(unittest.TestCase):
 
         self.assertEqual(result, "reserved")
         processor._reserve_supplier_results.assert_called_once_with(context(), [91])
+
+    def test_yandex_instruction_is_required_before_supplier_purchase(self) -> None:
+        processor = Processor(result="reserved", activation_instruction="")
+        processor._resolve_supplier = Mock(return_value="reserved")
+
+        processor._resolve(81)
+
+        processor._resolve_supplier.assert_not_called()
+        self.assertEqual(processor.queued, [])
+        self.assertEqual(processor.manual, [(81, "Не заполнена инструкция покупателю для Яндекс Маркета")])
+
+    @patch("domains.supplier_fulfillment.load_supplier_hub_settings")
+    def test_ozon_does_not_require_activation_instruction(self, load_settings) -> None:
+        load_settings.return_value = SupplierHubSettings("http://127.0.0.1", "seller", "s" * 48, 5, True)
+        processor = Processor(result="reserved", provider_code="ozon", activation_instruction="")
+
+        processor._resolve(81)
+
+        self.assertEqual(processor.queued, [81])
+        self.assertEqual(processor.manual, [])
 
     @patch.dict(os.environ, {"SELLER_FULFILLMENT_RESOLVER_ENABLED": "false"}, clear=False)
     def test_global_resolver_switch_prevents_database_claim(self) -> None:

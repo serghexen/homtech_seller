@@ -10,6 +10,7 @@ import os
 from typing import Any
 from uuid import UUID, uuid4
 
+from domains.buyer_text import normalize_buyer_text
 from domains.fulfillment_service import prepare_support_message, reserve_pool_keys
 from domains.supplier_hub_client import (
     SupplierHubClient,
@@ -63,6 +64,8 @@ class FulfillmentContext:
     reservation_ref: str
     order_status: str
     delivery_type: str
+    provider_code: str
+    activation_instruction: str
     store_local_enabled: bool
     store_supplier_enabled: bool
     supplier_issue_enabled: bool
@@ -192,7 +195,11 @@ class SupplierFulfillmentProcessor:
                            CASE WHEN COALESCE(local_settings.support_message_overridden, false)
                              THEN local_settings.support_message
                              ELSE COALESCE(imported_settings.support_message, '') END,
-                           mapping.id, mapping.service_id, mapping.nominal_id, mapping.params, mapping.max_amount
+                           mapping.id, mapping.service_id, mapping.nominal_id, mapping.params, mapping.max_amount,
+                           market.provider_code,
+                           CASE WHEN local_settings.connection_id IS NOT NULL
+                               THEN local_settings.activation_instruction
+                               ELSE COALESCE(imported_settings.activation_instruction, '') END
                     FROM seller.order_fulfillments AS fulfillment
                     JOIN seller.order_items AS order_item
                       ON order_item.connection_id=fulfillment.connection_id
@@ -231,6 +238,7 @@ class SupplierFulfillmentProcessor:
             external_order_id=str(row[2]), external_item_id=str(row[3]), offer_id=str(row[4]),
             quantity=int(row[5]), status=str(row[6]), reservation_ref=str(row[7]),
             order_status=str(row[8]), delivery_type=str(row[9] or ""),
+            provider_code=str(row[21] or ""), activation_instruction=str(row[22] or ""),
             store_local_enabled=bool(row[10]), store_supplier_enabled=bool(row[11]),
             supplier_issue_enabled=bool(row[12]), pool_issue_enabled=bool(row[13]),
             support_issue_enabled=bool(row[14]), support_message=str(row[15] or "").strip(),
@@ -244,6 +252,20 @@ class SupplierFulfillmentProcessor:
         if not context or context.status not in {"pending", "manual_required", "supplier_required"}:
             return
         if context.order_status != "processing" or context.delivery_type.strip().upper() != "DIGITAL":
+            return
+
+        # Инструкция обязательна для цифровой выдачи Яндекс Маркета, но это не
+        # общее требование поставщика: например, Ozon сможет работать без неё.
+        # Проверяем до покупки/резерва, чтобы не получить оплаченный ключ,
+        # который затем нельзя отправить покупателю.
+        if (
+            context.provider_code == "yandex_market"
+            and not normalize_buyer_text(context.activation_instruction)
+        ):
+            self._mark_manual(
+                context.fulfillment_id,
+                "Не заполнена инструкция покупателю для Яндекс Маркета",
+            )
             return
 
         if context.supplier_issue_enabled:
