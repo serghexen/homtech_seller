@@ -122,7 +122,7 @@ const supplierNominalOptions = computed(() => {
       return { id: String(id ?? ''), title: String(value.title ?? value.value ?? id ?? '') }
     }
     return { id: String(value ?? ''), title: String(value ?? '') }
-  }).filter((value) => value.id)
+  }).filter((value) => value.id).sort(compareSupplierNominals)
 })
 const supplierNominalRequired = computed(() => Boolean(supplierNominalField.value?.required))
 const supplierMappingComplete = computed(() => Boolean(settingsForm.supplier_service_id)
@@ -143,7 +143,10 @@ const filteredSupplierServices = computed(() => {
     ? props.supplierServices.filter((service) => [service.title, service.category, service.service_id]
       .some((value) => String(value || '').toLocaleLowerCase('ru-RU').includes(needle)))
     : props.supplierServices
-  return items.slice(0, 40)
+  return [...items].sort((left, right) => supplierCollator.compare(
+    supplierServiceDisplay(left).replace(/^po_/i, ''),
+    supplierServiceDisplay(right).replace(/^po_/i, ''),
+  )).slice(0, 40)
 })
 const supplierCurrentPrice = computed(() => {
   const quote = props.supplierQuote
@@ -237,6 +240,24 @@ function supplierServiceDisplay(service) {
   return String(service?.title || `Услуга #${service?.service_id || ''}`)
 }
 
+const supplierCollator = new Intl.Collator('ru-RU', { numeric: true, sensitivity: 'base' })
+
+function supplierNominalNumber(option) {
+  const match = String(option?.title || '').replace(/\s+/g, '').match(/\d+(?:[.,]\d+)?/)
+  if (!match) return Number.POSITIVE_INFINITY
+  const value = Number(match[0].replace(',', '.'))
+  return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY
+}
+
+function compareSupplierNominals(left, right) {
+  const difference = supplierNominalNumber(left) - supplierNominalNumber(right)
+  if (Number.isFinite(difference) && difference !== 0) return difference
+  if (supplierNominalNumber(left) !== supplierNominalNumber(right)) {
+    return supplierNominalNumber(left) === Number.POSITIVE_INFINITY ? 1 : -1
+  }
+  return supplierCollator.compare(left.title, right.title)
+}
+
 function selectSupplierService(service) {
   const changed = Number(settingsForm.supplier_service_id) !== Number(service.service_id)
   settingsForm.supplier_service_id = Number(service.service_id)
@@ -259,7 +280,7 @@ function clearSupplierService() {
   settingsForm.supplier_nominal_id = ''
   settingsForm.supplier_max_amount = ''
   settingsForm.supplier_issue_enabled = false
-  supplierPickerOpen.value = true
+  supplierPickerOpen.value = false
 }
 
 function requestSupplierQuote() {
@@ -525,7 +546,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                                   @focus="supplierPickerOpen = true"
                                   @input="supplierPickerOpen = true"
                                 />
-                                <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @click="clearSupplierService">×</button>
+                                <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @mousedown.prevent.stop @click.stop="clearSupplierService">×</button>
                                 <svg class="supplier-combobox__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
                                 <div v-if="supplierPickerOpen && !supplierServicesLoading" class="supplier-combobox__menu">
                                   <button
@@ -2235,6 +2256,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 }
 
 .product-delivery-supplier {
+  --supplier-control-height: 44px;
   display: grid;
   gap: 10px;
 }
@@ -2258,8 +2280,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
 .product-delivery-supplier input,
 .product-delivery-supplier select {
+  box-sizing: border-box;
+  height: var(--supplier-control-height);
   min-width: 0;
-  min-height: 42px;
+  min-height: var(--supplier-control-height);
   padding: 0 11px;
   border: 1px solid rgba(126, 151, 217, .28);
   border-radius: 11px;
@@ -2279,9 +2303,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
 .supplier-combobox {
   position: relative;
+  height: var(--supplier-control-height);
 }
 
 .supplier-combobox > input {
+  height: 100%;
   width: 100%;
   padding-right: 68px;
   padding-left: 38px;
