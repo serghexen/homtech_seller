@@ -283,6 +283,19 @@ function clearSupplierService() {
   supplierPickerOpen.value = false
 }
 
+function handleSupplierSearchInput(event) {
+  const query = String(event?.currentTarget?.value ?? supplierSearch.value)
+  if (!query.trim()) {
+    settingsForm.supplier_service_id = ''
+    settingsForm.supplier_nominal_id = ''
+    settingsForm.supplier_max_amount = ''
+    settingsForm.supplier_issue_enabled = false
+    supplierPickerOpen.value = false
+    return
+  }
+  supplierPickerOpen.value = true
+}
+
 function requestSupplierQuote() {
   if (!supplierMappingComplete.value || props.supplierQuoteLoading) return
   settingsForm.supplier_max_amount = ''
@@ -533,20 +546,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         </div>
                         <div v-if="openDeliveryMethod === 'supplier'" class="product-delivery-method__panel product-delivery-supplier">
                           <div class="product-delivery-supplier__fields">
-                            <label class="product-delivery-supplier__service">
-                              <span>Товар Interhub</span>
+                            <div class="product-delivery-supplier__service">
+                              <label for="supplier-service-search">Товар Interhub</label>
                               <div class="supplier-combobox">
                                 <svg class="supplier-combobox__search" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16 16 4 4" /></svg>
                                 <input
+                                  id="supplier-service-search"
                                   v-model="supplierSearch"
                                   type="search"
                                   autocomplete="off"
                                   :placeholder="supplierServicesLoading ? 'Загружаем товары…' : 'Найдите товар или регион'"
                                   :disabled="supplierServicesLoading"
-                                  @focus="supplierPickerOpen = true"
-                                  @input="supplierPickerOpen = true"
+                                  @click="supplierPickerOpen = true"
+                                  @input="handleSupplierSearchInput"
                                 />
-                                <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @mousedown.prevent.stop @click.stop="clearSupplierService">×</button>
+                                <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @click.stop="clearSupplierService">×</button>
                                 <svg class="supplier-combobox__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
                                 <div v-if="supplierPickerOpen && !supplierServicesLoading" class="supplier-combobox__menu">
                                   <button
@@ -562,7 +576,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                                   <p v-if="!filteredSupplierServices.length">По вашему запросу ничего не найдено</p>
                                 </div>
                               </div>
-                            </label>
+                            </div>
                             <label v-if="supplierNominalField" class="product-delivery-supplier__nominal">
                               <span>Номинал</span>
                               <select v-if="supplierNominalOptions.length" v-model="settingsForm.supplier_nominal_id" @change="handleSupplierNominalChange">
@@ -2267,11 +2281,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   gap: 10px;
 }
 
+.product-delivery-supplier__service,
 .product-delivery-supplier label {
   display: grid;
   gap: 7px;
 }
 
+.product-delivery-supplier__service > label,
 .product-delivery-supplier label > span {
   color: #dce5f7;
   font-size: 11px;
