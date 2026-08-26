@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -21,10 +22,14 @@ from domains.marketplace_read_api import (
     mount_marketplace_read_routes,
     normalize_catalog_item,
     normalize_order_items,
+    supplier_price_guard,
 )
 
 
 class MarketplaceReadApiTests(unittest.TestCase):
+    def test_supplier_price_guard_is_internal_five_percent_ceiling(self) -> None:
+        self.assertEqual(supplier_price_guard(Decimal("464.53")), Decimal("487.76"))
+
     def test_catalog_search_includes_visible_market_sku(self) -> None:
         condition, params = ilike_search_condition("6099375668", CATALOG_SEARCH_EXPRESSIONS)
         self.assertIn("mapping,marketSku", condition)

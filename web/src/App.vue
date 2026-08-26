@@ -62,6 +62,12 @@ const selectedStockError = ref('')
 const selectedSettingsSaving = ref(false)
 const selectedSettingsError = ref('')
 const selectedSettingsNotice = ref('')
+const supplierServices = ref([])
+const supplierServicesLoading = ref(false)
+const supplierServicesError = ref('')
+const selectedSupplierQuote = ref(null)
+const selectedSupplierQuoteLoading = ref(false)
+const selectedSupplierQuoteError = ref('')
 const selectedProductOrders = ref([])
 const selectedProductOrdersTotal = ref(0)
 const selectedProductOrdersLoading = ref(false)
@@ -85,6 +91,7 @@ const connectionForm = reactive({ provider_code: 'ozon', display_name: '', clien
 let catalogRequestSequence = 0
 let ordersRequestSequence = 0
 let syncMonitorSequence = 0
+let supplierQuoteSequence = 0
 
 const isYandex = computed(() => connectionForm.provider_code === 'yandex_market')
 const activeConnections = computed(() => connections.value.filter((connection) => connection.status === 'active'))
@@ -142,6 +149,8 @@ async function openProductCard(item) {
   selectedStockError.value = ''
   selectedSettingsError.value = ''
   selectedSettingsNotice.value = ''
+  selectedSupplierQuote.value = null
+  selectedSupplierQuoteError.value = ''
   selectedProductOrders.value = []
   selectedProductOrdersTotal.value = 0
   selectedProductOrdersError.value = ''
@@ -151,18 +160,28 @@ async function openProductCard(item) {
   }
   selectedProductKeyPoolError.value = ''
   selectedProductKeyPoolNotice.value = ''
-  const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool()]
+  const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool(), loadSupplierServices()]
+  if (item.supplier_service_id) {
+    requests.push(quoteSelectedSupplier({
+      service_id: item.supplier_service_id,
+      nominal_id: item.supplier_nominal_id || '',
+    }))
+  }
   if (item.provider_code === 'yandex_market' && !item.archived && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
   await Promise.allSettled(requests)
 }
 
 function closeProductCard() {
+  supplierQuoteSequence += 1
   selectedCatalogItem.value = null
   selectedStockLoading.value = false
   selectedStockError.value = ''
   selectedSettingsSaving.value = false
   selectedSettingsError.value = ''
   selectedSettingsNotice.value = ''
+  selectedSupplierQuote.value = null
+  selectedSupplierQuoteLoading.value = false
+  selectedSupplierQuoteError.value = ''
   selectedProductOrders.value = []
   selectedProductOrdersTotal.value = 0
   selectedProductOrdersLoading.value = false
@@ -176,6 +195,55 @@ function closeProductCard() {
   selectedProductKeyPoolSaving.value = false
   selectedProductKeyPoolError.value = ''
   selectedProductKeyPoolNotice.value = ''
+}
+
+async function loadSupplierServices() {
+  // Каталог услуг читается через Seller → Supplier Hub и не связан с покупкой.
+  if (supplierServices.value.length || supplierServicesLoading.value) return
+  supplierServicesLoading.value = true
+  supplierServicesError.value = ''
+  try {
+    const result = await apiRequest('/integrations/supplier-hub/services')
+    supplierServices.value = Array.isArray(result.items) ? result.items : []
+  } catch (requestError) {
+    supplierServicesError.value = requestError.message || 'Не удалось загрузить каталог поставщика'
+  } finally {
+    supplierServicesLoading.value = false
+  }
+}
+
+async function quoteSelectedSupplier(payload) {
+  // Рассчитывает одну выбранную связку. Endpoint Hub выполняет только calculate и не создаёт покупку.
+  const item = selectedCatalogItem.value
+  const serviceId = Number(payload?.service_id)
+  const nominalId = String(payload?.nominal_id || '').trim()
+  if (!item || !Number.isInteger(serviceId) || serviceId <= 0) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  const requestSequence = ++supplierQuoteSequence
+  selectedSupplierQuoteLoading.value = true
+  selectedSupplierQuoteError.value = ''
+  try {
+    const result = await apiRequest('/integrations/supplier-hub/quote', {
+      method: 'POST',
+      body: JSON.stringify({ service_id: serviceId, nominal_id: nominalId, params: {} }),
+    })
+    if (requestSequence !== supplierQuoteSequence || !selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    selectedSupplierQuote.value = {
+      service_id: serviceId,
+      nominal_id: nominalId,
+      amount: result.amount,
+      currency: result.currency || 'RUB',
+    }
+  } catch (requestError) {
+    if (requestSequence === supplierQuoteSequence && selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedSupplierQuote.value = null
+      selectedSupplierQuoteError.value = requestError.message || 'Не удалось получить актуальную цену'
+    }
+  } finally {
+    if (requestSequence === supplierQuoteSequence && selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedSupplierQuoteLoading.value = false
+    }
+  }
 }
 
 async function loadSelectedProductKeyPool(page = 1) {
@@ -366,6 +434,8 @@ async function saveSelectedProductSettings(settings) {
       supplier_service_id: result.supplier_service_id,
       supplier_nominal_id: result.supplier_nominal_id,
       supplier_max_amount: result.supplier_max_amount,
+      supplier_quoted_amount: result.supplier_quoted_amount,
+      supplier_quoted_at: result.supplier_quoted_at,
       settings_saved_at: result.settings_saved_at,
     }
     Object.assign(selectedCatalogItem.value, savedSettings)
@@ -1291,6 +1361,12 @@ onMounted(async () => {
       :settings-saving="selectedSettingsSaving"
       :settings-error="selectedSettingsError"
       :settings-notice="selectedSettingsNotice"
+      :supplier-services="supplierServices"
+      :supplier-services-loading="supplierServicesLoading"
+      :supplier-services-error="supplierServicesError"
+      :supplier-quote="selectedSupplierQuote"
+      :supplier-quote-loading="selectedSupplierQuoteLoading"
+      :supplier-quote-error="selectedSupplierQuoteError"
       :orders="selectedProductOrders"
       :orders-total="selectedProductOrdersTotal"
       :orders-loading="selectedProductOrdersLoading"
@@ -1308,6 +1384,7 @@ onMounted(async () => {
       @load-key-pool="loadSelectedProductKeyPool"
       @add-keys="addSelectedProductKeys"
       @save-settings="saveSelectedProductSettings"
+      @quote-supplier="quoteSelectedSupplier"
       @close="closeProductCard"
     />
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_UP
 from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from domains.local_auth import AuthenticatedUser
 from domains.marketplace_catalog_service import fetch_marketplace_stocks
 from domains.marketplace_orders_service import normalize_marketplace_order_status
+from domains.supplier_hub_client import SupplierHubClient, SupplierHubError, load_supplier_hub_settings
 
 
 CATALOG_SEARCH_EXPRESSIONS = (
@@ -28,6 +29,13 @@ ORDER_SEARCH_EXPRESSIONS = (
     "item.sku",
     "item.offer_id",
 )
+
+SUPPLIER_PRICE_GUARD_MULTIPLIER = Decimal("1.05")
+
+
+def supplier_price_guard(amount: Decimal) -> Decimal:
+    """Добавляет небольшой внутренний запас к котировке, не показывая его оператору."""
+    return (amount * SUPPLIER_PRICE_GUARD_MULTIPLIER).quantize(Decimal("0.01"), rounding=ROUND_UP)
 
 
 class MarketplaceCatalogItemOut(BaseModel):
@@ -128,6 +136,8 @@ class MarketplaceCatalogSettingsOut(BaseModel):
     supplier_service_id: int | None = None
     supplier_nominal_id: str = ""
     supplier_max_amount: Decimal | None = None
+    supplier_quoted_amount: Decimal | None = None
+    supplier_quoted_at: datetime | None = None
     settings_saved_at: datetime
 
 
@@ -564,13 +574,74 @@ def mount_marketplace_read_routes(
         instruction = str(payload.activation_instruction or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         support_message = str(payload.support_message or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         nominal_id = str(payload.supplier_nominal_id or "").strip()
-        if payload.supplier_issue_enabled and (
-            payload.supplier_service_id is None or payload.supplier_max_amount is None
-        ):
+        if payload.supplier_issue_enabled and payload.supplier_service_id is None:
             raise HTTPException(
                 status_code=400,
-                detail="Для автовыдачи укажите услугу Supplier Hub и максимальную цену",
+                detail="Для автовыдачи выберите товар Supplier Hub",
             )
+
+        # Сначала читаем существующую связку и закрываем транзакцию. Внешний quote
+        # нельзя выполнять с открытой транзакцией PostgreSQL: медленный поставщик не
+        # должен удерживать соединение или блокировки Seller.
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT mapping.service_id, mapping.nominal_id, mapping.max_amount,
+                           mapping.quoted_amount, mapping.quoted_at
+                    FROM seller.catalog_items AS item
+                    JOIN seller.marketplace_connections AS marketplace_connection
+                      ON marketplace_connection.id=item.connection_id
+                    LEFT JOIN seller.product_supplier_mappings AS mapping
+                      ON mapping.connection_id=item.connection_id
+                     AND mapping.external_product_id=item.external_product_id
+                     AND mapping.provider_code='interhub' AND mapping.priority=1
+                    WHERE item.connection_id=%s AND item.external_product_id=%s
+                      AND item.is_present=true AND marketplace_connection.workspace_id=%s
+                    LIMIT 1
+                    """,
+                    (payload.connection_id, product_id, seller_user.workspace_id),
+                )
+                existing_mapping = cursor.fetchone()
+                if not existing_mapping:
+                    raise HTTPException(status_code=404, detail="Карточка товара не найдена")
+
+        supplier_max_amount: Decimal | None = None
+        supplier_quoted_amount: Decimal | None = None
+        supplier_quoted_at: datetime | None = None
+        if payload.supplier_service_id is not None:
+            same_mapping = (
+                existing_mapping[0] is not None
+                and int(existing_mapping[0]) == payload.supplier_service_id
+                and str(existing_mapping[1] or "") == nominal_id
+            )
+            if same_mapping and existing_mapping[2] is not None and existing_mapping[3] is not None:
+                supplier_max_amount = Decimal(existing_mapping[2])
+                supplier_quoted_amount = Decimal(existing_mapping[3])
+                supplier_quoted_at = existing_mapping[4]
+            else:
+                try:
+                    quote = SupplierHubClient(load_supplier_hub_settings()).quote(
+                        service_id=payload.supplier_service_id,
+                        nominal_id=nominal_id,
+                    )
+                except SupplierHubError as exc:
+                    raise HTTPException(status_code=502, detail=str(exc)) from exc
+                if not bool(quote.get("success")) or not quote.get("fixed_amount"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=str(quote.get("message") or "Поставщик не вернул актуальную цену"),
+                    )
+                try:
+                    supplier_quoted_amount = Decimal(str(quote["fixed_amount"]))
+                except (ArithmeticError, ValueError) as exc:
+                    raise HTTPException(status_code=502, detail="Поставщик вернул некорректную цену") from exc
+                if supplier_quoted_amount <= 0:
+                    raise HTTPException(status_code=502, detail="Поставщик вернул некорректную цену")
+                supplier_max_amount = supplier_price_guard(supplier_quoted_amount)
+                supplier_quoted_at = datetime.now(timezone.utc)
+
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
@@ -642,24 +713,27 @@ def mount_marketplace_read_routes(
                         seller_user.id,
                     ),
                 )
-                if payload.supplier_service_id is not None and payload.supplier_max_amount is not None:
+                if payload.supplier_service_id is not None and supplier_max_amount is not None:
                     cursor.execute(
                         """
                         INSERT INTO seller.product_supplier_mappings(
                           connection_id, external_product_id, provider_code, priority,
                           enabled, service_id, nominal_id, params, max_amount,
+                          quoted_amount, quoted_at,
                           source_system, source_updated_at, updated_by_user_id
-                        ) VALUES (%s,%s,'interhub',1,%s,%s,%s,'{}'::jsonb,%s,'seller',now(),%s)
+                        ) VALUES (%s,%s,'interhub',1,%s,%s,%s,'{}'::jsonb,%s,%s,%s,'seller',now(),%s)
                         ON CONFLICT (connection_id, external_product_id, provider_code, priority) DO UPDATE SET
                           enabled=EXCLUDED.enabled, service_id=EXCLUDED.service_id,
                           nominal_id=EXCLUDED.nominal_id, max_amount=EXCLUDED.max_amount,
+                          quoted_amount=EXCLUDED.quoted_amount, quoted_at=EXCLUDED.quoted_at,
                           source_system='seller', source_updated_at=now(),
                           updated_by_user_id=EXCLUDED.updated_by_user_id, updated_at=now()
                         """,
                         (
                             payload.connection_id, product_id, payload.supplier_issue_enabled,
                             payload.supplier_service_id, nominal_id,
-                            payload.supplier_max_amount, seller_user.id,
+                            supplier_max_amount, supplier_quoted_amount, supplier_quoted_at,
+                            seller_user.id,
                         ),
                     )
                 else:
@@ -682,7 +756,9 @@ def mount_marketplace_read_routes(
             supplier_issue_enabled=payload.supplier_issue_enabled,
             supplier_service_id=payload.supplier_service_id,
             supplier_nominal_id=nominal_id,
-            supplier_max_amount=payload.supplier_max_amount,
+            supplier_max_amount=supplier_max_amount,
+            supplier_quoted_amount=supplier_quoted_amount,
+            supplier_quoted_at=supplier_quoted_at,
             settings_saved_at=row[10],
         )
 

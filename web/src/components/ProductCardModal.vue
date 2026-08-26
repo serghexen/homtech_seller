@@ -17,6 +17,12 @@ const props = defineProps({
   settingsSaving: { type: Boolean, default: false },
   settingsError: { type: String, default: '' },
   settingsNotice: { type: String, default: '' },
+  supplierServices: { type: Array, default: () => [] },
+  supplierServicesLoading: { type: Boolean, default: false },
+  supplierServicesError: { type: String, default: '' },
+  supplierQuote: { type: Object, default: null },
+  supplierQuoteLoading: { type: Boolean, default: false },
+  supplierQuoteError: { type: String, default: '' },
   orders: { type: Array, default: () => [] },
   ordersTotal: { type: Number, default: 0 },
   ordersLoading: { type: Boolean, default: false },
@@ -31,9 +37,11 @@ const props = defineProps({
   keyPoolCanManage: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys'])
+const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'quote-supplier'])
 const openSection = ref('delivery')
 const openDeliveryMethod = ref('')
+const supplierSearch = ref('')
+const supplierPickerOpen = ref(false)
 const imageFailed = ref(false)
 const settingsFormError = ref('')
 const settingsForm = reactive({
@@ -98,6 +106,60 @@ const supportMessageLength = computed(() => settingsForm.support_message.length)
 const keyPoolDraftCodes = computed(() => parseKeyLines(keyPoolForm.codes_raw))
 const keyPoolDraftDirty = computed(() => Boolean(keyPoolForm.codes_raw.trim() || keyPoolForm.expires_at))
 const keyPoolPageCount = computed(() => Math.max(1, Math.ceil((Number(props.keyPool.total) || 0) / (Number(props.keyPool.page_size) || 20))))
+const selectedSupplierService = computed(() => {
+  const serviceId = Number(settingsForm.supplier_service_id)
+  return props.supplierServices.find((service) => Number(service.service_id) === serviceId) || null
+})
+const supplierNominalField = computed(() => {
+  const fields = Array.isArray(selectedSupplierService.value?.fields) ? selectedSupplierService.value.fields : []
+  return fields.find((field) => String(field?.name || '').toLowerCase() === 'nominal') || null
+})
+const supplierNominalOptions = computed(() => {
+  const values = Array.isArray(supplierNominalField.value?.value_list) ? supplierNominalField.value.value_list : []
+  return values.map((value) => {
+    if (value && typeof value === 'object') {
+      const id = value.id ?? value.value ?? value.title
+      return { id: String(id ?? ''), title: String(value.title ?? value.value ?? id ?? '') }
+    }
+    return { id: String(value ?? ''), title: String(value ?? '') }
+  }).filter((value) => value.id)
+})
+const supplierNominalRequired = computed(() => Boolean(supplierNominalField.value?.required))
+const supplierMappingComplete = computed(() => Boolean(settingsForm.supplier_service_id)
+  && (!supplierNominalRequired.value || Boolean(String(settingsForm.supplier_nominal_id || '').trim())))
+const selectedSupplierNominal = computed(() => supplierNominalOptions.value.find(
+  (option) => option.id === String(settingsForm.supplier_nominal_id || ''),
+) || null)
+const supplierServiceSummary = computed(() => {
+  if (selectedSupplierService.value) {
+    const nominal = selectedSupplierNominal.value?.title || settingsForm.supplier_nominal_id
+    return nominal ? `${selectedSupplierService.value.title} · ${nominal}` : selectedSupplierService.value.title
+  }
+  return settingsForm.supplier_service_id ? `Interhub · услуга #${settingsForm.supplier_service_id}` : 'Выберите товар Interhub'
+})
+const filteredSupplierServices = computed(() => {
+  const needle = supplierSearch.value.trim().toLocaleLowerCase('ru-RU')
+  const items = needle
+    ? props.supplierServices.filter((service) => [service.title, service.category, service.service_id]
+      .some((value) => String(value || '').toLocaleLowerCase('ru-RU').includes(needle)))
+    : props.supplierServices
+  return items.slice(0, 40)
+})
+const supplierCurrentPrice = computed(() => {
+  const quote = props.supplierQuote
+  const quoteMatches = quote
+    && Number(quote.service_id) === Number(settingsForm.supplier_service_id)
+    && String(quote.nominal_id || '') === String(settingsForm.supplier_nominal_id || '')
+  if (quoteMatches) return quote.amount
+  const savedMappingMatches = Number(props.item.supplier_service_id) === Number(settingsForm.supplier_service_id)
+    && String(props.item.supplier_nominal_id || '') === String(settingsForm.supplier_nominal_id || '')
+  return savedMappingMatches ? props.item.supplier_quoted_amount : null
+})
+const supplierCurrentPriceLabel = computed(() => {
+  const amount = Number(supplierCurrentPrice.value)
+  if (!Number.isFinite(amount) || amount <= 0) return ''
+  return new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)
+})
 
 const detailFields = computed(() => [
   { label: 'Артикул продавца', value: props.item.market_sku || props.item.offer_id || props.item.external_product_id || '—' },
@@ -171,6 +233,50 @@ function toggleDeliveryMethod(methodId) {
   openDeliveryMethod.value = openDeliveryMethod.value === methodId ? '' : methodId
 }
 
+function supplierServiceDisplay(service) {
+  return String(service?.title || `Услуга #${service?.service_id || ''}`)
+}
+
+function selectSupplierService(service) {
+  const changed = Number(settingsForm.supplier_service_id) !== Number(service.service_id)
+  settingsForm.supplier_service_id = Number(service.service_id)
+  supplierSearch.value = supplierServiceDisplay(service)
+  supplierPickerOpen.value = false
+  if (changed) {
+    settingsForm.supplier_nominal_id = ''
+    settingsForm.supplier_max_amount = ''
+    settingsForm.supplier_issue_enabled = false
+  }
+  const nominalField = Array.isArray(service.fields)
+    ? service.fields.find((field) => String(field?.name || '').toLowerCase() === 'nominal')
+    : null
+  if (!nominalField?.required) requestSupplierQuote()
+}
+
+function clearSupplierService() {
+  supplierSearch.value = ''
+  settingsForm.supplier_service_id = ''
+  settingsForm.supplier_nominal_id = ''
+  settingsForm.supplier_max_amount = ''
+  settingsForm.supplier_issue_enabled = false
+  supplierPickerOpen.value = true
+}
+
+function requestSupplierQuote() {
+  if (!supplierMappingComplete.value || props.supplierQuoteLoading) return
+  settingsForm.supplier_max_amount = ''
+  emit('quote-supplier', {
+    service_id: Number(settingsForm.supplier_service_id),
+    nominal_id: String(settingsForm.supplier_nominal_id || '').trim(),
+  })
+}
+
+function handleSupplierNominalChange() {
+  settingsForm.supplier_max_amount = ''
+  settingsForm.supplier_issue_enabled = false
+  requestSupplierQuote()
+}
+
 function resetSettingsForm() {
   settingsForm.manual_stock_limit = savedSettings.value.manual_stock_limit
   settingsForm.sales_limit_enabled = savedSettings.value.sales_limit !== null
@@ -184,6 +290,8 @@ function resetSettingsForm() {
   settingsForm.supplier_service_id = savedSettings.value.supplier_service_id || ''
   settingsForm.supplier_nominal_id = savedSettings.value.supplier_nominal_id
   settingsForm.supplier_max_amount = savedSettings.value.supplier_max_amount || ''
+  supplierSearch.value = selectedSupplierService.value ? supplierServiceDisplay(selectedSupplierService.value) : ''
+  supplierPickerOpen.value = false
   settingsFormError.value = ''
 }
 
@@ -235,6 +343,10 @@ watch(() => settingsForm.support_message, (message) => {
   if (!message.trim()) settingsForm.support_message_delivery_enabled = false
 })
 
+watch(selectedSupplierService, (service) => {
+  if (service && !supplierPickerOpen.value) supplierSearch.value = supplierServiceDisplay(service)
+}, { immediate: true })
+
 function close() {
   if ((settingsDirty.value || keyPoolDraftDirty.value) && !props.settingsSaving && !props.keyPoolSaving
     && !window.confirm('Закрыть карточку без сохранения изменений?')) return
@@ -242,7 +354,12 @@ function close() {
 }
 
 function closeOnEscape(event) {
-  if (event.key === 'Escape') close()
+  if (event.key !== 'Escape') return
+  if (supplierPickerOpen.value) {
+    supplierPickerOpen.value = false
+    return
+  }
+  close()
 }
 
 onMounted(() => window.addEventListener('keydown', closeOnEscape))
@@ -383,24 +500,61 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                             </span>
                             <span class="product-delivery-method__copy">
                               <strong>Автовыдача от поставщика</strong>
-                              <small>{{ settingsForm.supplier_service_id ? `Interhub · услуга #${settingsForm.supplier_service_id}` : 'Нужно указать услугу Supplier Hub' }}</small>
+                              <small>{{ supplierServiceSummary }}</small>
                             </span>
                             <svg class="product-delivery-method__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
                           </button>
-                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.supplier_issue_enabled, 'is-disabled': !settingsForm.supplier_service_id || !settingsForm.supplier_max_amount }" title="Использовать Supplier Hub первым способом">
-                            <input v-model="settingsForm.supplier_issue_enabled" type="checkbox" :disabled="!settingsForm.supplier_service_id || !settingsForm.supplier_max_amount" />
+                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.supplier_issue_enabled, 'is-disabled': !supplierMappingComplete || !supplierCurrentPriceLabel }" title="Использовать Supplier Hub первым способом">
+                            <input v-model="settingsForm.supplier_issue_enabled" type="checkbox" :disabled="!supplierMappingComplete || !supplierCurrentPriceLabel" />
                             <span aria-hidden="true"></span>
                             <span class="sr-only">Использовать автовыдачу от поставщика</span>
                           </label>
                         </div>
                         <div v-if="openDeliveryMethod === 'supplier'" class="product-delivery-method__panel product-delivery-supplier">
                           <div class="product-delivery-supplier__fields">
-                            <label><span>ID услуги Interhub</span><input v-model="settingsForm.supplier_service_id" type="number" min="1" step="1" placeholder="11125" /></label>
-                            <label><span>ID номинала</span><input v-model="settingsForm.supplier_nominal_id" type="text" maxlength="128" placeholder="Если требуется поставщиком" /></label>
-                            <label><span>Максимальная цена, ₽</span><input v-model="settingsForm.supplier_max_amount" type="number" min="0.01" step="0.01" placeholder="Цена с допустимым запасом" /></label>
+                            <label class="product-delivery-supplier__service">
+                              <span>Товар Interhub</span>
+                              <div class="supplier-combobox">
+                                <svg class="supplier-combobox__search" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16 16 4 4" /></svg>
+                                <input
+                                  v-model="supplierSearch"
+                                  type="search"
+                                  autocomplete="off"
+                                  :placeholder="supplierServicesLoading ? 'Загружаем товары…' : 'Найдите товар или регион'"
+                                  :disabled="supplierServicesLoading"
+                                  @focus="supplierPickerOpen = true"
+                                  @input="supplierPickerOpen = true"
+                                />
+                                <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @click="clearSupplierService">×</button>
+                                <svg class="supplier-combobox__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+                                <div v-if="supplierPickerOpen && !supplierServicesLoading" class="supplier-combobox__menu">
+                                  <button
+                                    v-for="service in filteredSupplierServices"
+                                    :key="service.service_id"
+                                    type="button"
+                                    :class="{ 'is-selected': Number(service.service_id) === Number(settingsForm.supplier_service_id) }"
+                                    @mousedown.prevent="selectSupplierService(service)"
+                                  >
+                                    <strong>{{ supplierServiceDisplay(service) }}</strong>
+                                    <small>{{ service.category || `Interhub · услуга #${service.service_id}` }}</small>
+                                  </button>
+                                  <p v-if="!filteredSupplierServices.length">По вашему запросу ничего не найдено</p>
+                                </div>
+                              </div>
+                            </label>
+                            <label v-if="supplierNominalField" class="product-delivery-supplier__nominal">
+                              <span>Номинал</span>
+                              <select v-if="supplierNominalOptions.length" v-model="settingsForm.supplier_nominal_id" @change="handleSupplierNominalChange">
+                                <option value="" disabled>Выберите номинал</option>
+                                <option v-for="nominal in supplierNominalOptions" :key="nominal.id" :value="nominal.id">{{ nominal.title }}</option>
+                              </select>
+                              <input v-else v-model="settingsForm.supplier_nominal_id" type="text" maxlength="128" placeholder="Укажите номинал" @change="handleSupplierNominalChange" />
+                            </label>
                           </div>
-                          <p v-if="item.supplier_quoted_amount">Последняя сохранённая цена: <strong>{{ item.supplier_quoted_amount }} ₽</strong>. Лимит защищает от покупки по неожиданно выросшей цене.</p>
-                          <p v-else>Перед переключением цена будет безопасно перепроверена через Supplier Hub без покупки.</p>
+                          <p v-if="supplierServicesError" class="supplier-inline-error">{{ supplierServicesError }}</p>
+                          <p v-if="supplierQuoteError" class="supplier-inline-error">{{ supplierQuoteError }}</p>
+                          <p v-if="supplierQuoteLoading">Актуальная цена: <strong>уточняем…</strong></p>
+                          <p v-else-if="supplierCurrentPriceLabel">Актуальная цена: <strong>{{ supplierCurrentPriceLabel }} ₽</strong></p>
                         </div>
                       </article>
 
@@ -1890,6 +2044,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 }
 
 .product-delivery-method.is-expanded {
+  position: relative;
+  z-index: 3;
+  overflow: visible;
   box-shadow: 0 16px 38px rgba(1, 5, 17, .18);
 }
 
@@ -2084,7 +2241,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
 .product-delivery-supplier__fields {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
   gap: 10px;
 }
 
@@ -2099,7 +2256,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-weight: 800;
 }
 
-.product-delivery-supplier input {
+.product-delivery-supplier input,
+.product-delivery-supplier select {
   min-width: 0;
   min-height: 42px;
   padding: 0 11px;
@@ -2110,8 +2268,121 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   background: rgba(5, 11, 26, .72);
 }
 
-.product-delivery-supplier input:focus {
+.product-delivery-supplier select {
+  width: 100%;
+}
+
+.product-delivery-supplier input:focus,
+.product-delivery-supplier select:focus {
   border-color: rgba(83, 125, 255, .78);
+}
+
+.supplier-combobox {
+  position: relative;
+}
+
+.supplier-combobox > input {
+  width: 100%;
+  padding-right: 68px;
+  padding-left: 38px;
+}
+
+.supplier-combobox > input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.supplier-combobox__search,
+.supplier-combobox__chevron {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: #91a1c5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.supplier-combobox__search {
+  left: 13px;
+}
+
+.supplier-combobox__chevron {
+  right: 12px;
+}
+
+.supplier-combobox__clear {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  right: 36px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  place-items: center;
+  color: #aab6d0;
+  background: rgba(139, 153, 185, .16);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.supplier-combobox__clear:hover {
+  color: #eef3ff;
+  background: rgba(139, 153, 185, .28);
+}
+
+.supplier-combobox__menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 7px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 290px;
+  padding: 7px;
+  overflow-y: auto;
+  border: 1px solid rgba(92, 129, 224, .55);
+  border-radius: 13px;
+  box-shadow: 0 18px 45px rgba(1, 6, 19, .55);
+  background: #101b35;
+}
+
+.supplier-combobox__menu button {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 9px;
+  text-align: left;
+  color: #eaf0ff;
+  background: transparent;
+  cursor: pointer;
+}
+
+.supplier-combobox__menu button:hover,
+.supplier-combobox__menu button.is-selected {
+  background: rgba(61, 95, 176, .34);
+}
+
+.supplier-combobox__menu strong {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.supplier-combobox__menu small {
+  color: #91a1c5;
+  font-size: 10px;
+}
+
+.supplier-combobox__menu > p {
+  padding: 12px;
 }
 
 .product-delivery-supplier p {
@@ -2123,6 +2394,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
 .product-delivery-supplier p strong {
   color: #e8edfb;
+}
+
+.product-delivery-supplier .supplier-inline-error {
+  color: #ff9b9b;
 }
 
 .product-delivery-support {

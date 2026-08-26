@@ -39,8 +39,8 @@ export function validateProductSettings(values) {
   if (values.support_message_delivery_enabled && !values.support_message) {
     return 'Для выдачи через поддержку сначала заполните сообщение'
   }
-  if (values.supplier_issue_enabled && (!values.supplier_service_id || !values.supplier_max_amount)) {
-    return 'Для автовыдачи укажите ID услуги Supplier Hub и максимальную цену'
+  if (values.supplier_issue_enabled && !values.supplier_service_id) {
+    return 'Для автовыдачи выберите товар, номинал и дождитесь актуальной цены'
   }
   return ''
 }
