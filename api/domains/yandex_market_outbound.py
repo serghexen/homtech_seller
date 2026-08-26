@@ -398,7 +398,7 @@ class YandexOutboundProcessor:
                 cursor.execute(
                     """
                     INSERT INTO seller.fulfillment_events(fulfillment_id, event_type, from_status, to_status, details)
-                    VALUES (%s,%s,'sending',%s,jsonb_build_object('message', %s))
+                    VALUES (%s,%s,'sending',%s,jsonb_build_object('message', (%s)::text))
                     """,
                     (payload.fulfillment_id, event_type, to_status, message[:1000]),
                 )

@@ -47,6 +47,10 @@ class YandexOutboundTests(unittest.TestCase):
         self.assertIn("повтор запрещён", source)
         self.assertNotIn("retry_delay", source)
 
+    def test_finish_casts_empty_event_message_for_postgres(self) -> None:
+        source = inspect.getsource(YandexOutboundProcessor._finish)
+        self.assertIn("jsonb_build_object('message', (%s)::text)", source)
+
 
 if __name__ == "__main__":
     unittest.main()
