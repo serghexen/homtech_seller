@@ -11,6 +11,7 @@ from typing import Any, Callable, Literal
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from domains.buyer_text import normalize_buyer_text
 from domains.local_auth import AuthenticatedUser
 from domains.marketplace_catalog_service import fetch_marketplace_stocks
 from domains.marketplace_orders_service import normalize_marketplace_order_status
@@ -464,7 +465,7 @@ def mount_marketplace_read_routes(
                            local_settings.connection_id IS NOT NULL,
                            settings.connection_id IS NOT NULL,
                            COALESCE(local_settings.manual_stock_limit, settings.manual_stock_limit),
-                           settings.published_stock,
+                           COALESCE(local_settings.published_stock, settings.published_stock),
                            COALESCE(local_settings.activation_instruction, settings.activation_instruction),
                            CASE WHEN local_settings.connection_id IS NOT NULL
                              THEN local_settings.sales_limit ELSE settings.sales_limit END,
@@ -535,7 +536,7 @@ def mount_marketplace_read_routes(
                 stock_settings_available=has_settings,
                 sales_metrics_available=has_imported_settings,
                 manual_stock_limit=int(row[11]) if has_settings else None,
-                published_stock=int(row[12]) if has_imported_settings else None,
+                published_stock=int(row[12]) if row[12] is not None else None,
                 activation_instruction=str(row[13] or "") if has_settings else "",
                 sales_limit=int(row[14]) if row[14] is not None else None,
                 sales_limit_daily_extra=int(row[15]) if has_settings else None,
@@ -571,8 +572,8 @@ def mount_marketplace_read_routes(
     ) -> MarketplaceCatalogSettingsOut:
         # Сохраняет только локальные параметры Seller. Здесь намеренно нет токена и вызова API маркетплейса.
         product_id = str(payload.external_product_id).strip()
-        instruction = str(payload.activation_instruction or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        support_message = str(payload.support_message or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        instruction = normalize_buyer_text(payload.activation_instruction)
+        support_message = normalize_buyer_text(payload.support_message)
         nominal_id = str(payload.supplier_nominal_id or "").strip()
         if payload.supplier_issue_enabled and payload.supplier_service_id is None:
             raise HTTPException(

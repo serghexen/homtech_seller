@@ -42,6 +42,15 @@ class CrmYandexSettingsImportTests(unittest.TestCase):
         self.assertEqual(rows[0].support_message, "Напишите в поддержку.")
         self.assertFalse(rows[0].support_message_delivery_enabled)
 
+    def test_normalizes_legacy_literal_line_breaks(self):
+        payload = self.source_payload(
+            activation_instruction="Первая строка\\nВторая строка",
+            support_message="Напишите нам\\r\\nМы ответим",
+        )
+        row = read_source_rows(io.StringIO(json.dumps(payload, ensure_ascii=False) + "\n"))[0]
+        self.assertEqual(row.activation_instruction, "Первая строка\nВторая строка")
+        self.assertEqual(row.support_message, "Напишите нам\nМы ответим")
+
     def test_missing_catalog_offers_are_strict_by_default(self):
         row = read_source_rows(io.StringIO(json.dumps(self.source_payload()) + "\n"))[0]
         with self.assertRaisesRegex(RuntimeError, "1 source offers are missing"):

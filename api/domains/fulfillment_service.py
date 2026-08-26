@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 import os
 
+from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
+
 
 @dataclass(frozen=True)
 class ReservationResult:
@@ -122,6 +124,8 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
                     event_type="market_delivered", timestamp_column="delivered_at",
                     delivery_source=None if target_status == "delivered" else "external",
                 )
+                if target_status == "delivered":
+                    enqueue_yandex_stock_publication(cursor, fulfillment_id=fulfillment_id)
             elif not is_digital and current_status in {
                 "pending", "reserved", "manual_required", "supplier_required", "failed",
             }:

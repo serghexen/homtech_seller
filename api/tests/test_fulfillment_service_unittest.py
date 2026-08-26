@@ -275,6 +275,7 @@ class FulfillmentServiceTests(unittest.TestCase):
         self.assertIn("state='consumed'", all_sql)
         self.assertIn("status='delivered'", all_sql)
         self.assertIn("SET status=%s, delivered_at=now()", all_sql)
+        self.assertIn("INSERT INTO seller.yandex_stock_outbound_jobs", all_sql)
 
     def test_external_delivery_releases_unused_local_reservation(self) -> None:
         connection = ScriptedConnection([

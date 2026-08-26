@@ -133,6 +133,29 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("idempotency_key text NOT NULL UNIQUE", joined)
         self.assertIn("'requires_attention'", joined)
 
+    def test_yandex_stock_outbox_is_disabled_and_durable(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260826_02_yandex_stock_outbox.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("stock_outbound_enabled boolean NOT NULL DEFAULT false", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.yandex_stock_outbound_jobs", joined)
+        self.assertIn("fulfillment_id bigint NOT NULL UNIQUE", joined)
+        self.assertIn("'queued','preparing','sending','succeeded','failed'", joined)
+        self.assertIn("SELECT DISTINCT ON (connection_id, offer_id)", joined)
+        self.assertIn("status IN ('submitted','delivered')", joined)
+
+    def test_legacy_buyer_text_migration_repairs_both_setting_sources(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260826_03_normalize_buyer_text.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("UPDATE seller.yandex_product_settings_snapshot", joined)
+        self.assertIn("UPDATE seller.product_card_settings", joined)
+        self.assertIn("activation_instruction", joined)
+        self.assertIn(r"E'\\n'", joined)
+        self.assertNotIn(r"E'\\\\n'", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

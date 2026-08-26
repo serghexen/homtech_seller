@@ -15,6 +15,7 @@ from domains.yandex_market_outbound import (
     send_yandex_digital_goods,
     yandex_outbound_enabled,
 )
+from domains.buyer_text import normalize_buyer_text
 
 
 def payload() -> OutboundPayload:
@@ -50,6 +51,16 @@ class YandexOutboundTests(unittest.TestCase):
     def test_finish_casts_empty_event_message_for_postgres(self) -> None:
         source = inspect.getsource(YandexOutboundProcessor._finish)
         self.assertIn("jsonb_build_object('message', (%s)::text)", source)
+
+    def test_success_enqueues_target_stock_republish(self) -> None:
+        source = inspect.getsource(YandexOutboundProcessor._finish)
+        self.assertIn("enqueue_yandex_stock_publication", source)
+
+    def test_legacy_instruction_uses_real_line_breaks(self) -> None:
+        self.assertEqual(
+            normalize_buyer_text("Шаг 1\\nШаг 2\\r\\nШаг 3"),
+            "Шаг 1\nШаг 2\nШаг 3",
+        )
 
 
 if __name__ == "__main__":

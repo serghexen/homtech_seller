@@ -17,6 +17,7 @@ from domains.supplier_fulfillment import build_supplier_fulfillment_processor
 from domains.yandex_market_webhook_processor import build_yandex_market_webhook_processor
 from domains.yandex_market_webhooks_api import webhook_processing_enabled
 from domains.yandex_market_outbound import build_yandex_outbound_processor
+from domains.yandex_market_stock_outbound import build_yandex_stock_outbound_processor
 
 
 SYNC_LOCK_NAMESPACE = 20_260_824
@@ -57,6 +58,10 @@ def outbound_batch_size() -> int:
 
 def fulfillment_batch_size() -> int:
     return max(1, min(int(os.getenv("SELLER_FULFILLMENT_BATCH_SIZE", "5")), 50))
+
+
+def stock_outbound_batch_size() -> int:
+    return max(1, min(int(os.getenv("YANDEX_MARKET_STOCK_OUTBOUND_BATCH_SIZE", "5")), 50))
 
 
 def advisory_lock_key(connection_id: int) -> int:
@@ -264,6 +269,7 @@ def run_worker() -> int:
         processing_enabled=webhook_processing_enabled,
     )
     outbound = build_yandex_outbound_processor(database_url=database_url, psycopg=psycopg)
+    stock_outbound = build_yandex_stock_outbound_processor(database_url=database_url, psycopg=psycopg)
     fulfillment = build_supplier_fulfillment_processor(database_url=database_url, psycopg=psycopg)
     print("Seller worker started", flush=True)
     while not stopping:
@@ -283,6 +289,12 @@ def run_worker() -> int:
             processed_outbound = outbound.process_pending_jobs(outbound_batch_size())
             if processed_outbound:
                 print(f"Processed Yandex outbound jobs: {processed_outbound}", flush=True)
+            recovered_stock = stock_outbound.recover_stale()
+            if recovered_stock:
+                print(f"Recovered Yandex stock jobs: {recovered_stock}", flush=True)
+            processed_stock = stock_outbound.process_pending_jobs(stock_outbound_batch_size())
+            if processed_stock:
+                print(f"Processed Yandex stock jobs: {processed_stock}", flush=True)
             processed_webhooks = process_yandex_webhook.process_pending_events(webhook_batch_size())
             if processed_webhooks:
                 print(f"Processed Yandex webhook events: {processed_webhooks}", flush=True)
@@ -292,7 +304,7 @@ def run_worker() -> int:
                     print(f"Recovered stale sync jobs: {recovered}", flush=True)
                 job = claim_next_job(lock_connection)
                 if not job:
-                    if not processed_fulfillments and not processed_webhooks and not processed_outbound:
+                    if not processed_fulfillments and not processed_webhooks and not processed_outbound and not processed_stock:
                         time.sleep(poll_seconds())
                     continue
                 try:

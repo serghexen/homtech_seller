@@ -51,9 +51,11 @@
 - `SELLER_SUPPLIER_HUB_FULFILLMENT_ENABLED=false`.
 - `SELLER_POOL_RESERVATION_ENABLED=false`.
 - `SELLER_YANDEX_OUTBOUND_ENABLED=false`.
+- `SELLER_YANDEX_STOCK_OUTBOUND_ENABLED=false`.
 - У JoyCards в Seller выключены `webhook_processing_enabled`,
   `supplier_fulfillment_enabled`, `fulfillment_reservation_enabled` и
   `fulfillment_outbound_enabled`.
+- У JoyCards выключен `stock_outbound_enabled`; он включается отдельно только вместе с публикацией остатка после успешной выдачи.
 - В Hub выключены `SUPPLIER_HUB_PURCHASES_ENABLED` и
   `SUPPLIER_HUB_INTERHUB_PAYMENT_ENABLED`.
 

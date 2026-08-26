@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from domains.buyer_text import normalize_buyer_text
 
 MAX_OFFER_ID_LENGTH = 256
 MAX_INSTRUCTION_LENGTH = 5000
@@ -114,10 +115,10 @@ def boolean_value(value: Any, *, field: str) -> bool:
 
 
 def normalize_source_row(payload: dict[str, Any]) -> SourceSettings:
-    instruction = str(payload.get("activation_instruction") or "").strip()
+    instruction = normalize_buyer_text(payload.get("activation_instruction"))
     if len(instruction) > MAX_INSTRUCTION_LENGTH:
         raise ValueError(f"activation_instruction is longer than {MAX_INSTRUCTION_LENGTH} characters")
-    support_message = str(payload.get("support_message") or "").strip()
+    support_message = normalize_buyer_text(payload.get("support_message"))
     if len(support_message) > MAX_SUPPORT_MESSAGE_LENGTH:
         raise ValueError(f"support_message is longer than {MAX_SUPPORT_MESSAGE_LENGTH} characters")
     sales_limit = optional_positive_int(payload.get("sales_limit"), field="sales_limit")

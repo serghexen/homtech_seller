@@ -10,8 +10,10 @@ import urllib.error
 import urllib.request
 from uuid import UUID
 
+from domains.buyer_text import normalize_buyer_text
 from domains.marketplace_connection_verification import YANDEX_MARKET_BASE_URL, _ssl_context
 from domains.marketplace_sync_service import credentials_secret
+from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
 
 
 @dataclass(frozen=True)
@@ -220,7 +222,7 @@ class YandexOutboundProcessor:
                     return None
                 delivery_source = str(row[6] or "")
                 support_message = str(row[7] or "").strip()
-                instruction = str(row[12] or "").strip()
+                instruction = normalize_buyer_text(row[12])
                 validation_error = ""
                 if not yandex_outbound_enabled() or str(row[9]) != "active" or not bool(row[10]):
                     validation_error = "Внешняя отправка выключена"
@@ -350,6 +352,7 @@ class YandexOutboundProcessor:
                         """,
                         (payload.fulfillment_id,),
                     )
+                    enqueue_yandex_stock_publication(cursor, fulfillment_id=payload.fulfillment_id)
                     event_type, to_status = "outbound_submitted", "submitted"
                 elif state == "failed":
                     cursor.execute(

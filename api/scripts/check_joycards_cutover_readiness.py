@@ -27,6 +27,7 @@ FALSE_FLAGS = (
     "SELLER_SUPPLIER_HUB_FULFILLMENT_ENABLED",
     "SELLER_POOL_RESERVATION_ENABLED",
     "SELLER_YANDEX_OUTBOUND_ENABLED",
+    "SELLER_YANDEX_STOCK_OUTBOUND_ENABLED",
 )
 
 
@@ -59,7 +60,7 @@ def seller_checks(target, campaign_id: str, expected_count: int | None, quote_ma
             """
             SELECT id, display_name, webhook_processing_enabled,
                    fulfillment_reservation_enabled, fulfillment_outbound_enabled,
-                   supplier_fulfillment_enabled
+                   supplier_fulfillment_enabled, stock_outbound_enabled
             FROM seller.marketplace_connections
             WHERE provider_code='yandex_market' AND campaign_id=%s
             """,
@@ -73,7 +74,7 @@ def seller_checks(target, campaign_id: str, expected_count: int | None, quote_ma
         connection_id = int(row[0])
         add_check(checks, "seller_store_gates_disabled", not any(bool(value) for value in row[2:]), {
             "webhook": bool(row[2]), "pool": bool(row[3]),
-            "outbound": bool(row[4]), "supplier": bool(row[5]),
+            "outbound": bool(row[4]), "supplier": bool(row[5]), "stock": bool(row[6]),
         })
         cursor.execute(
             """

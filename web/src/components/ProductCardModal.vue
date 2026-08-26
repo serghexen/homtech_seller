@@ -499,7 +499,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
                     <p class="stock-readonly__notice">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                      Эти значения сохраняются только в Seller. Отправка остатков и лимитов в маркетплейс не выполняется.
+                      Сохранение настроек не меняет маркетплейс. Заданный остаток публикуется только после подтверждённой выдачи товара и при включённой синхронизации магазина.
                     </p>
                   </div>
                   <div v-else-if="section.id === 'instruction'" class="product-instruction">
