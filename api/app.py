@@ -14,13 +14,14 @@ from domains.marketplace_connections_api import mount_marketplace_connection_rou
 from domains.marketplace_fulfillments_api import mount_marketplace_fulfillment_routes
 from domains.marketplace_catalog_actions_api import mount_marketplace_catalog_action_routes
 from domains.marketplace_key_pools_api import mount_marketplace_key_pool_routes
+from domains.marketplace_key_reveals_api import mount_marketplace_key_reveal_routes
 from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 from domains.supplier_hub_api import mount_supplier_hub_routes
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.47")
+app = FastAPI(title="HomTech Seller API", version="0.0.48")
 
 
 def cors_origins() -> list[str]:
@@ -284,6 +285,15 @@ mount_marketplace_read_routes(
 
 # Пулы хранятся локально и пока поддерживают только просмотр и пополнение без выдачи ключей.
 mount_marketplace_key_pool_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+# Открытые значения доступны только точечно по явному действию владельца или оператора.
+mount_marketplace_key_reveal_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

@@ -71,6 +71,11 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         self.assertNotIn("delivered_codes", source)
         self.assertIn("fulfillment_outbound_jobs", source)
 
+    def test_read_exposes_reveal_capability_for_reserved_and_consumed_keys(self) -> None:
+        source = inspect.getsource(mount_marketplace_fulfillment_routes)
+        self.assertIn("reservation.state IN ('reserved','consumed')", source)
+        self.assertIn("can_reveal_keys=bool", source)
+
     def test_manual_preparation_requires_digital_delivery(self) -> None:
         source = inspect.getsource(mount_marketplace_fulfillment_routes)
         self.assertIn("item.delivery_type", source)

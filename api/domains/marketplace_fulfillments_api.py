@@ -66,6 +66,7 @@ class OrderFulfillmentOut(BaseModel):
     can_prepare_manual: bool = False
     can_prepare_support: bool = False
     support_message_configured: bool = False
+    can_reveal_keys: bool = False
 
 
 def mount_marketplace_fulfillment_routes(
@@ -103,7 +104,8 @@ def mount_marketplace_fulfillment_routes(
                    fulfillment.last_error, fulfillment.reserved_at,
                    COALESCE((
                      SELECT COUNT(*) FROM seller.fulfillment_key_reservations AS reservation
-                     WHERE reservation.fulfillment_id=fulfillment.id AND reservation.state='reserved'
+                     WHERE reservation.fulfillment_id=fulfillment.id
+                       AND reservation.state IN ('reserved','consumed')
                    ), 0),
                    COALESCE((
                      SELECT COUNT(*)
@@ -199,6 +201,7 @@ def mount_marketplace_fulfillment_routes(
             can_prepare_manual=can_prepare_any,
             can_prepare_support=bool(can_prepare_any and support_message_configured),
             support_message_configured=support_message_configured,
+            can_reveal_keys=bool(can_manage and int(row[16] or 0) > 0),
         )
 
     def require_manual_feature_enabled() -> None:

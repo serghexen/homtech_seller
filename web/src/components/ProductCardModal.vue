@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
-import { keyCountLabel, keyOrderLabel, parseKeyLines } from '../utils/keyPool.js'
+import { addMonthsToDate, keyCountLabel, keyOrderLabel, parseKeyLines } from '../utils/keyPool.js'
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
 import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
 
@@ -39,9 +39,11 @@ const props = defineProps({
   keyPoolError: { type: String, default: '' },
   keyPoolNotice: { type: String, default: '' },
   keyPoolCanManage: { type: Boolean, default: false },
+  keyPoolRevealingId: { type: Number, default: 0 },
+  keyPoolRevealed: { type: Object, default: () => ({}) },
 })
 
-const emit = defineEmits(['close', 'refresh-stock', 'publish-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'quote-supplier'])
+const emit = defineEmits(['close', 'refresh-stock', 'publish-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'reveal-key', 'open-order-fulfillment', 'quote-supplier'])
 const openSection = ref('delivery')
 const openDeliveryMethod = ref('')
 const supplierSearch = ref('')
@@ -413,6 +415,15 @@ function submitKeyPool() {
   })
 }
 
+function shiftKeyPoolExpiry(monthsToAdd) {
+  keyPoolForm.expires_at = addMonthsToDate(keyPoolForm.expires_at, monthsToAdd)
+}
+
+function canOpenOrderFulfillment(order) {
+  return props.item.provider_code === 'yandex_market'
+    && String(order?.delivery_type || '').trim().toUpperCase() === 'DIGITAL'
+}
+
 watch(() => props.keyPoolNotice, (notice) => {
   // После подтверждённого сохранения удаляет открытые коды из памяти формы.
   if (!notice) return
@@ -728,11 +739,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                               <textarea v-model="keyPoolForm.codes_raw" :disabled="keyPoolSaving" spellcheck="false" autocomplete="off" placeholder="AAAA-BBBB-CCCC&#10;DDDD-EEEE-FFFF" />
                               <small>{{ keyCountLabel(keyPoolDraftCodes.length) }} подготовлено</small>
                             </label>
-                            <label class="product-key-pool__expiry">
-                              <span>Срок действия</span>
-                              <input v-model="keyPoolForm.expires_at" :disabled="keyPoolSaving" type="date" />
+                            <div class="product-key-pool__expiry">
+                              <span>Активировать до</span>
+                              <div class="product-key-pool__expiry-controls">
+                                <input v-model="keyPoolForm.expires_at" :disabled="keyPoolSaving" type="date" />
+                                <button type="button" :disabled="keyPoolSaving" @click="shiftKeyPoolExpiry(1)">+ месяц</button>
+                                <button type="button" :disabled="keyPoolSaving" @click="shiftKeyPoolExpiry(12)">+ год</button>
+                              </div>
                               <small>Можно оставить пустым</small>
-                            </label>
+                            </div>
                             <button class="product-key-pool__submit" type="submit" :disabled="keyPoolSaving || !keyPoolDraftCodes.length">
                               <span v-if="keyPoolSaving" class="product-settings-save__spinner" aria-hidden="true"></span>
                               <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
@@ -753,19 +768,25 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           <template v-else>
                             <div class="product-key-pool__list-head">
                               <div><strong>Ключи пула</strong><small>Здесь только ключи, добавленные через это окно</small></div>
-                              <span>Открытые значения не загружаются в браузер</span>
+                              <span>Значения открываются только по кнопке</span>
                             </div>
                             <div class="product-key-pool__table-wrap">
                               <table class="product-key-pool__table">
                                 <thead>
-                                  <tr><th>Ключ</th><th>Статус</th><th>Активировать до</th><th>Заказ</th></tr>
+                                  <tr><th>Ключ</th><th>Статус</th><th>Активировать до</th><th>Заказ</th><th><span class="sr-only">Действия</span></th></tr>
                                 </thead>
                                 <tbody>
                                   <tr v-for="key in keyPool.items" :key="key.id">
-                                    <td data-label="Ключ"><code>{{ key.masked_code }}</code><small>Добавлен {{ formatOrderDate(key.created_at) }}</small></td>
+                                    <td data-label="Ключ"><code :class="{ 'is-revealed': keyPoolRevealed[key.id] }">{{ keyPoolRevealed[key.id] || key.masked_code }}</code><small>Добавлен {{ formatOrderDate(key.created_at) }}</small></td>
                                     <td data-label="Статус"><span class="product-key-pool__status" :class="`product-key-pool__status--${key.status}`">{{ keyStatusLabel(key.status) }}</span></td>
                                     <td data-label="Активировать до">{{ key.expires_at || '—' }}</td>
                                     <td data-label="Заказ"><span :class="{ 'product-key-pool__order--empty': !key.issued_order_ref && !key.issued_order_id }">{{ keyOrderLabel(key) }}</span></td>
+                                    <td data-label="Действия" class="product-key-pool__actions">
+                                      <button type="button" :disabled="Boolean(keyPoolRevealingId) || Boolean(keyPoolRevealed[key.id])" :title="keyPoolRevealed[key.id] ? 'Ключ показан' : 'Показать ключ'" :aria-label="`Показать ключ ${key.masked_code}`" @click="emit('reveal-key', key)">
+                                        <span v-if="keyPoolRevealingId === key.id" class="product-orders__spinner" aria-hidden="true"></span>
+                                        <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></svg>
+                                      </button>
+                                    </td>
                                   </tr>
                                 </tbody>
                               </table>
@@ -863,7 +884,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         <article v-for="order in orders" :key="`${order.external_order_id}-${order.external_item_id}`" class="product-order">
                           <div class="product-order__head">
                             <strong>Заказ №{{ order.external_order_id }}</strong>
-                            <span class="product-order__status" :class="`product-order__status--${order.status}`">{{ orderStatusLabel(order.status) }}</span>
+                            <div class="product-order__actions">
+                              <span class="product-order__status" :class="`product-order__status--${order.status}`">{{ orderStatusLabel(order.status) }}</span>
+                              <button v-if="canOpenOrderFulfillment(order)" type="button" :title="order.status === 'processing' ? 'Открыть выдачу' : 'Посмотреть выданный ключ'" :aria-label="`Открыть выдачу заказа ${order.external_order_id}`" @click="emit('open-order-fulfillment', order)">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v5h5M10 12h5M10 16h5" /></svg>
+                              </button>
+                            </div>
                           </div>
                           <div class="product-order__meta">
                             <time :datetime="order.updated_at || order.created_at || order.synced_at">{{ formatOrderDate(order.updated_at || order.created_at || order.synced_at) }}</time>
@@ -1392,6 +1418,43 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.product-order__actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.product-order__actions > button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(90, 132, 255, .34);
+  border-radius: 9px;
+  color: #80a0ff;
+  background: rgba(43, 75, 163, .22);
+  cursor: pointer;
+}
+
+.product-order__actions > button:hover {
+  border-color: rgba(102, 143, 255, .72);
+  color: #b9c8ff;
+  background: rgba(49, 88, 203, .34);
+}
+
+.product-order__actions svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .product-order__status {
@@ -2794,7 +2857,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
 .product-key-pool__form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 170px auto;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, .75fr) auto;
   align-items: end;
   gap: 12px;
   padding: 14px;
@@ -2870,6 +2933,37 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-size: 11px;
   line-height: 1.5;
   resize: vertical;
+}
+
+.product-key-pool__expiry-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+}
+
+.product-key-pool__expiry-controls button {
+  min-height: 42px;
+  padding: 0 10px;
+  border: 1px solid rgba(126, 151, 217, .28);
+  border-radius: 11px;
+  color: #b9c5dd;
+  background: rgba(18, 29, 59, .72);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.product-key-pool__expiry-controls button:hover:not(:disabled) {
+  border-color: rgba(83, 126, 255, .65);
+  color: #e5ebfb;
+  background: rgba(44, 75, 171, .28);
+}
+
+.product-key-pool__expiry-controls button:disabled {
+  cursor: not-allowed;
+  opacity: .5;
 }
 
 .product-key-pool__expiry input {
@@ -3033,6 +3127,51 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   text-overflow: ellipsis;
 }
 
+.product-key-pool__table code.is-revealed {
+  color: #73e7c5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.product-key-pool__actions {
+  width: 46px;
+  text-align: right;
+}
+
+.product-key-pool__actions button {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(91, 132, 255, .36);
+  border-radius: 9px;
+  color: #79a0ff;
+  background: rgba(42, 74, 166, .23);
+  cursor: pointer;
+}
+
+.product-key-pool__actions button:hover:not(:disabled) {
+  border-color: rgba(102, 143, 255, .72);
+  color: #bed0ff;
+  background: rgba(49, 88, 203, .34);
+}
+
+.product-key-pool__actions button:disabled {
+  cursor: default;
+  opacity: .58;
+}
+
+.product-key-pool__actions svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .product-key-pool__table td > small {
   display: block;
   margin-top: 3px;
@@ -3087,6 +3226,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .product-key-pool__pager button:disabled {
   cursor: not-allowed;
   opacity: .45;
+}
+
+@media (max-width: 820px) {
+  .product-key-pool__form {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .product-key-pool__codes {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 660px) {
@@ -3231,6 +3380,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   .product-key-pool__list-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .product-key-pool__expiry-controls {
+    grid-template-columns: minmax(0, 1fr) repeat(2, auto);
   }
 
   .product-key-pool__table-wrap {

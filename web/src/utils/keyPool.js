@@ -29,3 +29,20 @@ export function keyOrderLabel(key) {
   const parts = reference.split(':').filter(Boolean)
   return parts.length >= 3 ? `Заказ ${parts.at(-2)}` : reference
 }
+
+export function addMonthsToDate(value, monthsToAdd, now = new Date()) {
+  // Сохраняет день месяца, а для короткого целевого месяца выбирает его последний день.
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))
+    ? String(value).split('-').map(Number)
+    : null
+  const base = parsed ? new Date(parsed[0], parsed[1] - 1, parsed[2]) : new Date(now)
+  const day = base.getDate()
+  const target = new Date(base.getFullYear(), base.getMonth() + Number(monthsToAdd || 0), 1)
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate()
+  target.setDate(Math.min(day, lastDay))
+  return [
+    target.getFullYear(),
+    String(target.getMonth() + 1).padStart(2, '0'),
+    String(target.getDate()).padStart(2, '0'),
+  ].join('-')
+}

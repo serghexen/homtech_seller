@@ -84,11 +84,16 @@ const selectedProductKeyPoolLoading = ref(false)
 const selectedProductKeyPoolSaving = ref(false)
 const selectedProductKeyPoolError = ref('')
 const selectedProductKeyPoolNotice = ref('')
+const selectedProductKeyPoolRevealingId = ref(0)
+const selectedProductKeyPoolRevealed = ref({})
 const selectedOrderItem = ref(null)
 const selectedOrderFulfillment = ref(null)
 const selectedOrderFulfillmentLoading = ref(false)
 const selectedOrderFulfillmentActionLoading = ref(false)
 const selectedOrderFulfillmentError = ref('')
+const selectedOrderRevealedKeys = ref([])
+const selectedOrderRevealLoading = ref(false)
+const selectedOrderRevealError = ref('')
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 let catalogRequestSequence = 0
@@ -169,6 +174,8 @@ async function openProductCard(item) {
   }
   selectedProductKeyPoolError.value = ''
   selectedProductKeyPoolNotice.value = ''
+  selectedProductKeyPoolRevealingId.value = 0
+  selectedProductKeyPoolRevealed.value = {}
   const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool(), loadSupplierServices()]
   if (item.supplier_service_id) {
     requests.push(quoteSelectedSupplier({
@@ -208,6 +215,8 @@ function closeProductCard() {
   selectedProductKeyPoolSaving.value = false
   selectedProductKeyPoolError.value = ''
   selectedProductKeyPoolNotice.value = ''
+  selectedProductKeyPoolRevealingId.value = 0
+  selectedProductKeyPoolRevealed.value = {}
 }
 
 async function loadSupplierServices() {
@@ -313,6 +322,27 @@ async function addSelectedProductKeys(payload) {
     if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
       selectedProductKeyPoolSaving.value = false
     }
+  }
+}
+
+async function revealSelectedProductKey(key) {
+  const item = selectedCatalogItem.value
+  if (!item || !key?.id || selectedProductKeyPoolRevealingId.value) return
+  if (selectedProductKeyPoolRevealed.value[key.id]) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedProductKeyPoolRevealingId.value = key.id
+  selectedProductKeyPoolError.value = ''
+  try {
+    const query = queryString({ connection_id: item.connection_id, external_product_id: item.external_product_id })
+    const result = await apiRequest(`/marketplaces/catalog/key-pool/keys/${key.id}/reveal?${query}`, { method: 'POST' })
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    selectedProductKeyPoolRevealed.value = { ...selectedProductKeyPoolRevealed.value, [key.id]: result.code }
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedProductKeyPoolError.value = requestError.message || 'Не удалось показать ключ'
+    }
+  } finally {
+    selectedProductKeyPoolRevealingId.value = 0
   }
 }
 
@@ -578,6 +608,9 @@ async function openOrderFulfillment(item) {
   selectedOrderItem.value = item
   selectedOrderFulfillment.value = null
   selectedOrderFulfillmentError.value = ''
+  selectedOrderRevealedKeys.value = []
+  selectedOrderRevealLoading.value = false
+  selectedOrderRevealError.value = ''
   await loadOrderFulfillment()
   startOrderFulfillmentMonitor()
 }
@@ -589,6 +622,35 @@ function closeOrderFulfillment() {
   selectedOrderFulfillment.value = null
   selectedOrderFulfillmentLoading.value = false
   selectedOrderFulfillmentError.value = ''
+  selectedOrderRevealedKeys.value = []
+  selectedOrderRevealLoading.value = false
+  selectedOrderRevealError.value = ''
+}
+
+async function revealOrderFulfillmentKeys() {
+  const item = selectedOrderItem.value
+  if (!item || selectedOrderRevealLoading.value) return
+  const identity = `${item.connection_id}:${item.external_order_id}:${item.external_item_id}`
+  selectedOrderRevealLoading.value = true
+  selectedOrderRevealError.value = ''
+  try {
+    const result = await apiRequest('/marketplaces/orders/fulfillment/reveal', {
+      method: 'POST',
+      body: JSON.stringify({
+        connection_id: item.connection_id,
+        external_order_id: item.external_order_id,
+        external_item_id: item.external_item_id,
+      }),
+    })
+    if (!selectedOrderItem.value || `${selectedOrderItem.value.connection_id}:${selectedOrderItem.value.external_order_id}:${selectedOrderItem.value.external_item_id}` !== identity) return
+    selectedOrderRevealedKeys.value = Array.isArray(result.items) ? result.items : []
+  } catch (requestError) {
+    if (selectedOrderItem.value && `${selectedOrderItem.value.connection_id}:${selectedOrderItem.value.external_order_id}:${selectedOrderItem.value.external_item_id}` === identity) {
+      selectedOrderRevealError.value = requestError.message || 'Не удалось показать выданные ключи'
+    }
+  } finally {
+    selectedOrderRevealLoading.value = false
+  }
 }
 
 async function loadOrderFulfillment({ silent = false } = {}) {
@@ -1428,7 +1490,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="snapshot-grid">
             <article v-for="item in orders" :key="`${item.connection_id}-${item.external_order_id}-${item.external_item_id}`" class="snapshot-card order-card">
-              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="isDigitalYandexOrder(item) && item.status === 'processing' && !isConnectionDisabled(item.connection_id)" class="order-card__fulfillment" type="button" title="Подготовить локальную выдачу" aria-label="Подготовить локальную выдачу" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
+              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="isDigitalYandexOrder(item)" class="order-card__fulfillment" type="button" :title="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" :aria-label="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
               <div class="order-card__body"><strong>{{ item.title || 'Товар без названия' }}</strong></div>
               <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.updated_at || item.created_at || item.synced_at">{{ formatDate(item.updated_at || item.created_at || item.synced_at) }}</time></div>
             </article>
@@ -1493,11 +1555,15 @@ onBeforeUnmount(() => {
       :key-pool-error="selectedProductKeyPoolError"
       :key-pool-notice="selectedProductKeyPoolNotice"
       :key-pool-can-manage="user?.role_code === 'owner' || user?.role_code === 'operator'"
+      :key-pool-revealing-id="selectedProductKeyPoolRevealingId"
+      :key-pool-revealed="selectedProductKeyPoolRevealed"
       @refresh-stock="refreshSelectedProductStock"
       @publish-stock="publishSelectedProductStock"
       @refresh-orders="refreshSelectedProductOrders"
       @load-key-pool="loadSelectedProductKeyPool"
       @add-keys="addSelectedProductKeys"
+      @reveal-key="revealSelectedProductKey"
+      @open-order-fulfillment="openOrderFulfillment"
       @save-settings="saveSelectedProductSettings"
       @quote-supplier="quoteSelectedSupplier"
       @close="closeProductCard"
@@ -1510,6 +1576,9 @@ onBeforeUnmount(() => {
       :loading="selectedOrderFulfillmentLoading"
       :action-loading="selectedOrderFulfillmentActionLoading"
       :error="selectedOrderFulfillmentError"
+      :revealed-keys="selectedOrderRevealedKeys"
+      :reveal-loading="selectedOrderRevealLoading"
+      :reveal-error="selectedOrderRevealError"
       @prepare="updateOrderFulfillment('prepare')"
       @prepare-manual="(codes) => updateOrderFulfillment('prepare-manual', { codes })"
       @prepare-support="updateOrderFulfillment('prepare-support')"
@@ -1517,6 +1586,7 @@ onBeforeUnmount(() => {
       @send="updateOrderFulfillment('send')"
       @cancel-send="updateOrderFulfillment('cancel-send')"
       @resolve-unknown="(resolution) => updateOrderFulfillment('resolve-unknown', { resolution })"
+      @reveal="revealOrderFulfillmentKeys"
       @close="closeOrderFulfillment"
     />
 
