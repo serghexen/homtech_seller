@@ -28,6 +28,9 @@ PostgreSQL намеренно не публикуется в интернет: �
 
 Для локального запуска API и Vue с PostgreSQL на VM используйте [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md). База на VM открывается только в SSH-туннеле.
 
+Закрытое соединение production Seller с Supplier Hub и безопасный откат описаны
+в [docs/SUPPLIER_HUB_CONNECTION.md](docs/SUPPLIER_HUB_CONNECTION.md).
+
 ## Версия
 
 Текущая версия Seller задаётся в `web/package.json`, отображается в правом нижнем углу интерфейса и обновляется при каждом релизе. Версию FastAPI в `api/app.py` меняем одновременно; автоматический тест проверяет, что значения совпадают.
