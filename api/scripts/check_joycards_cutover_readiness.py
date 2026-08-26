@@ -10,9 +10,13 @@ import argparse
 import json
 import os
 from datetime import timedelta
+from pathlib import Path
+import sys
 from typing import Any
 
 import psycopg
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from domains.supplier_hub_client import SupplierHubClient, load_supplier_hub_settings
 

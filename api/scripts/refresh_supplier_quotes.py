@@ -9,10 +9,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import sys
 import time
 from decimal import Decimal, ROUND_UP
 
 import psycopg
+
+# Позволяет одинаково запускать скрипт как модуль и как ``python scripts/...``
+# внутри production-контейнера с WORKDIR=/app.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from domains.supplier_hub_client import SupplierHubClient, load_supplier_hub_settings
 
@@ -60,7 +66,7 @@ def main() -> int:
                 SELECT id, external_product_id, service_id, nominal_id, params,
                        quoted_amount, max_amount
                 FROM seller.product_supplier_mappings
-                WHERE connection_id=%s
+                WHERE connection_id=%s AND enabled=true
                 ORDER BY external_product_id, priority, id
                 """,
                 (connection_id,),
@@ -89,22 +95,21 @@ def main() -> int:
         if index + 1 < len(mappings) and args.delay_ms > 0:
             time.sleep(min(args.delay_ms, 5000) / 1000)
 
-    if args.apply and errors:
-        raise RuntimeError(f"Quote refresh has {len(errors)} errors; no changes were saved")
     if args.apply:
-        with psycopg.connect(database_url) as connection:
-            with connection.transaction():
-                with connection.cursor() as cursor:
-                    cursor.execute("SET LOCAL lock_timeout='3s'")
-                    cursor.execute("SET LOCAL statement_timeout='30s'")
-                    cursor.executemany(
-                        """
-                        UPDATE seller.product_supplier_mappings
-                        SET quoted_amount=%s, quoted_at=now(), max_amount=%s, updated_at=now()
-                        WHERE id=%s
-                        """,
-                        [(amount, limit, mapping_id) for mapping_id, _, amount, limit in refreshed],
-                    )
+        if not errors:
+            with psycopg.connect(database_url) as connection:
+                with connection.transaction():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET LOCAL lock_timeout='3s'")
+                        cursor.execute("SET LOCAL statement_timeout='30s'")
+                        cursor.executemany(
+                            """
+                            UPDATE seller.product_supplier_mappings
+                            SET quoted_amount=%s, quoted_at=now(), max_amount=%s, updated_at=now()
+                            WHERE id=%s
+                            """,
+                            [(amount, limit, mapping_id) for mapping_id, _, amount, limit in refreshed],
+                        )
 
     print(json.dumps({
         "mode": "apply" if args.apply else "dry-run",
@@ -119,7 +124,7 @@ def main() -> int:
             for _, external_id, amount, limit in refreshed[:10]
         ],
     }, ensure_ascii=False, indent=2))
-    return 0
+    return 2 if errors else 0
 
 
 if __name__ == "__main__":
