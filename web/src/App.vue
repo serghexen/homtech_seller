@@ -59,6 +59,9 @@ const selectedYandexStore = ref(null)
 const selectedCatalogItem = ref(null)
 const selectedStockLoading = ref(false)
 const selectedStockError = ref('')
+const selectedStockPublication = ref(null)
+const selectedStockPublicationLoading = ref(false)
+const selectedStockPublicationError = ref('')
 const selectedSettingsSaving = ref(false)
 const selectedSettingsError = ref('')
 const selectedSettingsNotice = ref('')
@@ -94,6 +97,8 @@ let syncMonitorSequence = 0
 let supplierQuoteSequence = 0
 let fulfillmentMonitorTimer = null
 let fulfillmentMonitorRequestActive = false
+let stockPublicationMonitorTimer = null
+let stockPublicationMonitorRequestActive = false
 
 const isYandex = computed(() => connectionForm.provider_code === 'yandex_market')
 const activeConnections = computed(() => connections.value.filter((connection) => connection.status === 'active'))
@@ -149,6 +154,8 @@ async function openProductCard(item) {
   // Сразу показывает карточку, затем параллельно читает её локальные заказы и актуальный остаток Яндекс Маркета.
   selectedCatalogItem.value = item
   selectedStockError.value = ''
+  selectedStockPublication.value = null
+  selectedStockPublicationError.value = ''
   selectedSettingsError.value = ''
   selectedSettingsNotice.value = ''
   selectedSupplierQuote.value = null
@@ -174,10 +181,14 @@ async function openProductCard(item) {
 }
 
 function closeProductCard() {
+  stopStockPublicationMonitor()
   supplierQuoteSequence += 1
   selectedCatalogItem.value = null
   selectedStockLoading.value = false
   selectedStockError.value = ''
+  selectedStockPublication.value = null
+  selectedStockPublicationLoading.value = false
+  selectedStockPublicationError.value = ''
   selectedSettingsSaving.value = false
   selectedSettingsError.value = ''
   selectedSettingsNotice.value = ''
@@ -400,6 +411,78 @@ async function refreshSelectedProductStock() {
   } finally {
     if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.offer_id}` === identity) {
       selectedStockLoading.value = false
+    }
+  }
+}
+
+function stopStockPublicationMonitor() {
+  if (stockPublicationMonitorTimer) window.clearTimeout(stockPublicationMonitorTimer)
+  stockPublicationMonitorTimer = null
+  stockPublicationMonitorRequestActive = false
+}
+
+function scheduleStockPublicationMonitor(jobId, identity) {
+  if (stockPublicationMonitorTimer) window.clearTimeout(stockPublicationMonitorTimer)
+  stockPublicationMonitorTimer = window.setTimeout(() => monitorStockPublication(jobId, identity), 1200)
+}
+
+async function monitorStockPublication(jobId, identity) {
+  if (stockPublicationMonitorRequestActive) return
+  const item = selectedCatalogItem.value
+  if (!item || `${item.connection_id}:${item.external_product_id}` !== identity) return
+  stockPublicationMonitorRequestActive = true
+  try {
+    const result = await apiRequest(`/marketplaces/catalog/stock/publications/${jobId}`)
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    selectedStockPublication.value = result
+    selectedStockPublicationError.value = ''
+    if (['queued', 'preparing', 'sending'].includes(result.state)) {
+      scheduleStockPublicationMonitor(jobId, identity)
+      return
+    }
+    selectedStockPublicationLoading.value = false
+    if (result.state === 'failed') {
+      selectedStockPublicationError.value = result.last_error || 'Не удалось опубликовать остаток'
+      return
+    }
+    selectedStockPublicationError.value = ''
+    selectedCatalogItem.value.published_stock = result.target_stock
+    const listItem = catalogItems.value.find((candidate) => `${candidate.connection_id}:${candidate.external_product_id}` === identity)
+    if (listItem) listItem.published_stock = result.target_stock
+    await refreshSelectedProductStock()
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedStockPublicationError.value = requestError.message || 'Не удалось проверить публикацию остатка'
+      scheduleStockPublicationMonitor(jobId, identity)
+    }
+  } finally {
+    stockPublicationMonitorRequestActive = false
+  }
+}
+
+async function publishSelectedProductStock(payload) {
+  const item = selectedCatalogItem.value
+  if (!item || selectedStockPublicationLoading.value) return
+  const identity = `${item.connection_id}:${item.external_product_id}`
+  selectedStockPublicationLoading.value = true
+  selectedStockPublicationError.value = ''
+  try {
+    const result = await apiRequest('/marketplaces/catalog/stock/publications', {
+      method: 'POST',
+      body: JSON.stringify({
+        connection_id: item.connection_id,
+        external_product_id: item.external_product_id,
+        target_stock: payload.target_stock,
+      }),
+    })
+    if (!selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
+    selectedStockPublication.value = result
+    if (['queued', 'preparing', 'sending'].includes(result.state)) scheduleStockPublicationMonitor(result.job_id, identity)
+    else selectedStockPublicationLoading.value = false
+  } catch (requestError) {
+    if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
+      selectedStockPublicationLoading.value = false
+      selectedStockPublicationError.value = requestError.message || 'Не удалось поставить публикацию остатка в очередь'
     }
   }
 }
@@ -1089,7 +1172,10 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => stopOrderFulfillmentMonitor())
+onBeforeUnmount(() => {
+  stopOrderFulfillmentMonitor()
+  stopStockPublicationMonitor()
+})
 </script>
 
 <template>
@@ -1382,6 +1468,10 @@ onBeforeUnmount(() => stopOrderFulfillmentMonitor())
       :stock-loading="selectedStockLoading"
       :stock-error="selectedStockError"
       :stock-refresh-enabled="!selectedCatalogItem.archived && !isConnectionDisabled(selectedCatalogItem.connection_id)"
+      :stock-publication="selectedStockPublication"
+      :stock-publication-loading="selectedStockPublicationLoading"
+      :stock-publication-error="selectedStockPublicationError"
+      :stock-publication-enabled="canManageCatalog && !selectedCatalogItem.archived && !isConnectionDisabled(selectedCatalogItem.connection_id)"
       :settings-saving="selectedSettingsSaving"
       :settings-error="selectedSettingsError"
       :settings-notice="selectedSettingsNotice"
@@ -1404,6 +1494,7 @@ onBeforeUnmount(() => stopOrderFulfillmentMonitor())
       :key-pool-notice="selectedProductKeyPoolNotice"
       :key-pool-can-manage="user?.role_code === 'owner' || user?.role_code === 'operator'"
       @refresh-stock="refreshSelectedProductStock"
+      @publish-stock="publishSelectedProductStock"
       @refresh-orders="refreshSelectedProductOrders"
       @load-key-pool="loadSelectedProductKeyPool"
       @add-keys="addSelectedProductKeys"

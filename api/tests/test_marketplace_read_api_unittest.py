@@ -14,6 +14,7 @@ from domains.marketplace_read_api import (
     CATALOG_SEARCH_EXPRESSIONS,
     ORDER_SEARCH_EXPRESSIONS,
     MarketplaceCatalogItemOut,
+    MarketplaceCatalogStockPublishIn,
     MarketplaceCatalogSettingsIn,
     catalog_card_details,
     catalog_payload_with_stock,
@@ -149,6 +150,34 @@ class MarketplaceReadApiTests(unittest.TestCase):
         )
         route = next(route for route in app.routes if route.path == "/marketplaces/catalog/stock/refresh")
         self.assertEqual(route.methods, {"POST"})
+
+    def test_mounts_durable_manual_stock_publication(self) -> None:
+        app = FastAPI()
+        mount_marketplace_read_routes(
+            app,
+            database_url=lambda: "",
+            psycopg=None,
+            current_user=lambda: None,
+            user_with_workspace=lambda *_args: None,
+        )
+        publish = next(route for route in app.routes if route.path == "/marketplaces/catalog/stock/publications")
+        status = next(route for route in app.routes if route.path == "/marketplaces/catalog/stock/publications/{job_id}")
+        self.assertEqual(publish.methods, {"POST"})
+        self.assertEqual(status.methods, {"GET"})
+
+    def test_manual_stock_publication_validates_explicit_target(self) -> None:
+        payload = MarketplaceCatalogStockPublishIn(
+            connection_id=1,
+            external_product_id="MRKT-1",
+            target_stock=5,
+        )
+        self.assertEqual(payload.target_stock, 5)
+        with self.assertRaises(ValidationError):
+            MarketplaceCatalogStockPublishIn(
+                connection_id=1,
+                external_product_id="MRKT-1",
+                target_stock=-1,
+            )
 
     def test_mounts_explicit_catalog_archive_action(self) -> None:
         app = FastAPI()

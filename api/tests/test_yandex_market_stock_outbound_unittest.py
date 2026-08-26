@@ -63,6 +63,13 @@ class YandexStockOutboundTests(unittest.TestCase):
         self.assertIn("{\"submitted\", \"delivered\"}", source)
         self.assertIn("FOR UPDATE OF job SKIP LOCKED", source)
 
+    def test_processor_accepts_manual_jobs_without_fake_fulfillment(self) -> None:
+        source = inspect.getsource(YandexStockOutboundProcessor._claim_and_prepare)
+        self.assertIn("LEFT JOIN seller.order_fulfillments", source)
+        self.assertIn("COALESCE(job.connection_id, fulfillment.connection_id)", source)
+        self.assertIn('job_kind == "manual"', source)
+        self.assertIn("job.requested_stock", source)
+
     @patch.dict("os.environ", {"YANDEX_MARKET_STOCK_REPUBLISH_DELAY_SECONDS": "3"})
     def test_republish_delay_matches_crm_safety_window(self) -> None:
         self.assertEqual(stock_republish_delay_seconds(), 3)

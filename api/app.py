@@ -20,7 +20,7 @@ from domains.supplier_hub_api import mount_supplier_hub_routes
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.45")
+app = FastAPI(title="HomTech Seller API", version="0.0.46")
 
 
 def cors_origins() -> list[str]:

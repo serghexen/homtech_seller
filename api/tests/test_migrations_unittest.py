@@ -145,6 +145,17 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("SELECT DISTINCT ON (connection_id, offer_id)", joined)
         self.assertIn("status IN ('submitted','delivered')", joined)
 
+    def test_manual_stock_publication_reuses_durable_outbox(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260826_06_manual_stock_publication.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("ALTER COLUMN fulfillment_id DROP NOT NULL", joined)
+        self.assertIn("job_kind text NOT NULL DEFAULT 'fulfillment'", joined)
+        self.assertIn("job_kind IN ('fulfillment','manual')", joined)
+        self.assertIn("requested_stock BETWEEN 0 AND 1000000", joined)
+        self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS uq_yandex_stock_manual_active", joined)
+
     def test_legacy_buyer_text_migration_repairs_both_setting_sources(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260826_03_normalize_buyer_text.sql"

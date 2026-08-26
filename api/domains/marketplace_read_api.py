@@ -34,6 +34,14 @@ ORDER_SEARCH_EXPRESSIONS = (
 SUPPLIER_PRICE_GUARD_MULTIPLIER = Decimal("1.05")
 
 
+def yandex_stock_publication_enabled() -> bool:
+    """Проверяет тот же глобальный kill switch, не связывая HTTP API с модулем worker."""
+
+    return str(os.getenv("SELLER_YANDEX_STOCK_OUTBOUND_ENABLED", "false")).strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
 def supplier_price_guard(amount: Decimal) -> Decimal:
     """Добавляет небольшой внутренний запас к котировке, не показывая его оператору."""
     return (amount * SUPPLIER_PRICE_GUARD_MULTIPLIER).quantize(Decimal("0.01"), rounding=ROUND_UP)
@@ -104,6 +112,26 @@ class MarketplaceCatalogStockOut(BaseModel):
     available_stock: int
     checked_at: datetime
     provider_updated_at: str = ""
+
+
+class MarketplaceCatalogStockPublishIn(BaseModel):
+    connection_id: int = Field(gt=0)
+    external_product_id: str = Field(min_length=1, max_length=256)
+    target_stock: int = Field(ge=0, le=1_000_000)
+
+
+class MarketplaceCatalogStockPublicationOut(BaseModel):
+    job_id: int
+    connection_id: int
+    external_product_id: str
+    requested_stock: int
+    target_stock: int | None = None
+    state: Literal["queued", "preparing", "sending", "succeeded", "failed"]
+    last_error: str = ""
+    created_at: datetime
+    updated_at: datetime
+    succeeded_at: datetime | None = None
+    failed_at: datetime | None = None
 
 
 class MarketplaceCatalogSettingsIn(BaseModel):
@@ -402,6 +430,14 @@ def mount_marketplace_read_routes(
         if not seller_user:
             raise HTTPException(status_code=401, detail="Рабочая область недоступна")
         return seller_user
+
+    def stock_publication_from_row(row) -> MarketplaceCatalogStockPublicationOut:
+        return MarketplaceCatalogStockPublicationOut(
+            job_id=int(row[0]), connection_id=int(row[1]), external_product_id=str(row[2]),
+            requested_stock=int(row[3]), target_stock=int(row[4]) if row[4] is not None else None,
+            state=str(row[5]), last_error=str(row[6] or ""), created_at=row[7], updated_at=row[8],
+            succeeded_at=row[9], failed_at=row[10],
+        )
 
     def credentials_secret() -> str:
         # Расшифровывает API-Key только на время одного read-only запроса остатка.
@@ -762,6 +798,121 @@ def mount_marketplace_read_routes(
             supplier_quoted_at=supplier_quoted_at,
             settings_saved_at=row[10],
         )
+
+    @app.post(
+        "/marketplaces/catalog/stock/publications",
+        response_model=MarketplaceCatalogStockPublicationOut,
+    )
+    def publish_catalog_stock(
+        payload: MarketplaceCatalogStockPublishIn,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceCatalogStockPublicationOut:
+        """Сохраняет намерение оператора; внешний PUT выполняет только stock worker."""
+
+        product_id = str(payload.external_product_id).strip()
+        if not yandex_stock_publication_enabled():
+            raise HTTPException(status_code=409, detail="Ручная публикация остатков выключена в Seller")
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            if seller_user.role_code not in {"owner", "operator"}:
+                raise HTTPException(status_code=403, detail="Недостаточно прав для публикации остатка")
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT marketplace_connection.provider_code, marketplace_connection.status,
+                           marketplace_connection.stock_outbound_enabled, item.is_archived,
+                           local_settings.manual_stock_limit
+                    FROM seller.catalog_items AS item
+                    JOIN seller.marketplace_connections AS marketplace_connection
+                      ON marketplace_connection.id=item.connection_id
+                    LEFT JOIN seller.product_card_settings AS local_settings
+                      ON local_settings.connection_id=item.connection_id
+                     AND local_settings.external_product_id=item.external_product_id
+                    WHERE item.connection_id=%s AND item.external_product_id=%s
+                      AND item.is_present=true AND marketplace_connection.workspace_id=%s
+                    LIMIT 1
+                    """,
+                    (payload.connection_id, product_id, seller_user.workspace_id),
+                )
+                card = cursor.fetchone()
+                if not card:
+                    raise HTTPException(status_code=404, detail="Карточка товара не найдена")
+                if str(card[0]) != "yandex_market":
+                    raise HTTPException(status_code=400, detail="Публикация остатка доступна только для Яндекс Маркета")
+                if str(card[1]) != "active" or not bool(card[2]):
+                    raise HTTPException(status_code=409, detail="Синхронизация остатков магазина выключена")
+                if bool(card[3]):
+                    raise HTTPException(status_code=409, detail="Нельзя публиковать остаток архивной карточки")
+                if card[4] is None or int(card[4]) != payload.target_stock:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Сначала сохраните заданный остаток в Seller",
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO seller.yandex_stock_outbound_jobs(
+                      fulfillment_id, job_kind, connection_id, external_product_id,
+                      requested_stock, requested_by_user_id, next_attempt_at
+                    ) VALUES (NULL,'manual',%s,%s,%s,%s,now())
+                    ON CONFLICT (connection_id, external_product_id)
+                      WHERE job_kind='manual' AND state IN ('queued','preparing','sending')
+                    DO NOTHING
+                    RETURNING id, connection_id, external_product_id, requested_stock,
+                              target_stock, state, last_error, created_at, updated_at,
+                              succeeded_at, failed_at
+                    """,
+                    (payload.connection_id, product_id, payload.target_stock, seller_user.id),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    cursor.execute(
+                        """
+                        SELECT id, connection_id, external_product_id, requested_stock,
+                               target_stock, state, last_error, created_at, updated_at,
+                               succeeded_at, failed_at
+                        FROM seller.yandex_stock_outbound_jobs
+                        WHERE connection_id=%s AND external_product_id=%s
+                          AND job_kind='manual' AND state IN ('queued','preparing','sending')
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (payload.connection_id, product_id),
+                    )
+                    row = cursor.fetchone()
+                if not row:
+                    raise HTTPException(status_code=409, detail="Не удалось поставить публикацию в очередь")
+        return stock_publication_from_row(row)
+
+    @app.get(
+        "/marketplaces/catalog/stock/publications/{job_id}",
+        response_model=MarketplaceCatalogStockPublicationOut,
+    )
+    def get_catalog_stock_publication(
+        job_id: int,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceCatalogStockPublicationOut:
+        """Возвращает подтверждённое состояние ручной публикации из локальной очереди."""
+
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT job.id, job.connection_id, job.external_product_id, job.requested_stock,
+                           job.target_stock, job.state, job.last_error, job.created_at, job.updated_at,
+                           job.succeeded_at, job.failed_at
+                    FROM seller.yandex_stock_outbound_jobs AS job
+                    JOIN seller.marketplace_connections AS marketplace_connection
+                      ON marketplace_connection.id=job.connection_id
+                    WHERE job.id=%s AND job.job_kind='manual'
+                      AND marketplace_connection.workspace_id=%s
+                    LIMIT 1
+                    """,
+                    (job_id, seller_user.workspace_id),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Публикация остатка не найдена")
+        return stock_publication_from_row(row)
 
     @app.post("/marketplaces/catalog/stock/refresh", response_model=MarketplaceCatalogStockOut)
     def refresh_catalog_stock(

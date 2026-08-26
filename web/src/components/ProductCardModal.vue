@@ -14,6 +14,10 @@ const props = defineProps({
   stockLoading: { type: Boolean, default: false },
   stockError: { type: String, default: '' },
   stockRefreshEnabled: { type: Boolean, default: true },
+  stockPublication: { type: Object, default: null },
+  stockPublicationLoading: { type: Boolean, default: false },
+  stockPublicationError: { type: String, default: '' },
+  stockPublicationEnabled: { type: Boolean, default: false },
   settingsSaving: { type: Boolean, default: false },
   settingsError: { type: String, default: '' },
   settingsNotice: { type: String, default: '' },
@@ -37,13 +41,14 @@ const props = defineProps({
   keyPoolCanManage: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'quote-supplier'])
+const emit = defineEmits(['close', 'refresh-stock', 'publish-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'quote-supplier'])
 const openSection = ref('delivery')
 const openDeliveryMethod = ref('')
 const supplierSearch = ref('')
 const supplierPickerOpen = ref(false)
 const imageFailed = ref(false)
 const settingsFormError = ref('')
+const stockPublishConfirmation = ref(false)
 const settingsForm = reactive({
   manual_stock_limit: Math.max(0, Number(props.item.manual_stock_limit) || 0),
   sales_limit_enabled: props.item.sales_limit !== null && props.item.sales_limit !== '',
@@ -101,6 +106,29 @@ const savedSettings = computed(() => normalizeProductSettings({
   supplier_max_amount: props.item.supplier_max_amount || '',
 }))
 const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.value, savedSettings.value))
+const stockTarget = computed(() => Math.trunc(Number(settingsForm.manual_stock_limit)))
+const stockTargetValid = computed(() => Number.isInteger(stockTarget.value) && stockTarget.value >= 0 && stockTarget.value <= 1_000_000)
+const stockPublicationActive = computed(() => ['queued', 'preparing', 'sending'].includes(props.stockPublication?.state))
+const canPublishStock = computed(() => props.item.provider_code === 'yandex_market'
+  && props.stockPublicationEnabled && stockTargetValid.value && !settingsDirty.value
+  && !props.stockPublicationLoading && !stockPublicationActive.value)
+const stockPublicationTitle = computed(() => ({
+  queued: 'Публикация поставлена в очередь',
+  preparing: 'Готовим остаток к отправке',
+  sending: 'Отправляем остаток в Яндекс',
+  succeeded: `Опубликован остаток ${props.stockPublication?.target_stock ?? props.stockPublication?.requested_stock ?? ''}`.trim(),
+  failed: 'Не удалось опубликовать остаток',
+})[props.stockPublication?.state] || '')
+const stockPublicationDetail = computed(() => {
+  if (!props.stockPublication) return ''
+  if (props.stockPublication.state === 'failed') return props.stockPublication.last_error || 'Повторите отправку после проверки подключения'
+  if (props.stockPublication.state === 'succeeded'
+    && Number(props.stockPublication.target_stock) !== Number(props.stockPublication.requested_stock)) {
+    return `Задано ${props.stockPublication.requested_stock}, дневной лимит разрешил опубликовать ${props.stockPublication.target_stock}`
+  }
+  if (props.stockPublication.state === 'succeeded') return 'Яндекс Маркет подтвердил приём значения'
+  return `Запрошено: ${props.stockPublication.requested_stock}`
+})
 const instructionLength = computed(() => settingsForm.activation_instruction.length)
 const supportMessageLength = computed(() => settingsForm.support_message.length)
 const keyPoolDraftCodes = computed(() => parseKeyLines(keyPoolForm.codes_raw))
@@ -337,6 +365,26 @@ function saveSettings() {
   emit('save-settings', values)
 }
 
+function requestStockPublication() {
+  settingsFormError.value = ''
+  if (!stockTargetValid.value) {
+    settingsFormError.value = 'Заданный остаток должен быть целым числом от 0 до 1 000 000'
+    return
+  }
+  if (settingsDirty.value) {
+    settingsFormError.value = 'Сначала сохраните заданный остаток в Seller'
+    return
+  }
+  if (!canPublishStock.value) return
+  stockPublishConfirmation.value = true
+}
+
+function confirmStockPublication() {
+  if (!canPublishStock.value) return
+  stockPublishConfirmation.value = false
+  emit('publish-stock', { target_stock: stockTarget.value })
+}
+
 function keyStatusLabel(status) {
   return {
     free: 'Свободен',
@@ -463,11 +511,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         <p v-if="stockError" class="stock-readonly__error" role="alert">{{ stockError }}</p>
                       </section>
 
-                      <label class="stock-readonly__field stock-settings__field">
-                        <span>Заданный остаток</span>
-                        <input v-model.number="settingsForm.manual_stock_limit" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
-                        <small>Локальное целевое значение Seller</small>
-                      </label>
+                      <section class="stock-readonly__field stock-settings__field stock-settings__target">
+                        <label>
+                          <span>Заданный остаток</span>
+                          <input v-model.number="settingsForm.manual_stock_limit" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
+                          <small>{{ settingsDirty ? 'Сохраните значение перед публикацией' : 'Сохранено в Seller и готово к отправке' }}</small>
+                        </label>
+                        <button
+                          v-if="item.provider_code === 'yandex_market'"
+                          class="stock-publish__button"
+                          type="button"
+                          :disabled="!canPublishStock"
+                          :title="settingsDirty ? 'Сначала сохраните изменения в Seller' : 'Принудительно отправить заданный остаток в Яндекс Маркет'"
+                          @click="requestStockPublication"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
+                          <span>{{ stockPublicationActive ? 'Отправляем…' : `Опубликовать ${stockTargetValid ? stockTarget : ''}`.trim() }}</span>
+                        </button>
+                      </section>
 
                       <section class="stock-readonly__field stock-settings__field">
                         <span>Дневной лимит</span>
@@ -480,6 +541,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         <small>Максимальное количество продаж за день</small>
                       </section>
                     </div>
+
+                    <section v-if="stockPublishConfirmation" class="stock-publish__confirm" role="alertdialog" aria-labelledby="stock-publish-title">
+                      <span class="stock-publish__confirm-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
+                      </span>
+                      <div>
+                        <strong id="stock-publish-title">Отправить остаток {{ stockTarget }} в Яндекс Маркет?</strong>
+                        <p>Значение уйдёт через защищённую очередь. Если задан дневной лимит, Seller может опубликовать меньше.</p>
+                      </div>
+                      <div class="stock-publish__confirm-actions">
+                        <button type="button" @click="stockPublishConfirmation = false">Отмена</button>
+                        <button class="is-primary" type="button" @click="confirmStockPublication">Отправить</button>
+                      </div>
+                    </section>
+
+                    <section v-if="stockPublication || stockPublicationLoading || stockPublicationError" class="stock-publish__status" :class="`is-${stockPublication?.state || (stockPublicationError ? 'failed' : 'queued')}`" aria-live="polite">
+                      <span class="stock-publish__status-mark" aria-hidden="true">
+                        <span v-if="stockPublicationLoading || stockPublicationActive" class="product-settings-save__spinner"></span>
+                        <svg v-else-if="stockPublication?.state === 'succeeded'" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg>
+                        <svg v-else viewBox="0 0 24 24"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
+                      </span>
+                      <div>
+                        <strong>{{ stockPublicationLoading && !stockPublication ? 'Ставим публикацию в очередь' : stockPublicationTitle || 'Ошибка публикации' }}</strong>
+                        <p>{{ stockPublicationError || stockPublicationDetail }}</p>
+                      </div>
+                    </section>
 
                     <section class="stock-limit">
                       <div class="stock-limit__heading">
@@ -499,7 +586,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
                     <p class="stock-readonly__notice">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                      Сохранение настроек не меняет маркетплейс. Заданный остаток публикуется только после подтверждённой выдачи товара и при включённой синхронизации магазина.
+                      После сохранения заданный остаток можно опубликовать вручную. Автоматически он также пересчитывается после подтверждённой выдачи товара; оба сценария требуют включённой синхронизации магазина.
                     </p>
                   </div>
                   <div v-else-if="section.id === 'instruction'" class="product-instruction">
@@ -1473,12 +1560,161 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 }
 
 .stock-settings__field > input,
+.stock-settings__field > label > input,
 .stock-limit__extra input {
   min-height: 39px;
   padding: 0 11px;
   border-radius: 9px;
   font-size: 15px;
   font-weight: 800;
+}
+
+.stock-settings__target > label {
+  display: grid;
+  gap: 8px;
+}
+
+.stock-settings__target > label > span {
+  color: #96a4c2;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.stock-settings__target > label > small {
+  color: #7f8fb0;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.stock-publish__button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid rgba(79, 118, 255, .58);
+  border-radius: 9px;
+  color: #f4f7ff;
+  background: linear-gradient(135deg, #2456e8, #4b72ff);
+  box-shadow: 0 8px 20px rgba(36, 86, 232, .18);
+  font-size: 10px;
+  font-weight: 850;
+  transition: transform .16s, border-color .16s, filter .16s, opacity .16s;
+}
+
+.stock-publish__button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(128, 157, 255, .9);
+  filter: brightness(1.08);
+}
+
+.stock-publish__button:disabled {
+  cursor: not-allowed;
+  opacity: .42;
+  box-shadow: none;
+}
+
+.stock-publish__button svg,
+.stock-publish__confirm svg,
+.stock-publish__status svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.stock-publish__confirm,
+.stock-publish__status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid rgba(83, 125, 255, .42);
+  border-radius: 13px;
+  color: #dfe7fb;
+  background: linear-gradient(135deg, rgba(34, 72, 196, .18), rgba(8, 15, 34, .54));
+}
+
+.stock-publish__confirm-icon,
+.stock-publish__status-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(91, 123, 255, .4);
+  border-radius: 10px;
+  color: #8da8ff;
+  background: rgba(48, 79, 185, .14);
+}
+
+.stock-publish__confirm strong,
+.stock-publish__status strong {
+  color: #edf2ff;
+  font-size: 12px;
+}
+
+.stock-publish__confirm p,
+.stock-publish__status p {
+  margin: 3px 0 0;
+  color: #91a2c6;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.stock-publish__confirm-actions {
+  display: inline-flex;
+  gap: 7px;
+}
+
+.stock-publish__confirm-actions button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid rgba(126, 151, 217, .28);
+  border-radius: 9px;
+  color: #aebbd8;
+  background: rgba(20, 31, 58, .72);
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.stock-publish__confirm-actions .is-primary {
+  border-color: rgba(83, 125, 255, .65);
+  color: #fff;
+  background: #315fee;
+}
+
+.stock-publish__status {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.stock-publish__status.is-succeeded {
+  border-color: rgba(83, 229, 186, .4);
+  background: linear-gradient(135deg, rgba(83, 229, 186, .1), rgba(8, 15, 34, .54));
+}
+
+.stock-publish__status.is-succeeded .stock-publish__status-mark {
+  border-color: rgba(83, 229, 186, .4);
+  color: #62e8c1;
+  background: rgba(83, 229, 186, .1);
+}
+
+.stock-publish__status.is-failed {
+  border-color: rgba(255, 150, 155, .4);
+  background: rgba(255, 150, 155, .055);
+}
+
+.stock-publish__status.is-failed .stock-publish__status-mark {
+  border-color: rgba(255, 150, 155, .35);
+  color: #ffaaa8;
+  background: rgba(255, 150, 155, .08);
 }
 
 .stock-settings__field input:focus,
@@ -2883,6 +3119,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
   .stock-readonly__fields {
     grid-template-columns: 1fr;
+  }
+
+  .stock-publish__confirm {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .stock-publish__confirm-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
   }
 
   .stock-limit__metrics {

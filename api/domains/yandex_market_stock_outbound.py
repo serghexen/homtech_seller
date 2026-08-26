@@ -147,8 +147,9 @@ class YandexStockOutboundProcessor:
                     """
                     SELECT job.id
                     FROM seller.yandex_stock_outbound_jobs AS job
-                    JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
-                    JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                    LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
+                    JOIN seller.marketplace_connections AS market
+                      ON market.id=COALESCE(job.connection_id, fulfillment.connection_id)
                     WHERE job.state='queued' AND job.next_attempt_at <= now()
                       AND job.attempt_count < job.max_attempts
                       AND market.status='active' AND market.provider_code='yandex_market'
@@ -181,9 +182,12 @@ class YandexStockOutboundProcessor:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT fulfillment.connection_id, fulfillment.offer_id, fulfillment.status,
+                    SELECT COALESCE(job.connection_id, fulfillment.connection_id),
+                           COALESCE(job.external_product_id, fulfillment.offer_id),
+                           job.job_kind, fulfillment.status,
                            market.campaign_id, market.status, market.stock_outbound_enabled,
                            pgp_sym_decrypt(market.token_ciphertext, %s),
+                           job.requested_stock,
                            local_settings.connection_id IS NOT NULL,
                            COALESCE(local_settings.manual_stock_limit, imported.manual_stock_limit),
                            CASE WHEN local_settings.connection_id IS NOT NULL
@@ -202,14 +206,15 @@ class YandexStockOutboundProcessor:
                              THEN imported.imported_at
                              ELSE ((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow') END
                     FROM seller.yandex_stock_outbound_jobs AS job
-                    JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
-                    JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                    LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
+                    JOIN seller.marketplace_connections AS market
+                      ON market.id=COALESCE(job.connection_id, fulfillment.connection_id)
                     LEFT JOIN seller.product_card_settings AS local_settings
-                      ON local_settings.connection_id=fulfillment.connection_id
-                     AND local_settings.external_product_id=fulfillment.offer_id
+                      ON local_settings.connection_id=COALESCE(job.connection_id, fulfillment.connection_id)
+                     AND local_settings.external_product_id=COALESCE(job.external_product_id, fulfillment.offer_id)
                     LEFT JOIN seller.yandex_product_settings_snapshot AS imported
-                      ON imported.connection_id=fulfillment.connection_id
-                     AND imported.external_product_id=fulfillment.offer_id
+                      ON imported.connection_id=COALESCE(job.connection_id, fulfillment.connection_id)
+                     AND imported.external_product_id=COALESCE(job.external_product_id, fulfillment.offer_id)
                     WHERE job.id=%s AND job.state='preparing' AND job.lock_token=%s
                     FOR UPDATE OF job
                     """,
@@ -219,15 +224,17 @@ class YandexStockOutboundProcessor:
                 if not row:
                     return None
                 connection_id, product_id = int(row[0]), str(row[1] or "").strip()
+                job_kind = str(row[2] or "fulfillment")
+                configured_stock = row[8] if job_kind == "manual" else row[10]
                 validation_error = ""
-                if not yandex_stock_outbound_enabled() or str(row[4]) != "active" or not bool(row[5]):
+                if not yandex_stock_outbound_enabled() or str(row[5]) != "active" or not bool(row[6]):
                     validation_error = "Публикация остатков выключена"
-                elif str(row[2]) not in {"submitted", "delivered"}:
+                elif job_kind == "fulfillment" and str(row[3]) not in {"submitted", "delivered"}:
                     validation_error = "Остаток публикуется только после подтверждённой отправки"
-                elif not product_id or row[8] is None:
+                elif not product_id or configured_stock is None:
                     validation_error = "Для товара не указан заданный остаток"
                 try:
-                    campaign_id = int(str(row[3]))
+                    campaign_id = int(str(row[4]))
                 except (TypeError, ValueError):
                     campaign_id = 0
                 if campaign_id <= 0:
@@ -235,7 +242,7 @@ class YandexStockOutboundProcessor:
                 if validation_error:
                     self._finish_failure_before_send(connection, job_id, lock_token, validation_error)
                     return None
-                cutoff = row[13]
+                cutoff = row[15]
                 cursor.execute(
                     """
                     SELECT
@@ -253,8 +260,8 @@ class YandexStockOutboundProcessor:
                 )
                 seller_used, seller_reserved = (int(value or 0) for value in cursor.fetchone())
                 target_stock = calculate_effective_stock(
-                    int(row[8]), int(row[9]) if row[9] is not None else None, int(row[10] or 0),
-                    int(row[11] or 0), int(row[12] or 0), seller_used, seller_reserved,
+                    int(configured_stock), int(row[11]) if row[11] is not None else None, int(row[12] or 0),
+                    int(row[13] or 0), int(row[14] or 0), seller_used, seller_reserved,
                 )
                 cursor.execute(
                     """
@@ -268,7 +275,7 @@ class YandexStockOutboundProcessor:
             return StockOutboundPayload(
                 job_id=job_id, lock_token=lock_token, connection_id=connection_id,
                 external_product_id=product_id, campaign_id=campaign_id,
-                token=str(row[6]), target_stock=target_stock,
+                token=str(row[7]), target_stock=target_stock,
             )
 
     @staticmethod
