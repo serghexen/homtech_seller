@@ -156,6 +156,19 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn(r"E'\\n'", joined)
         self.assertNotIn(r"E'\\\\n'", joined)
 
+    def test_playstation_instruction_is_a_seller_only_local_override(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260826_04_playstation_activation_instruction.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("INSERT INTO seller.product_card_settings", joined)
+        self.assertIn("campaign_id = '149196813'", joined)
+        self.assertEqual(joined.count("('MRKT-"), 25)
+        self.assertIn("Как активировать", joined)
+        self.assertIn("Redeem Codes", joined)
+        self.assertIn("WHERE btrim(seller.product_card_settings.activation_instruction) = ''", joined)
+        self.assertNotIn("UPDATE app.", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
