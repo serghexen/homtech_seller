@@ -3,6 +3,8 @@ export const PRODUCT_INSTRUCTION_MAX = 10_000
 export const PRODUCT_SUPPORT_MESSAGE_MAX = 2_000
 
 export function normalizeProductSettings(values) {
+  const supplierServiceId = Number(values.supplier_service_id)
+  const supplierMaxAmount = Number(values.supplier_max_amount)
   return {
     manual_stock_limit: Math.trunc(Number(values.manual_stock_limit)),
     sales_limit: values.sales_limit_enabled ? Math.trunc(Number(values.sales_limit)) : null,
@@ -11,6 +13,10 @@ export function normalizeProductSettings(values) {
     support_message: String(values.support_message || '').replace(/\r\n?/g, '\n').trim(),
     support_message_delivery_enabled: Boolean(values.support_message_delivery_enabled),
     pool_issue_enabled: Boolean(values.pool_issue_enabled),
+    supplier_issue_enabled: Boolean(values.supplier_issue_enabled),
+    supplier_service_id: Number.isInteger(supplierServiceId) && supplierServiceId > 0 ? supplierServiceId : null,
+    supplier_nominal_id: String(values.supplier_nominal_id || '').trim(),
+    supplier_max_amount: Number.isFinite(supplierMaxAmount) && supplierMaxAmount > 0 ? supplierMaxAmount : null,
   }
 }
 
@@ -32,6 +38,9 @@ export function validateProductSettings(values) {
   }
   if (values.support_message_delivery_enabled && !values.support_message) {
     return 'Для выдачи через поддержку сначала заполните сообщение'
+  }
+  if (values.supplier_issue_enabled && (!values.supplier_service_id || !values.supplier_max_amount)) {
+    return 'Для автовыдачи укажите ID услуги Supplier Hub и максимальную цену'
   }
   return ''
 }

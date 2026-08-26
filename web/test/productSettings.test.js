@@ -17,6 +17,10 @@ test('normalizes local product settings without marketplace fields', () => {
     support_message: ' Обратитесь\r\nв поддержку ',
     support_message_delivery_enabled: true,
     pool_issue_enabled: true,
+    supplier_issue_enabled: true,
+    supplier_service_id: '11125',
+    supplier_nominal_id: '250',
+    supplier_max_amount: '487.76',
   })
 
   assert.deepEqual(result, {
@@ -27,7 +31,21 @@ test('normalizes local product settings without marketplace fields', () => {
     support_message: 'Обратитесь\nв поддержку',
     support_message_delivery_enabled: true,
     pool_issue_enabled: true,
+    supplier_issue_enabled: true,
+    supplier_service_id: 11125,
+    supplier_nominal_id: '250',
+    supplier_max_amount: 487.76,
   })
+})
+
+test('requires complete Supplier Hub mapping before enabling supplier delivery', () => {
+  const invalid = normalizeProductSettings({
+    manual_stock_limit: 0,
+    sales_limit_enabled: false,
+    sales_limit_daily_extra: 0,
+    supplier_issue_enabled: true,
+  })
+  assert.match(validateProductSettings(invalid), /Supplier Hub/)
 })
 
 test('validates numeric limits before saving', () => {

@@ -121,6 +121,18 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("support_message_delivery_enabled", joined)
         self.assertIn("support_message_overridden", joined)
 
+    def test_supplier_fulfillment_migration_is_off_by_default_and_durable(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260826_01_supplier_fulfillment.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("supplier_fulfillment_enabled boolean NOT NULL DEFAULT false", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.product_fulfillment_policies", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.product_supplier_mappings", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.supplier_purchase_attempts", joined)
+        self.assertIn("idempotency_key text NOT NULL UNIQUE", joined)
+        self.assertIn("'requires_attention'", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

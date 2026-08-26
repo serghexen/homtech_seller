@@ -18,6 +18,11 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 class SupplierHubError(RuntimeError):
     """Ошибка конфигурации или связи без раскрытия клиентского секрета."""
 
+    def __init__(self, message: str, *, status_code: int | None = None, blocks_fallback: bool = True) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.blocks_fallback = blocks_fallback
+
 
 @dataclass(frozen=True)
 class SupplierHubSettings:
@@ -72,16 +77,31 @@ class SupplierHubClient:
         _validate_base_url(settings.base_url)
         self.settings = settings
 
-    def _get(self, path: str, *, authenticated: bool) -> dict[str, Any]:
+    def _request(
+        self,
+        path: str,
+        *,
+        authenticated: bool,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        request_id: str = "",
+    ) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
         if authenticated:
             if not self.settings.configured:
                 raise SupplierHubError("Supplier Hub client credentials are not configured")
             headers["X-Hub-Client"] = self.settings.client_id
             headers["X-Hub-Key"] = self.settings.client_key
+        if request_id:
+            headers["X-Request-ID"] = request_id
+        body = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         request = urllib.request.Request(
             f"{self.settings.base_url}{path}",
-            method="GET",
+            data=body,
+            method=method,
             headers=headers,
         )
         try:
@@ -89,8 +109,17 @@ class SupplierHubClient:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             if exc.code in {401, 403}:
-                raise SupplierHubError("Supplier Hub rejected client credentials") from exc
-            raise SupplierHubError(f"Supplier Hub returned HTTP {exc.code}") from exc
+                raise SupplierHubError(
+                    "Supplier Hub rejected client credentials", status_code=int(exc.code),
+                ) from exc
+            # 422 возникает до постановки покупки в очередь и допускает безопасный
+            # fallback. Конфликт идемпотентности и любые серверные ошибки требуют
+            # вмешательства или повторной сверки, а не следующего источника.
+            raise SupplierHubError(
+                f"Supplier Hub returned HTTP {exc.code}",
+                status_code=int(exc.code),
+                blocks_fallback=int(exc.code) != 422,
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise SupplierHubError("Supplier Hub is unavailable") from exc
         if len(raw) > MAX_RESPONSE_BYTES:
@@ -102,6 +131,9 @@ class SupplierHubClient:
         if not isinstance(payload, dict):
             raise SupplierHubError("Supplier Hub returned an unexpected response")
         return payload
+
+    def _get(self, path: str, *, authenticated: bool) -> dict[str, Any]:
+        return self._request(path, authenticated=authenticated)
 
     def live(self) -> dict[str, Any]:
         return self._get("/live", authenticated=False)
@@ -118,6 +150,62 @@ class SupplierHubClient:
 
     def balance(self) -> dict[str, Any]:
         return self._get("/v1/providers/interhub/balance", authenticated=True)
+
+    def observability_summary(self) -> dict[str, Any]:
+        """Возвращает агрегаты покупок текущего consumer без раскрытия результатов."""
+        return self._get("/v1/observability/summary", authenticated=True)
+
+    def quote(self, *, service_id: int, nominal_id: str = "", params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request_params = dict(params or {})
+        if str(nominal_id or "").strip():
+            request_params["nominal"] = str(nominal_id).strip()
+        return self._request(
+            "/v1/providers/interhub/quote",
+            authenticated=True,
+            method="POST",
+            payload={"service_id": int(service_id), "account": "", "params": request_params},
+        )
+
+    def create_purchase(
+        self,
+        *,
+        idempotency_key: str,
+        service_id: int,
+        max_amount: str,
+        nominal_id: str = "",
+        params: dict[str, Any] | None = None,
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        if not self.settings.fulfillment_enabled:
+            raise SupplierHubError("Supplier Hub fulfillment is disabled")
+        request_params = dict(params or {})
+        if str(nominal_id or "").strip():
+            request_params["nominal"] = str(nominal_id).strip()
+        return self._request(
+            "/v1/purchases",
+            authenticated=True,
+            method="POST",
+            request_id=request_id,
+            payload={
+                "idempotency_key": str(idempotency_key),
+                "provider_code": "interhub",
+                "service_id": int(service_id),
+                "max_amount": str(max_amount),
+                "account": "",
+                "params": request_params,
+                "quantity": 1,
+            },
+        )
+
+    def purchase(self, purchase_id: str) -> dict[str, Any]:
+        return self._get(f"/v1/purchases/{purchase_id}", authenticated=True)
+
+    def purchase_result(self, purchase_id: str) -> str:
+        payload = self._get(f"/v1/purchases/{purchase_id}/result", authenticated=True)
+        value = str(payload.get("value") or "").strip()
+        if not value:
+            raise SupplierHubError("Supplier Hub returned an empty purchase result")
+        return value
 
 
 def supplier_hub_status() -> dict[str, Any]:

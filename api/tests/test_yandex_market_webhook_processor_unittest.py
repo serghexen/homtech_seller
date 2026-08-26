@@ -36,13 +36,12 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
         self.assertEqual(processor.process_pending_events(), 0)
         fake_psycopg.connect.assert_not_called()
 
-    @patch("domains.yandex_market_webhook_processor.automatic_pool_reservation_enabled", return_value=False)
     @patch("domains.yandex_market_webhook_processor.observe_order_fulfillments", return_value=[81])
     @patch("domains.yandex_market_webhook_processor.save_order_snapshots", return_value=1)
     @patch("domains.yandex_market_webhook_processor.fetch_yandex_market_order")
     @patch("domains.yandex_market_webhook_processor.load_active_connection")
     def test_processes_one_order_without_delivery_calls(
-        self, load_connection, fetch_order, save_snapshots, observe_fulfillments, reservation_enabled,
+        self, load_connection, fetch_order, save_snapshots, observe_fulfillments,
     ) -> None:
         # Processor читает заказ и создаёт локальную запись, но выключенный резерв не затрагивает ключи.
         claim_connection, claim_cursor = connection_with_cursor(
@@ -95,18 +94,15 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
             connection_id=7,
             external_order_id="123",
         )
-        reservation_enabled.assert_called_once_with()
         finish_sql = save_cursor.execute.call_args.args[0]
         self.assertIn("processing_state='processed'", finish_sql)
 
-    @patch("domains.yandex_market_webhook_processor.reserve_pool_keys")
-    @patch("domains.yandex_market_webhook_processor.automatic_pool_reservation_enabled", return_value=True)
     @patch("domains.yandex_market_webhook_processor.observe_order_fulfillments", return_value=[81, 82])
     @patch("domains.yandex_market_webhook_processor.save_order_snapshots", return_value=2)
     @patch("domains.yandex_market_webhook_processor.fetch_yandex_market_order")
     @patch("domains.yandex_market_webhook_processor.load_active_connection")
     def test_global_reservation_switch_calls_safe_reservation_for_each_item(
-        self, load_connection, fetch_order, _save_snapshots, _observe, _enabled, reserve_keys,
+        self, load_connection, fetch_order, _save_snapshots, _observe,
     ) -> None:
         claim_connection, _claim_cursor = connection_with_cursor(
             row=(41, 7, "149196813", "123", "ORDER_CREATED", 1),
@@ -125,13 +121,7 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
 
         processor.process_pending_events(batch_size=1)
 
-        self.assertEqual(
-            reserve_keys.call_args_list,
-            [
-                call(save_connection, fulfillment_id=81),
-                call(save_connection, fulfillment_id=82),
-            ],
-        )
+        _observe.assert_called_once_with(save_connection, connection_id=7, external_order_id="123")
 
     @patch("domains.yandex_market_webhook_processor.fetch_yandex_market_order")
     @patch("domains.yandex_market_webhook_processor.load_active_connection")

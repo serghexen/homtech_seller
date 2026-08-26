@@ -45,6 +45,10 @@ const settingsForm = reactive({
   support_message: normalizeEscapedLineBreaks(props.item.support_message).trim(),
   support_message_delivery_enabled: Boolean(props.item.support_message_delivery_enabled),
   pool_issue_enabled: Boolean(props.item.pool_issue_enabled),
+  supplier_issue_enabled: Boolean(props.item.supplier_issue_enabled),
+  supplier_service_id: props.item.supplier_service_id || '',
+  supplier_nominal_id: props.item.supplier_nominal_id || '',
+  supplier_max_amount: props.item.supplier_max_amount || '',
 })
 const keyPoolForm = reactive({ codes_raw: '', expires_at: '' })
 const keyPoolFormError = ref('')
@@ -67,6 +71,7 @@ const activationInstructionDescription = computed(() => {
   return hasActivationInstruction.value ? 'Текст для покупателя заполнен' : 'Текст для покупателя не указан'
 })
 const deliveryPriority = computed(() => [
+  ...(settingsForm.supplier_issue_enabled ? ['Поставщик'] : []),
   ...(settingsForm.pool_issue_enabled ? ['Список ключей'] : []),
   ...(settingsForm.support_message_delivery_enabled ? ['Поддержка'] : []),
   'Ручной ввод',
@@ -82,6 +87,10 @@ const savedSettings = computed(() => normalizeProductSettings({
   support_message: normalizeEscapedLineBreaks(props.item.support_message),
   support_message_delivery_enabled: Boolean(props.item.support_message_delivery_enabled),
   pool_issue_enabled: Boolean(props.item.pool_issue_enabled),
+  supplier_issue_enabled: Boolean(props.item.supplier_issue_enabled),
+  supplier_service_id: props.item.supplier_service_id || '',
+  supplier_nominal_id: props.item.supplier_nominal_id || '',
+  supplier_max_amount: props.item.supplier_max_amount || '',
 }))
 const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.value, savedSettings.value))
 const instructionLength = computed(() => settingsForm.activation_instruction.length)
@@ -171,6 +180,10 @@ function resetSettingsForm() {
   settingsForm.support_message = savedSettings.value.support_message
   settingsForm.support_message_delivery_enabled = savedSettings.value.support_message_delivery_enabled
   settingsForm.pool_issue_enabled = savedSettings.value.pool_issue_enabled
+  settingsForm.supplier_issue_enabled = savedSettings.value.supplier_issue_enabled
+  settingsForm.supplier_service_id = savedSettings.value.supplier_service_id || ''
+  settingsForm.supplier_nominal_id = savedSettings.value.supplier_nominal_id
+  settingsForm.supplier_max_amount = savedSettings.value.supplier_max_amount || ''
   settingsFormError.value = ''
 }
 
@@ -361,18 +374,33 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                     </header>
 
                     <div class="product-delivery__methods">
-                      <article class="product-delivery-method is-future">
-                        <div class="product-delivery-method__head">
+                      <article class="product-delivery-method" :class="{ 'is-enabled': settingsForm.supplier_issue_enabled, 'is-expanded': openDeliveryMethod === 'supplier' }">
+                        <div class="product-delivery-method__head product-delivery-method__head--expandable">
                           <span class="product-delivery-method__number">01</span>
-                          <span class="product-delivery-method__icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /></svg>
-                          </span>
-                          <div class="product-delivery-method__copy">
-                            <strong>Автовыдача от поставщика</strong>
-                            <small>Получить ключ через Supplier Hub</small>
+                          <button class="product-delivery-method__open" type="button" :aria-expanded="openDeliveryMethod === 'supplier'" @click="toggleDeliveryMethod('supplier')">
+                            <span class="product-delivery-method__icon" aria-hidden="true">
+                              <svg viewBox="0 0 24 24"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /></svg>
+                            </span>
+                            <span class="product-delivery-method__copy">
+                              <strong>Автовыдача от поставщика</strong>
+                              <small>{{ settingsForm.supplier_service_id ? `Interhub · услуга #${settingsForm.supplier_service_id}` : 'Нужно указать услугу Supplier Hub' }}</small>
+                            </span>
+                            <svg class="product-delivery-method__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+                          </button>
+                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.supplier_issue_enabled, 'is-disabled': !settingsForm.supplier_service_id || !settingsForm.supplier_max_amount }" title="Использовать Supplier Hub первым способом">
+                            <input v-model="settingsForm.supplier_issue_enabled" type="checkbox" :disabled="!settingsForm.supplier_service_id || !settingsForm.supplier_max_amount" />
+                            <span aria-hidden="true"></span>
+                            <span class="sr-only">Использовать автовыдачу от поставщика</span>
+                          </label>
+                        </div>
+                        <div v-if="openDeliveryMethod === 'supplier'" class="product-delivery-method__panel product-delivery-supplier">
+                          <div class="product-delivery-supplier__fields">
+                            <label><span>ID услуги Interhub</span><input v-model="settingsForm.supplier_service_id" type="number" min="1" step="1" placeholder="11125" /></label>
+                            <label><span>ID номинала</span><input v-model="settingsForm.supplier_nominal_id" type="text" maxlength="128" placeholder="Если требуется поставщиком" /></label>
+                            <label><span>Максимальная цена, ₽</span><input v-model="settingsForm.supplier_max_amount" type="number" min="0.01" step="0.01" placeholder="Цена с допустимым запасом" /></label>
                           </div>
-                          <span class="product-delivery-method__status">После Supplier Hub</span>
-                          <span class="product-delivery-switch is-disabled" aria-label="Автовыдача от поставщика пока недоступна"><span></span></span>
+                          <p v-if="item.supplier_quoted_amount">Последняя сохранённая цена: <strong>{{ item.supplier_quoted_amount }} ₽</strong>. Лимит защищает от покупки по неожиданно выросшей цене.</p>
+                          <p v-else>Перед переключением цена будет безопасно перепроверена через Supplier Hub без покупки.</p>
                         </div>
                       </article>
 
@@ -397,78 +425,78 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         </div>
 
                         <div v-if="openDeliveryMethod === 'pool'" class="product-delivery-method__panel product-key-pool">
-                    <div class="product-key-pool__stats" aria-label="Состояние пула ключей">
-                      <section class="product-key-pool__stat product-key-pool__stat--free">
-                        <span>Доступно</span><strong>{{ keyPool.free_count || 0 }}</strong><small>готовы к будущей выдаче</small>
-                      </section>
-                      <section class="product-key-pool__stat">
-                        <span>В резерве</span><strong>{{ keyPool.reserved_count || 0 }}</strong><small>включая отправляемые</small>
-                      </section>
-                      <section class="product-key-pool__stat">
-                        <span>Выдано</span><strong>{{ keyPool.delivered_count || 0 }}</strong><small>история пула</small>
-                      </section>
-                      <section class="product-key-pool__stat">
-                        <span>Всего</span><strong>{{ keyPool.total || 0 }}</strong><small>сохранено в Seller</small>
-                      </section>
-                    </div>
+                          <div class="product-key-pool__stats" aria-label="Состояние пула ключей">
+                            <section class="product-key-pool__stat product-key-pool__stat--free">
+                              <span>Доступно</span><strong>{{ keyPool.free_count || 0 }}</strong><small>готовы к будущей выдаче</small>
+                            </section>
+                            <section class="product-key-pool__stat">
+                              <span>В резерве</span><strong>{{ keyPool.reserved_count || 0 }}</strong><small>включая отправляемые</small>
+                            </section>
+                            <section class="product-key-pool__stat">
+                              <span>Выдано</span><strong>{{ keyPool.delivered_count || 0 }}</strong><small>история пула</small>
+                            </section>
+                            <section class="product-key-pool__stat">
+                              <span>Всего</span><strong>{{ keyPool.total || 0 }}</strong><small>сохранено в Seller</small>
+                            </section>
+                          </div>
 
-                    <form v-if="keyPoolCanManage" class="product-key-pool__form" @submit.prevent="submitKeyPool">
-                      <div class="product-key-pool__form-copy">
-                        <span class="product-key-pool__form-icon" aria-hidden="true">
-                          <svg viewBox="0 0 24 24"><path d="M7 10a5 5 0 1 1 4.6 5" /><path d="m9 14-6 6M5 18l2 2M8 15l2 2" /></svg>
-                        </span>
-                        <div><strong>Добавить ключи</strong><p>По одному ключу на строку. Повторы будут пропущены.</p></div>
-                      </div>
-                      <label class="product-key-pool__codes">
-                        <span>Ключи</span>
-                        <textarea v-model="keyPoolForm.codes_raw" :disabled="keyPoolSaving" spellcheck="false" autocomplete="off" placeholder="AAAA-BBBB-CCCC&#10;DDDD-EEEE-FFFF" />
-                        <small>{{ keyCountLabel(keyPoolDraftCodes.length) }} подготовлено</small>
-                      </label>
-                      <label class="product-key-pool__expiry">
-                        <span>Срок действия</span>
-                        <input v-model="keyPoolForm.expires_at" :disabled="keyPoolSaving" type="date" />
-                        <small>Можно оставить пустым</small>
-                      </label>
-                      <button class="product-key-pool__submit" type="submit" :disabled="keyPoolSaving || !keyPoolDraftCodes.length">
-                        <span v-if="keyPoolSaving" class="product-settings-save__spinner" aria-hidden="true"></span>
-                        <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-                        {{ keyPoolSaving ? 'Сохраняем…' : 'Добавить в пул' }}
-                      </button>
-                    </form>
-                    <p v-else class="product-key-pool__readonly">Ваша роль позволяет просматривать пул, но не добавлять ключи.</p>
+                          <form v-if="keyPoolCanManage" class="product-key-pool__form" @submit.prevent="submitKeyPool">
+                            <div class="product-key-pool__form-copy">
+                              <span class="product-key-pool__form-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M7 10a5 5 0 1 1 4.6 5" /><path d="m9 14-6 6M5 18l2 2M8 15l2 2" /></svg>
+                              </span>
+                              <div><strong>Добавить ключи</strong><p>По одному ключу на строку. Повторы будут пропущены.</p></div>
+                            </div>
+                            <label class="product-key-pool__codes">
+                              <span>Ключи</span>
+                              <textarea v-model="keyPoolForm.codes_raw" :disabled="keyPoolSaving" spellcheck="false" autocomplete="off" placeholder="AAAA-BBBB-CCCC&#10;DDDD-EEEE-FFFF" />
+                              <small>{{ keyCountLabel(keyPoolDraftCodes.length) }} подготовлено</small>
+                            </label>
+                            <label class="product-key-pool__expiry">
+                              <span>Срок действия</span>
+                              <input v-model="keyPoolForm.expires_at" :disabled="keyPoolSaving" type="date" />
+                              <small>Можно оставить пустым</small>
+                            </label>
+                            <button class="product-key-pool__submit" type="submit" :disabled="keyPoolSaving || !keyPoolDraftCodes.length">
+                              <span v-if="keyPoolSaving" class="product-settings-save__spinner" aria-hidden="true"></span>
+                              <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                              {{ keyPoolSaving ? 'Сохраняем…' : 'Добавить в пул' }}
+                            </button>
+                          </form>
+                          <p v-else class="product-key-pool__readonly">Ваша роль позволяет просматривать пул, но не добавлять ключи.</p>
 
-                    <p v-if="keyPoolFormError || keyPoolError" class="product-key-pool__message product-key-pool__message--error" role="alert">{{ keyPoolFormError || keyPoolError }}</p>
-                    <p v-else-if="keyPoolNotice" class="product-key-pool__message product-key-pool__message--ok" role="status">{{ keyPoolNotice }}</p>
+                          <p v-if="keyPoolFormError || keyPoolError" class="product-key-pool__message product-key-pool__message--error" role="alert">{{ keyPoolFormError || keyPoolError }}</p>
+                          <p v-else-if="keyPoolNotice" class="product-key-pool__message product-key-pool__message--ok" role="status">{{ keyPoolNotice }}</p>
 
-                    <div v-if="keyPoolLoading && !keyPool.items?.length" class="product-key-pool__state" aria-live="polite">
-                      <span class="product-orders__spinner" aria-hidden="true"></span><span>Загружаем пул…</span>
-                    </div>
-                    <div v-else-if="!keyPool.items?.length" class="product-key-pool__state product-key-pool__state--empty">
-                      <span>Пока нет сохранённых ключей</span><small>Добавьте первую пачку или перенесите свободный пул из CRM.</small>
-                    </div>
-                    <template v-else>
-                      <div class="product-key-pool__list-head">
-                        <strong>Сохранённые ключи</strong><span>Открытые значения не загружаются в браузер</span>
-                      </div>
-                      <div class="product-key-pool__list">
-                        <article v-for="key in keyPool.items" :key="key.id" class="product-key-pool__item">
-                          <code>{{ key.masked_code }}</code>
-                          <span class="product-key-pool__status" :class="`product-key-pool__status--${key.status}`">{{ keyStatusLabel(key.status) }}</span>
-                          <time :datetime="key.created_at">{{ formatOrderDate(key.created_at) }}</time>
-                          <small>{{ key.expires_at ? `Действует до ${key.expires_at}` : 'Без срока действия' }}</small>
-                        </article>
-                      </div>
-                      <div v-if="keyPoolPageCount > 1" class="product-key-pool__pager">
-                        <button type="button" :disabled="keyPoolLoading || keyPool.page <= 1" @click="emit('load-key-pool', keyPool.page - 1)">Назад</button>
-                        <span>{{ keyPool.page }} / {{ keyPoolPageCount }}</span>
-                        <button type="button" :disabled="keyPoolLoading || keyPool.page >= keyPoolPageCount" @click="emit('load-key-pool', keyPool.page + 1)">Вперёд</button>
-                      </div>
-                    </template>
+                          <div v-if="keyPoolLoading && !keyPool.items?.length" class="product-key-pool__state" aria-live="polite">
+                            <span class="product-orders__spinner" aria-hidden="true"></span><span>Загружаем пул…</span>
+                          </div>
+                          <div v-else-if="!keyPool.items?.length" class="product-key-pool__state product-key-pool__state--empty">
+                            <span>Пока нет сохранённых ключей</span><small>Добавьте первую пачку или перенесите свободный пул из CRM.</small>
+                          </div>
+                          <template v-else>
+                            <div class="product-key-pool__list-head">
+                              <strong>Сохранённые ключи</strong><span>Открытые значения не загружаются в браузер</span>
+                            </div>
+                            <div class="product-key-pool__list">
+                              <article v-for="key in keyPool.items" :key="key.id" class="product-key-pool__item">
+                                <code>{{ key.masked_code }}</code>
+                                <span class="product-key-pool__status" :class="`product-key-pool__status--${key.status}`">{{ keyStatusLabel(key.status) }}</span>
+                                <time :datetime="key.created_at">{{ formatOrderDate(key.created_at) }}</time>
+                                <small>{{ key.expires_at ? `Действует до ${key.expires_at}` : 'Без срока действия' }}</small>
+                              </article>
+                            </div>
+                            <div v-if="keyPoolPageCount > 1" class="product-key-pool__pager">
+                              <button type="button" :disabled="keyPoolLoading || keyPool.page <= 1" @click="emit('load-key-pool', keyPool.page - 1)">Назад</button>
+                              <span>{{ keyPool.page }} / {{ keyPoolPageCount }}</span>
+                              <button type="button" :disabled="keyPoolLoading || keyPool.page >= keyPoolPageCount" @click="emit('load-key-pool', keyPool.page + 1)">Вперёд</button>
+                            </div>
+                          </template>
 
-                    <p class="stock-readonly__notice">
-                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                      Включение способа сохраняет приоритет карточки, но не запускает выдачу и ничего не отправляет в Яндекс.
-                    </p>
+                          <p class="stock-readonly__notice">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
+                            Включение способа сохраняет приоритет карточки, но не запускает выдачу и ничего не отправляет в Яндекс.
+                          </p>
                         </div>
                       </article>
 
@@ -2049,6 +2077,54 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   background: rgba(5, 11, 27, .28);
 }
 
+.product-delivery-supplier {
+  display: grid;
+  gap: 10px;
+}
+
+.product-delivery-supplier__fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.product-delivery-supplier label {
+  display: grid;
+  gap: 7px;
+}
+
+.product-delivery-supplier label > span {
+  color: #dce5f7;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.product-delivery-supplier input {
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 11px;
+  border: 1px solid rgba(126, 151, 217, .28);
+  border-radius: 11px;
+  outline: none;
+  color: #eef3ff;
+  background: rgba(5, 11, 26, .72);
+}
+
+.product-delivery-supplier input:focus {
+  border-color: rgba(83, 125, 255, .78);
+}
+
+.product-delivery-supplier p {
+  margin: 0;
+  color: #94a4c7;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.product-delivery-supplier p strong {
+  color: #e8edfb;
+}
+
 .product-delivery-support {
   display: grid;
   gap: 8px;
@@ -2453,6 +2529,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   }
 
   .product-overview.has-image {
+    grid-template-columns: 1fr;
+  }
+
+  .product-delivery-supplier__fields {
     grid-template-columns: 1fr;
   }
 

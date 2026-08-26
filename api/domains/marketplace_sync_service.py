@@ -9,11 +9,7 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from domains.fulfillment_service import (
-    automatic_pool_reservation_enabled,
-    observe_order_fulfillments,
-    reserve_pool_keys,
-)
+from domains.fulfillment_service import observe_order_fulfillments
 from domains.marketplace_catalog_service import fetch_marketplace_catalog, fetch_marketplace_stocks
 from domains.marketplace_orders_service import fetch_marketplace_orders
 from domains.marketplace_read_api import catalog_payload_with_stock, normalize_catalog_item, normalize_order_items
@@ -145,14 +141,11 @@ def sync_orders_connection(
             if not order_id or order_id in seen_order_ids:
                 continue
             seen_order_ids.add(order_id)
-            fulfillment_ids = observe_order_fulfillments(
+            observe_order_fulfillments(
                 connection,
                 connection_id=int(connection_id),
                 external_order_id=order_id,
             )
-            if automatic_pool_reservation_enabled():
-                for fulfillment_id in fulfillment_ids:
-                    reserve_pool_keys(connection, fulfillment_id=fulfillment_id)
     return saved_items
 
 

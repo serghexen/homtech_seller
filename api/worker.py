@@ -13,6 +13,7 @@ import psycopg
 from fastapi import HTTPException
 
 from domains.marketplace_sync_service import execute_sync_job, record_connection_error
+from domains.supplier_fulfillment import build_supplier_fulfillment_processor
 from domains.yandex_market_webhook_processor import build_yandex_market_webhook_processor
 from domains.yandex_market_webhooks_api import webhook_processing_enabled
 from domains.yandex_market_outbound import build_yandex_outbound_processor
@@ -52,6 +53,10 @@ def webhook_batch_size() -> int:
 
 def outbound_batch_size() -> int:
     return max(1, min(int(os.getenv("YANDEX_MARKET_OUTBOUND_BATCH_SIZE", "5")), 50))
+
+
+def fulfillment_batch_size() -> int:
+    return max(1, min(int(os.getenv("SELLER_FULFILLMENT_BATCH_SIZE", "5")), 50))
 
 
 def advisory_lock_key(connection_id: int) -> int:
@@ -259,9 +264,16 @@ def run_worker() -> int:
         processing_enabled=webhook_processing_enabled,
     )
     outbound = build_yandex_outbound_processor(database_url=database_url, psycopg=psycopg)
+    fulfillment = build_supplier_fulfillment_processor(database_url=database_url, psycopg=psycopg)
     print("Seller worker started", flush=True)
     while not stopping:
         try:
+            recovered_fulfillments = fulfillment.recover_stale()
+            if recovered_fulfillments:
+                print(f"Recovered fulfillment leases: {recovered_fulfillments}", flush=True)
+            processed_fulfillments = fulfillment.process_pending(fulfillment_batch_size())
+            if processed_fulfillments:
+                print(f"Processed fulfillment resolutions: {processed_fulfillments}", flush=True)
             requeued_outbound, unknown_outbound = outbound.recover_stale()
             if requeued_outbound or unknown_outbound:
                 print(
@@ -280,7 +292,7 @@ def run_worker() -> int:
                     print(f"Recovered stale sync jobs: {recovered}", flush=True)
                 job = claim_next_job(lock_connection)
                 if not job:
-                    if not processed_webhooks and not processed_outbound:
+                    if not processed_fulfillments and not processed_webhooks and not processed_outbound:
                         time.sleep(poll_seconds())
                     continue
                 try:

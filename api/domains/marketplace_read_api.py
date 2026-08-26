@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -52,6 +53,13 @@ class MarketplaceCatalogItemOut(BaseModel):
     support_message: str = ""
     support_message_delivery_enabled: bool = False
     pool_issue_enabled: bool = False
+    supplier_issue_enabled: bool = False
+    supplier_mapping_enabled: bool = False
+    supplier_service_id: int | None = None
+    supplier_nominal_id: str = ""
+    supplier_max_amount: Decimal | None = None
+    supplier_quoted_amount: Decimal | None = None
+    supplier_quoted_at: datetime | None = None
     sales_limit: int | None = None
     sales_limit_daily_extra: int | None = None
     sales_limit_day: date | None = None
@@ -99,6 +107,10 @@ class MarketplaceCatalogSettingsIn(BaseModel):
     support_message: str = Field(default="", max_length=2_000)
     support_message_delivery_enabled: bool = False
     pool_issue_enabled: bool = False
+    supplier_issue_enabled: bool = False
+    supplier_service_id: int | None = Field(default=None, gt=0)
+    supplier_nominal_id: str = Field(default="", max_length=128)
+    supplier_max_amount: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=6)
 
 
 class MarketplaceCatalogSettingsOut(BaseModel):
@@ -112,6 +124,10 @@ class MarketplaceCatalogSettingsOut(BaseModel):
     support_message: str
     support_message_delivery_enabled: bool
     pool_issue_enabled: bool
+    supplier_issue_enabled: bool
+    supplier_service_id: int | None = None
+    supplier_nominal_id: str = ""
+    supplier_max_amount: Decimal | None = None
     settings_saved_at: datetime
 
 
@@ -458,10 +474,15 @@ def mount_marketplace_read_routes(
                            local_settings.updated_at, item.is_archived,
                            CASE WHEN COALESCE(local_settings.support_message_overridden, false)
                              THEN local_settings.support_message ELSE COALESCE(settings.support_message, '') END,
-                           CASE WHEN COALESCE(local_settings.support_message_overridden, false)
-                             THEN local_settings.support_message_delivery_enabled
-                             ELSE COALESCE(settings.support_message_delivery_enabled, false) END,
-                           COALESCE(local_settings.pool_issue_enabled, false)
+                           COALESCE(policy.support_message_delivery_enabled,
+                             CASE WHEN COALESCE(local_settings.support_message_overridden, false)
+                               THEN local_settings.support_message_delivery_enabled
+                               ELSE COALESCE(settings.support_message_delivery_enabled, false) END),
+                           COALESCE(policy.pool_issue_enabled, local_settings.pool_issue_enabled, false),
+                           COALESCE(policy.supplier_issue_enabled, false),
+                           COALESCE(supplier.enabled, false), supplier.service_id,
+                           COALESCE(supplier.nominal_id, ''), supplier.max_amount,
+                           supplier.quoted_amount, supplier.quoted_at
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     LEFT JOIN seller.yandex_product_settings_snapshot AS settings
@@ -470,6 +491,18 @@ def mount_marketplace_read_routes(
                     LEFT JOIN seller.product_card_settings AS local_settings
                       ON local_settings.connection_id=item.connection_id
                      AND local_settings.external_product_id=item.external_product_id
+                    LEFT JOIN seller.product_fulfillment_policies AS policy
+                      ON policy.connection_id=item.connection_id
+                     AND policy.external_product_id=item.external_product_id
+                    LEFT JOIN LATERAL (
+                      SELECT mapping.enabled, mapping.service_id, mapping.nominal_id,
+                             mapping.max_amount, mapping.quoted_amount, mapping.quoted_at
+                      FROM seller.product_supplier_mappings AS mapping
+                      WHERE mapping.connection_id=item.connection_id
+                        AND mapping.external_product_id=item.external_product_id
+                      ORDER BY mapping.priority, mapping.id
+                      LIMIT 1
+                    ) AS supplier ON true
                     WHERE {where}
                     ORDER BY item.title ASC NULLS LAST, item.sku ASC, item.external_product_id ASC
                     LIMIT %s OFFSET %s
@@ -508,7 +541,11 @@ def mount_marketplace_read_routes(
                 settings_saved_at=row[25] if has_local_settings else None,
                 support_message=str(row[27] or "") if has_settings else "",
                 support_message_delivery_enabled=bool(row[28]) if has_settings else False,
-                pool_issue_enabled=bool(row[29]) if has_local_settings else False,
+                pool_issue_enabled=bool(row[29]),
+                supplier_issue_enabled=bool(row[30]), supplier_mapping_enabled=bool(row[31]),
+                supplier_service_id=int(row[32]) if row[32] is not None else None,
+                supplier_nominal_id=str(row[33] or ""), supplier_max_amount=row[34],
+                supplier_quoted_amount=row[35], supplier_quoted_at=row[36],
                 **details,
             ))
         return MarketplaceCatalogListOut(
@@ -526,6 +563,14 @@ def mount_marketplace_read_routes(
         product_id = str(payload.external_product_id).strip()
         instruction = str(payload.activation_instruction or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         support_message = str(payload.support_message or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        nominal_id = str(payload.supplier_nominal_id or "").strip()
+        if payload.supplier_issue_enabled and (
+            payload.supplier_service_id is None or payload.supplier_max_amount is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Для автовыдачи укажите услугу Supplier Hub и максимальную цену",
+            )
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
@@ -577,12 +622,67 @@ def mount_marketplace_read_routes(
                     ),
                 )
                 row = cursor.fetchone()
+                cursor.execute(
+                    """
+                    INSERT INTO seller.product_fulfillment_policies(
+                      connection_id, external_product_id, supplier_issue_enabled,
+                      pool_issue_enabled, support_message_delivery_enabled,
+                      source_system, source_updated_at, updated_by_user_id
+                    ) VALUES (%s,%s,%s,%s,%s,'seller',now(),%s)
+                    ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
+                      supplier_issue_enabled=EXCLUDED.supplier_issue_enabled,
+                      pool_issue_enabled=EXCLUDED.pool_issue_enabled,
+                      support_message_delivery_enabled=EXCLUDED.support_message_delivery_enabled,
+                      source_system='seller', source_updated_at=now(),
+                      updated_by_user_id=EXCLUDED.updated_by_user_id, updated_at=now()
+                    """,
+                    (
+                        payload.connection_id, product_id, payload.supplier_issue_enabled,
+                        payload.pool_issue_enabled, payload.support_message_delivery_enabled,
+                        seller_user.id,
+                    ),
+                )
+                if payload.supplier_service_id is not None and payload.supplier_max_amount is not None:
+                    cursor.execute(
+                        """
+                        INSERT INTO seller.product_supplier_mappings(
+                          connection_id, external_product_id, provider_code, priority,
+                          enabled, service_id, nominal_id, params, max_amount,
+                          source_system, source_updated_at, updated_by_user_id
+                        ) VALUES (%s,%s,'interhub',1,%s,%s,%s,'{}'::jsonb,%s,'seller',now(),%s)
+                        ON CONFLICT (connection_id, external_product_id, provider_code, priority) DO UPDATE SET
+                          enabled=EXCLUDED.enabled, service_id=EXCLUDED.service_id,
+                          nominal_id=EXCLUDED.nominal_id, max_amount=EXCLUDED.max_amount,
+                          source_system='seller', source_updated_at=now(),
+                          updated_by_user_id=EXCLUDED.updated_by_user_id, updated_at=now()
+                        """,
+                        (
+                            payload.connection_id, product_id, payload.supplier_issue_enabled,
+                            payload.supplier_service_id, nominal_id,
+                            payload.supplier_max_amount, seller_user.id,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE seller.product_supplier_mappings
+                        SET enabled=false, source_system='seller', source_updated_at=now(),
+                            updated_by_user_id=%s, updated_at=now()
+                        WHERE connection_id=%s AND external_product_id=%s
+                          AND provider_code='interhub' AND priority=1
+                        """,
+                        (seller_user.id, payload.connection_id, product_id),
+                    )
         return MarketplaceCatalogSettingsOut(
             connection_id=int(row[0]), external_product_id=str(row[1]),
             manual_stock_limit=int(row[2]), sales_limit=int(row[3]) if row[3] is not None else None,
             sales_limit_daily_extra=int(row[4]), sales_limit_day=row[5],
             activation_instruction=str(row[6] or ""), support_message=str(row[7] or ""),
             support_message_delivery_enabled=bool(row[8]), pool_issue_enabled=bool(row[9]),
+            supplier_issue_enabled=payload.supplier_issue_enabled,
+            supplier_service_id=payload.supplier_service_id,
+            supplier_nominal_id=nominal_id,
+            supplier_max_amount=payload.supplier_max_amount,
             settings_saved_at=row[10],
         )
 

@@ -362,6 +362,10 @@ async function saveSelectedProductSettings(settings) {
       support_message: result.support_message,
       support_message_delivery_enabled: result.support_message_delivery_enabled,
       pool_issue_enabled: result.pool_issue_enabled,
+      supplier_issue_enabled: result.supplier_issue_enabled,
+      supplier_service_id: result.supplier_service_id,
+      supplier_nominal_id: result.supplier_nominal_id,
+      supplier_max_amount: result.supplier_max_amount,
       settings_saved_at: result.settings_saved_at,
     }
     Object.assign(selectedCatalogItem.value, savedSettings)

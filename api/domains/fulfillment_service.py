@@ -141,13 +141,16 @@ def reserve_pool_keys(
             SELECT fulfillment.id, fulfillment.connection_id, fulfillment.offer_id,
                    fulfillment.requested_quantity, fulfillment.status, fulfillment.reservation_ref,
                    marketplace_connection.fulfillment_reservation_enabled,
-                   COALESCE(settings.pool_issue_enabled, false), pool.id
+                   COALESCE(policy.pool_issue_enabled, settings.pool_issue_enabled, false), pool.id
             FROM seller.order_fulfillments AS fulfillment
             JOIN seller.marketplace_connections AS marketplace_connection
               ON marketplace_connection.id=fulfillment.connection_id
             LEFT JOIN seller.product_card_settings AS settings
               ON settings.connection_id=fulfillment.connection_id
              AND settings.external_product_id=fulfillment.offer_id
+            LEFT JOIN seller.product_fulfillment_policies AS policy
+              ON policy.connection_id=fulfillment.connection_id
+             AND policy.external_product_id=fulfillment.offer_id
             LEFT JOIN seller.marketplace_key_pools AS pool
               ON pool.connection_id=fulfillment.connection_id
              AND pool.external_product_id=fulfillment.offer_id
@@ -182,7 +185,7 @@ def reserve_pool_keys(
                 raise RuntimeError("Нарушена целостность зарезервированного комплекта ключей")
             return ReservationResult(row_id, "reserved", existing)
 
-        if current_status not in {"pending", "manual_required"}:
+        if current_status not in {"pending", "manual_required", "supplier_required"}:
             return ReservationResult(row_id, "skipped", reason=f"Статус {current_status} не допускает резерв")
         if require_automatic_gates and not store_enabled:
             return ReservationResult(row_id, "skipped", reason="Резервирование выключено для магазина")

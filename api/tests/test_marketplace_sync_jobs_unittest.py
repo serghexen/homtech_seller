@@ -101,13 +101,11 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
         self.assertIn("ON CONFLICT (connection_id, external_order_id, external_item_id) DO UPDATE", upsert.args[0])
         self.assertEqual(upsert.args[1][0:4], (7, "123", "9", "SKU-1"))
 
-    @patch("domains.marketplace_sync_service.reserve_pool_keys")
-    @patch("domains.marketplace_sync_service.automatic_pool_reservation_enabled", return_value=False)
     @patch("domains.marketplace_sync_service.observe_order_fulfillments", return_value=[81])
     @patch("domains.marketplace_sync_service.save_order_snapshots", return_value=1)
     @patch("domains.marketplace_sync_service.fetch_marketplace_orders")
     def test_yandex_polling_reconciles_each_order_without_reserving_when_global_switch_is_off(
-        self, fetch_orders, save_snapshots, observe_fulfillments, _reservation_enabled, reserve_keys,
+        self, fetch_orders, save_snapshots, observe_fulfillments,
     ) -> None:
         rows = [{"orderId": 123}, {"orderId": 123}]
         fetch_orders.return_value = rows
@@ -125,15 +123,12 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
             connection, connection_id=7, provider_code="yandex_market", rows=rows,
         )
         observe_fulfillments.assert_called_once_with(connection, connection_id=7, external_order_id="123")
-        reserve_keys.assert_not_called()
 
-    @patch("domains.marketplace_sync_service.reserve_pool_keys")
-    @patch("domains.marketplace_sync_service.automatic_pool_reservation_enabled", return_value=True)
     @patch("domains.marketplace_sync_service.observe_order_fulfillments", return_value=[81, 82])
     @patch("domains.marketplace_sync_service.save_order_snapshots", return_value=2)
     @patch("domains.marketplace_sync_service.fetch_marketplace_orders", return_value=[{"orderId": 123}])
     def test_yandex_polling_applies_safe_reservation_gates_when_enabled(
-        self, _fetch_orders, _save_snapshots, _observe, _reservation_enabled, reserve_keys,
+        self, _fetch_orders, _save_snapshots, _observe,
     ) -> None:
         connection = Mock()
 
@@ -143,10 +138,7 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
             sync_started_at=datetime.now(timezone.utc),
         )
 
-        self.assertEqual(
-            reserve_keys.call_args_list,
-            [call(connection, fulfillment_id=81), call(connection, fulfillment_id=82)],
-        )
+        _observe.assert_called_once_with(connection, connection_id=7, external_order_id="123")
 
     def test_parses_and_deduplicates_polling_job_ids(self) -> None:
         self.assertEqual(parse_job_ids("7, 8,7,9"), [7, 8, 9])

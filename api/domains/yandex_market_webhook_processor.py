@@ -6,11 +6,7 @@ import os
 from typing import Callable
 import uuid
 
-from domains.fulfillment_service import (
-    automatic_pool_reservation_enabled,
-    observe_order_fulfillments,
-    reserve_pool_keys,
-)
+from domains.fulfillment_service import observe_order_fulfillments
 from domains.marketplace_orders_service import fetch_yandex_market_order
 from domains.marketplace_sync_service import load_active_connection, save_order_snapshots
 
@@ -174,15 +170,11 @@ def build_yandex_market_webhook_processor(
                 )
                 if saved_items < 1:
                     raise ValueError(f"Заказ Яндекс Маркета {order_id} не содержит сохраняемых позиций")
-                fulfillment_ids = observe_order_fulfillments(
+                observe_order_fulfillments(
                     connection,
                     connection_id=int(row_connection_id),
                     external_order_id=order_id,
                 )
-                if automatic_pool_reservation_enabled():
-                    # Даже при глобальном разрешении сервис дополнительно проверит флаги магазина и товара.
-                    for fulfillment_id in fulfillment_ids:
-                        reserve_pool_keys(connection, fulfillment_id=fulfillment_id)
                 with connection.cursor() as cursor:
                     cursor.execute(
                         """

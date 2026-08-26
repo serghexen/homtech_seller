@@ -59,6 +59,40 @@ class SupplierHubClientTests(unittest.TestCase):
         self.assertEqual(request.get_header("X-hub-client"), "seller")
         self.assertEqual(request.get_header("X-hub-key"), "s" * 48)
 
+    @patch("domains.supplier_hub_client.urllib.request.urlopen")
+    def test_quote_uses_calculate_endpoint_without_enabling_purchases(self, urlopen) -> None:
+        urlopen.return_value = FakeResponse({"success": True, "fixed_amount": "464.53"})
+        client = SupplierHubClient(settings(fulfillment_enabled=False))
+
+        result = client.quote(service_id=11125, nominal_id="250")
+
+        self.assertEqual(result["fixed_amount"], "464.53")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.method, "POST")
+        self.assertTrue(request.full_url.endswith("/v1/providers/interhub/quote"))
+        self.assertEqual(json.loads(request.data), {
+            "service_id": 11125, "account": "", "params": {"nominal": "250"},
+        })
+
+    @patch("domains.supplier_hub_client.urllib.request.urlopen")
+    def test_observability_summary_is_read_only_consumer_request(self, urlopen) -> None:
+        urlopen.return_value = FakeResponse({"in_flight": 0, "requires_attention": 0})
+
+        result = SupplierHubClient(settings()).observability_summary()
+
+        self.assertEqual(result["in_flight"], 0)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.method, "GET")
+        self.assertTrue(request.full_url.endswith("/v1/observability/summary"))
+
+    def test_purchase_cannot_start_while_consumer_flag_is_disabled(self) -> None:
+        client = SupplierHubClient(settings(fulfillment_enabled=False))
+        with self.assertRaisesRegex(SupplierHubError, "disabled"):
+            client.create_purchase(
+                idempotency_key="seller:test", service_id=11125,
+                max_amount="500.00", nominal_id="250",
+            )
+
     @patch("domains.supplier_hub_client.SupplierHubClient.ready")
     @patch("domains.supplier_hub_client.SupplierHubClient.live")
     @patch.dict(
