@@ -308,11 +308,11 @@ def link_delivery(
         """
         INSERT INTO seller.fulfillment_events(fulfillment_id, event_type, from_status, to_status, details, created_at)
         SELECT %s,'crm_delivery_history_imported',%s,'delivered',
-               jsonb_build_object('crm_delivery_id',%s,'delivery_source',%s),%s
+               jsonb_build_object('crm_delivery_id',%s::bigint,'delivery_source',%s::text),%s
         WHERE NOT EXISTS (
           SELECT 1 FROM seller.fulfillment_events
           WHERE fulfillment_id=%s AND event_type='crm_delivery_history_imported'
-            AND details->>'crm_delivery_id'=%s
+            AND details->>'crm_delivery_id'=%s::text
         )
         """,
         (
