@@ -188,6 +188,7 @@ def target_context(target, connection_id: int) -> tuple[str, dict[str, tuple[str
 
 
 def existing_order_keys(target, connection_id: int) -> dict[tuple[str, str], tuple[str, int]]:
+    # Ozon однозначно связывает позицию истории по отправлению и SKU; offer может отличаться у FBO-снимка.
     with target.cursor() as cursor:
         cursor.execute(
             """
@@ -196,7 +197,10 @@ def existing_order_keys(target, connection_id: int) -> dict[tuple[str, str], tup
             """,
             (connection_id,),
         )
-        return {(str(row[0]), str(row[2] or "")): (str(row[1]), int(row[3] or 0)) for row in cursor.fetchall()}
+        return {
+            (str(row[0]), str(row[1])): (str(row[2] or ""), int(row[3] or 0))
+            for row in cursor.fetchall()
+        }
 
 
 def apply_snapshot(
@@ -392,14 +396,13 @@ def main() -> int:
         existing_orders = existing_order_keys(target, args.target_connection_id)
         missing_orders = [
             row for row in orders
-            if (row.posting_number, catalog[row.external_product_id][0]) not in existing_orders
+            if (row.posting_number, row.sku) not in existing_orders
         ]
         delivered_mismatches = [
             row.source_id for row in orders
             if row.status == "delivered"
-            and (row.posting_number, catalog[row.external_product_id][0]) in existing_orders
-            and existing_orders[(row.posting_number, catalog[row.external_product_id][0])][1]
-                != row.required_qty
+            and (row.posting_number, row.sku) in existing_orders
+            and existing_orders[(row.posting_number, row.sku)][1] != row.required_qty
         ]
         if delivered_mismatches:
             raise RuntimeError(f"{len(delivered_mismatches)} delivered orders differ between CRM and Seller")

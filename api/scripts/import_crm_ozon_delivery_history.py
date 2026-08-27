@@ -153,6 +153,13 @@ def order_and_fulfillment(cursor, connection_id: int, delivery: SourceDelivery):
     return cursor.fetchone()
 
 
+def seller_order_matches_delivery(existing, delivery: SourceDelivery) -> bool:
+    # Digital хранит offer карточки, а исторический FBO-снимок Ozon использует product_id в том же поле.
+    seller_offer = str(existing[0] or "")
+    expected_offers = {delivery.offer_id, delivery.external_product_id}
+    return seller_offer in expected_offers and int(existing[1] or 0) == delivery.required_qty
+
+
 def ensure_fulfillment(cursor, connection_id: int, delivery: SourceDelivery, existing) -> tuple[int, str, bool]:
     reservation_ref = f"crm:ozon:{connection_id}:{delivery.posting_number}:{delivery.item_id}"
     if existing[2] is not None:
@@ -191,7 +198,7 @@ def import_delivery(
     existing = order_and_fulfillment(cursor, connection_id, delivery)
     if not existing:
         return 0, 0, 0, 1
-    if str(existing[0]) != delivery.offer_id or int(existing[1] or 0) != delivery.required_qty:
+    if not seller_order_matches_delivery(existing, delivery):
         raise RuntimeError(f"Seller order {delivery.posting_number} does not match CRM offer or quantity")
     fulfillment_id, reservation_ref, fulfillment_created = ensure_fulfillment(
         cursor, connection_id, delivery, existing,
