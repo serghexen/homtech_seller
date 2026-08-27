@@ -116,6 +116,12 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         self.assertIn("reservation.state IN ('reserved','consumed')", source)
         self.assertIn("can_reveal_keys=bool", source)
 
+    def test_read_exposes_support_message_only_as_explicit_reveal_capability(self) -> None:
+        source = inspect.getsource(mount_marketplace_fulfillment_routes)
+        self.assertIn("can_reveal_support_message=bool", source)
+        self.assertIn('str(row[13] or "") == "support_message"', source)
+        self.assertIn("support_message_snapshot", source)
+
     def test_manual_preparation_requires_digital_delivery(self) -> None:
         source = inspect.getsource(mount_marketplace_fulfillment_routes)
         self.assertIn("item.delivery_type", source)

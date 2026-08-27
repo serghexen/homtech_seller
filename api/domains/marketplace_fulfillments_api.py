@@ -72,6 +72,7 @@ class OrderFulfillmentOut(BaseModel):
     can_prepare_support: bool = False
     support_message_configured: bool = False
     can_reveal_keys: bool = False
+    can_reveal_support_message: bool = False
     automation_in_progress: bool = False
 
 
@@ -297,6 +298,11 @@ def mount_marketplace_fulfillment_routes(
             can_prepare_support=bool(can_prepare_any and provider_code == "yandex_market" and support_message_configured),
             support_message_configured=support_message_configured,
             can_reveal_keys=bool(can_manage and int(row[16] or 0) > 0),
+            can_reveal_support_message=bool(
+                can_manage
+                and str(row[13] or "") == "support_message"
+                and bool(str(row[22] or "").strip())
+            ),
             automation_in_progress=automation_in_progress,
         )
 

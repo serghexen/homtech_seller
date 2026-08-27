@@ -99,6 +99,7 @@ const selectedOrderFulfillmentLoading = ref(false)
 const selectedOrderFulfillmentActionLoading = ref(false)
 const selectedOrderFulfillmentError = ref('')
 const selectedOrderRevealedKeys = ref([])
+const selectedOrderRevealedSupportMessage = ref('')
 const selectedOrderRevealLoading = ref(false)
 const selectedOrderRevealError = ref('')
 const form = reactive({ email: '', password: '', display_name: '' })
@@ -623,6 +624,7 @@ async function openOrderFulfillment(item) {
   selectedOrderFulfillment.value = null
   selectedOrderFulfillmentError.value = ''
   selectedOrderRevealedKeys.value = []
+  selectedOrderRevealedSupportMessage.value = ''
   selectedOrderRevealLoading.value = false
   selectedOrderRevealError.value = ''
   await loadOrderFulfillment()
@@ -637,11 +639,12 @@ function closeOrderFulfillment() {
   selectedOrderFulfillmentLoading.value = false
   selectedOrderFulfillmentError.value = ''
   selectedOrderRevealedKeys.value = []
+  selectedOrderRevealedSupportMessage.value = ''
   selectedOrderRevealLoading.value = false
   selectedOrderRevealError.value = ''
 }
 
-async function revealOrderFulfillmentKeys() {
+async function revealOrderFulfillmentResult() {
   const item = selectedOrderItem.value
   if (!item || selectedOrderRevealLoading.value) return
   const identity = `${item.connection_id}:${item.external_order_id}:${item.external_item_id}`
@@ -658,9 +661,10 @@ async function revealOrderFulfillmentKeys() {
     })
     if (!selectedOrderItem.value || `${selectedOrderItem.value.connection_id}:${selectedOrderItem.value.external_order_id}:${selectedOrderItem.value.external_item_id}` !== identity) return
     selectedOrderRevealedKeys.value = Array.isArray(result.items) ? result.items : []
+    selectedOrderRevealedSupportMessage.value = String(result.support_message || '')
   } catch (requestError) {
     if (selectedOrderItem.value && `${selectedOrderItem.value.connection_id}:${selectedOrderItem.value.external_order_id}:${selectedOrderItem.value.external_item_id}` === identity) {
-      selectedOrderRevealError.value = requestError.message || 'Не удалось показать выданные ключи'
+      selectedOrderRevealError.value = requestError.message || 'Не удалось показать результат выдачи'
     }
   } finally {
     selectedOrderRevealLoading.value = false
@@ -1623,7 +1627,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="snapshot-grid">
             <article v-for="item in orders" :key="`${item.connection_id}-${item.external_order_id}-${item.external_item_id}`" class="snapshot-card order-card">
-              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="canOpenOrderFulfillment(item)" class="order-card__fulfillment" type="button" :title="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" :aria-label="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
+              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="canOpenOrderFulfillment(item)" class="order-card__fulfillment" type="button" :title="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выдачу'" :aria-label="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выдачу'" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
               <div class="order-card__body"><strong>{{ item.title || 'Товар без названия' }}</strong></div>
               <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.updated_at || item.created_at || item.synced_at">{{ formatDate(item.updated_at || item.created_at || item.synced_at) }}</time></div>
             </article>
@@ -1713,6 +1717,7 @@ onBeforeUnmount(() => {
       :action-loading="selectedOrderFulfillmentActionLoading"
       :error="selectedOrderFulfillmentError"
       :revealed-keys="selectedOrderRevealedKeys"
+      :revealed-support-message="selectedOrderRevealedSupportMessage"
       :reveal-loading="selectedOrderRevealLoading"
       :reveal-error="selectedOrderRevealError"
       @prepare="updateOrderFulfillment('prepare')"
@@ -1722,7 +1727,7 @@ onBeforeUnmount(() => {
       @send="updateOrderFulfillment('send')"
       @cancel-send="updateOrderFulfillment('cancel-send')"
       @resolve-unknown="(resolution) => updateOrderFulfillment('resolve-unknown', { resolution })"
-      @reveal="revealOrderFulfillmentKeys"
+      @reveal="revealOrderFulfillmentResult"
       @close="closeOrderFulfillment"
     />
 

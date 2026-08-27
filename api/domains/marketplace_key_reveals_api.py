@@ -1,4 +1,4 @@
-"""Точечное раскрытие уже сохранённых ключей по явному действию оператора."""
+"""Точечное раскрытие уже сохранённого результата выдачи по явному действию оператора."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ class OrderKeysRevealIn(BaseModel):
 
 class OrderKeysRevealOut(BaseModel):
     items: list[KeyRevealItemOut] = Field(default_factory=list)
+    support_message: str = ""
 
 
 def mount_marketplace_key_reveal_routes(
@@ -34,14 +35,14 @@ def mount_marketplace_key_reveal_routes(
     current_user: Callable[..., AuthenticatedUser],
     user_with_workspace: Callable,
 ) -> None:
-    """Расшифровывает только выбранный ключ или комплект одного заказа."""
+    """Раскрывает только выбранный ключ, комплект или сообщение одного заказа."""
 
     def reveal_context(connection, user: AuthenticatedUser):
         seller_user = user_with_workspace(connection, user.user_id)
         if not seller_user:
             raise HTTPException(status_code=401, detail="Рабочая область недоступна")
         if seller_user.role_code not in {"owner", "operator"}:
-            raise HTTPException(status_code=403, detail="Недостаточно прав для просмотра ключей")
+            raise HTTPException(status_code=403, detail="Недостаточно прав для просмотра результата выдачи")
         return seller_user
 
     def encryption_secret() -> str:
@@ -83,14 +84,41 @@ def mount_marketplace_key_reveal_routes(
         return KeyRevealItemOut(id=int(row[0]), code=str(row[1]))
 
     @app.post("/marketplaces/orders/fulfillment/reveal", response_model=OrderKeysRevealOut)
-    def reveal_order_keys(
+    def reveal_order_result(
         payload: OrderKeysRevealIn,
         user: AuthenticatedUser = Depends(current_user),
     ) -> OrderKeysRevealOut:
         with psycopg.connect(database_url()) as connection:
             seller_user = reveal_context(connection, user)
-            secret = encryption_secret()
             with connection.cursor() as cursor:
+                # Сначала определяет сохранённый тип выдачи без раскрытия ключей.
+                cursor.execute(
+                    """
+                    SELECT fulfillment.delivery_source,
+                           COALESCE(fulfillment.support_message_snapshot, '')
+                    FROM seller.order_items AS item
+                    JOIN seller.marketplace_connections AS marketplace_connection
+                      ON marketplace_connection.id=item.connection_id
+                    JOIN seller.order_fulfillments AS fulfillment
+                      ON fulfillment.connection_id=item.connection_id
+                     AND fulfillment.external_order_id=item.external_order_id
+                     AND fulfillment.external_item_id=item.external_item_id
+                    WHERE item.connection_id=%s AND item.external_order_id=%s
+                      AND item.external_item_id=%s AND marketplace_connection.workspace_id=%s
+                    """,
+                    (
+                        payload.connection_id, payload.external_order_id.strip(),
+                        payload.external_item_id.strip(), seller_user.workspace_id,
+                    ),
+                )
+                material = cursor.fetchone()
+                if material and str(material[0] or "") == "support_message":
+                    message = str(material[1] or "")
+                    if not message.strip():
+                        raise HTTPException(status_code=404, detail="Для этого заказа нет сохранённого сообщения")
+                    return OrderKeysRevealOut(support_message=message)
+
+                secret = encryption_secret()
                 cursor.execute(
                     """
                     SELECT key.id, pgp_sym_decrypt(key.code_ciphertext, %s)
@@ -117,5 +145,5 @@ def mount_marketplace_key_reveal_routes(
                 )
                 rows = cursor.fetchall()
         if not rows:
-            raise HTTPException(status_code=404, detail="Для этого заказа нет сохранённых ключей")
+            raise HTTPException(status_code=404, detail="Для этого заказа нет сохранённого результата выдачи")
         return OrderKeysRevealOut(items=[KeyRevealItemOut(id=int(row[0]), code=str(row[1])) for row in rows])

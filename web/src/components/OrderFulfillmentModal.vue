@@ -11,6 +11,7 @@ const props = defineProps({
   actionLoading: { type: Boolean, default: false },
   error: { type: String, default: '' },
   revealedKeys: { type: Array, default: () => [] },
+  revealedSupportMessage: { type: String, default: '' },
   revealLoading: { type: Boolean, default: false },
   revealError: { type: String, default: '' },
 })
@@ -21,6 +22,7 @@ const manualEntryOpen = ref(false)
 const manualCodesRaw = ref('')
 const unknownResolution = ref('')
 const copiedKeyId = ref(0)
+const supportMessageCopied = ref(false)
 const marketplaceName = computed(() => props.detail?.provider_code === 'ozon' ? 'Ozon' : 'Яндекс Маркет')
 const automationInProgress = computed(() => Boolean(props.detail?.automation_in_progress))
 
@@ -101,6 +103,15 @@ async function copyRevealedKey(item) {
   }, 1800)
 }
 
+async function copySupportMessage() {
+  if (!props.revealedSupportMessage || !navigator.clipboard) return
+  await navigator.clipboard.writeText(props.revealedSupportMessage)
+  supportMessageCopied.value = true
+  window.setTimeout(() => {
+    supportMessageCopied.value = false
+  }, 1800)
+}
+
 function closeOnEscape(event) {
   if (event.key === 'Escape' && !props.actionLoading) emit('close')
 }
@@ -116,7 +127,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
         <section class="fulfillment-card" role="dialog" aria-modal="true" aria-labelledby="fulfillment-title">
           <header class="fulfillment-card__header">
             <div>
-              <span>{{ automationInProgress ? 'Автоматическая выдача' : order.status === 'processing' ? 'Локальная подготовка' : 'Выдача ключа' }}</span>
+              <span>{{ automationInProgress ? 'Автоматическая выдача' : order.status === 'processing' ? 'Локальная подготовка' : 'Результат выдачи' }}</span>
               <h2 id="fulfillment-title">Заказ №{{ order.external_order_id }}</h2>
             </div>
             <button type="button" aria-label="Закрыть" :disabled="actionLoading" @click="emit('close')">
@@ -176,6 +187,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 <p v-else>Открытые коды загружаются только по отдельному запросу оператора. Отправка начнётся после отдельного подтверждения.</p>
               </div>
             </div>
+
+            <section v-if="detail.can_reveal_support_message" class="fulfillment-keys fulfillment-support-message">
+              <header>
+                <div class="fulfillment-keys__mark" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 3z" /><path d="M8 9h8M8 12h5" /></svg>
+                </div>
+                <div>
+                  <small>{{ detail.fulfillment_status === 'delivered' ? 'Выдано покупателю' : 'Подготовлено к выдаче' }}</small>
+                  <strong>{{ revealedSupportMessage ? 'Сообщение поддержки' : 'Сообщение хранится в Seller' }}</strong>
+                  <p>{{ revealedSupportMessage ? 'Точный отправленный текст открыт только в этом окне.' : 'Покажем сохранённый снимок только после явного нажатия.' }}</p>
+                </div>
+                <button v-if="!revealedSupportMessage" type="button" :disabled="revealLoading" @click="emit('reveal')">
+                  <span v-if="revealLoading" class="fulfillment-card__pulse fulfillment-card__pulse--small" aria-hidden="true" />
+                  <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></svg>
+                  {{ revealLoading ? 'Открываем…' : 'Показать сообщение' }}
+                </button>
+              </header>
+              <div v-if="revealedSupportMessage" class="fulfillment-support-message__body">
+                <p>{{ revealedSupportMessage }}</p>
+                <button type="button" @click="copySupportMessage">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+                  <span>{{ supportMessageCopied ? 'Скопировано' : 'Копировать' }}</span>
+                </button>
+              </div>
+              <p v-if="revealError" class="fulfillment-keys__error" role="alert">{{ revealError }}</p>
+            </section>
 
             <section v-if="detail.can_reveal_keys" class="fulfillment-keys">
               <header>
@@ -392,4 +429,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .fulfillment-card-enter-active,.fulfillment-card-leave-active { transition: opacity .2s ease; }.fulfillment-card-enter-active .fulfillment-card,.fulfillment-card-leave-active .fulfillment-card { transition: transform .22s ease,opacity .2s ease; }.fulfillment-card-enter-from,.fulfillment-card-leave-to { opacity: 0; }.fulfillment-card-enter-from .fulfillment-card,.fulfillment-card-leave-to .fulfillment-card { opacity: 0; transform: translateY(12px) scale(.985); }
 @keyframes fulfillment-spin { to { transform: rotate(360deg); } }
 @media (max-width:620px) { .fulfillment-backdrop { padding: 10px; }.fulfillment-card { max-height: calc(100vh - 20px); border-radius: 22px; }.fulfillment-card__header,.fulfillment-card__actions { padding-right: 18px; padding-left: 18px; }.fulfillment-product,.fulfillment-state,.fulfillment-metrics,.fulfillment-safety,.fulfillment-keys,.fulfillment-reconciliation,.fulfillment-feature-lock,.fulfillment-preparation,.fulfillment-card__error { margin-right: 18px; margin-left: 18px; }.fulfillment-metrics,.fulfillment-preparation__choices,.fulfillment-reconciliation__choices { grid-template-columns: 1fr; }.fulfillment-keys > header { grid-template-columns: 40px minmax(0,1fr); }.fulfillment-keys header > button { grid-column: 1 / -1; width: 100%; }.fulfillment-keys__list article { grid-template-columns: 1fr; }.fulfillment-keys__list button { justify-content: center; }.fulfillment-manual-entry { grid-template-columns: 1fr; }.fulfillment-reconciliation__confirm { align-items: stretch; flex-direction: column; }.fulfillment-reconciliation__confirm button { width: 100%; }.fulfillment-card__actions { align-items: stretch; flex-direction: column; }.fulfillment-action { width: 100%; } }
+.fulfillment-support-message__body { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 14px; margin: 14px 0 0; padding: 14px; border-top: 1px solid rgba(94,205,178,.15); border-radius: 13px; background: rgba(4,14,25,.58); }.fulfillment-support-message__body p { margin: 0; color: #dffff6; font: 11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; white-space: pre-wrap; overflow-wrap: anywhere; }.fulfillment-support-message__body button { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid rgba(104,171,190,.25); border-radius: 10px; color: #9fd6d2; background: rgba(32,67,84,.44); font-size: 9px; cursor: pointer; }.fulfillment-support-message__body button:hover { border-color: rgba(87,226,190,.5); color: #dffff6; }.fulfillment-support-message__body button svg { width: 14px; height: 14px; }
+@media (max-width:620px) { .fulfillment-support-message__body { grid-template-columns: 1fr; }.fulfillment-support-message__body button { width: 100%; } }
 </style>

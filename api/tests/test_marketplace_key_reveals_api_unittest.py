@@ -1,4 +1,4 @@
-"""Контракт точечного раскрытия ключей по явному действию оператора."""
+"""Контракт точечного раскрытия результата выдачи по явному действию оператора."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ class MarketplaceKeyRevealsApiTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"SELLER_KEY_POOL_SECRET": "s" * 32})
     def test_order_reveal_uses_only_reservations_of_exact_order_item(self) -> None:
-        psycopg = FakePsycopg([[(31, "KEY-ONE"), (32, "KEY-TWO")]])
+        psycopg = FakePsycopg([("pool", ""), [(31, "KEY-ONE"), (32, "KEY-TWO")]])
         app = self.mount(psycopg)
         endpoint = next(
             route.endpoint for route in app.routes
@@ -109,14 +109,41 @@ class MarketplaceKeyRevealsApiTests(unittest.TestCase):
         )
 
         self.assertEqual([item.code for item in result.items], ["KEY-ONE", "KEY-TWO"])
-        sql, params = psycopg.cursor.executions[0]
+        self.assertEqual(result.support_message, "")
+        sql, params = psycopg.cursor.executions[1]
         self.assertIn("reservation.state IN ('reserved','consumed')", sql)
         self.assertIn("item.external_order_id=%s", sql)
         self.assertIn("item.external_item_id=%s", sql)
         self.assertEqual(params[1:4], (7, "59942082307", "1162720619"))
 
+    def test_order_reveal_returns_exact_saved_support_message_without_decrypting_keys(self) -> None:
+        message = "Код: 11 22 33\nИнструкция: активируйте в кабинете."
+        psycopg = FakePsycopg([("support_message", message)])
+        app = self.mount(psycopg)
+        endpoint = next(
+            route.endpoint for route in app.routes
+            if route.path == "/marketplaces/orders/fulfillment/reveal"
+        )
+
+        result = endpoint(
+            payload=OrderKeysRevealIn(
+                connection_id=8,
+                external_order_id="60940029440",
+                external_item_id="60940029440",
+            ),
+            user=SimpleNamespace(user_id=9),
+        )
+
+        self.assertEqual(result.support_message, message)
+        self.assertEqual(result.items, [])
+        self.assertEqual(len(psycopg.cursor.executions), 1)
+        sql, params = psycopg.cursor.executions[0]
+        self.assertNotIn("pgp_sym_decrypt", sql)
+        self.assertIn("marketplace_connection.workspace_id=%s", sql)
+        self.assertEqual(params, (8, "60940029440", "60940029440", 4))
+
     @patch.dict("os.environ", {"SELLER_KEY_POOL_SECRET": "s" * 32})
-    def test_viewer_cannot_reveal_keys(self) -> None:
+    def test_viewer_cannot_reveal_fulfillment_result(self) -> None:
         app = self.mount(FakePsycopg([]), role_code="viewer")
         endpoint = next(
             route.endpoint for route in app.routes

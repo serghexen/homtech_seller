@@ -30,15 +30,26 @@ from domains.marketplace_read_api import (
 
 
 class MarketplaceReadApiTests(unittest.TestCase):
-    def test_order_list_exposes_stored_keys_independently_from_delivery_snapshot(self) -> None:
+    def test_order_list_exposes_stored_fulfillment_result(self) -> None:
         result = marketplace_order_from_row((
             3, "ozon", "ASAT", "04259716-0136-1", "5196324554", "17162", "5196324554",
             "PUBG", 1, "delivered", "delivered", "FBO", None, None,
-            datetime(2026, 8, 27, tzinfo=timezone.utc), True,
+            datetime(2026, 8, 27, tzinfo=timezone.utc), True, True,
         ))
 
         self.assertEqual(result.delivery_type, "FBO")
         self.assertTrue(result.has_fulfillment_keys)
+        self.assertTrue(result.has_fulfillment_result)
+
+    def test_order_list_marks_support_message_without_claiming_it_has_keys(self) -> None:
+        result = marketplace_order_from_row((
+            4, "yandex_market", "ASAT GAMES", "60940029440", "60940029440", "MRKT-GL4ZAXEY",
+            "MRKT-GL4ZAXEY", "PSN CHF", 1, "delivered", "DELIVERED", "DIGITAL", None, None,
+            datetime(2026, 8, 27, tzinfo=timezone.utc), False, True,
+        ))
+
+        self.assertFalse(result.has_fulfillment_keys)
+        self.assertTrue(result.has_fulfillment_result)
 
     def test_supplier_price_guard_is_internal_five_percent_ceiling(self) -> None:
         self.assertEqual(supplier_price_guard(Decimal("464.53")), Decimal("487.76"))

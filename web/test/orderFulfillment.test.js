@@ -21,7 +21,18 @@ test('delivered Ozon orders remain viewable when Seller stores their keys', () =
     status: 'delivered',
     delivery_type: 'FBO',
     has_fulfillment_keys: false,
+    has_fulfillment_result: false,
   }), false)
+})
+
+test('delivered support orders remain viewable when Seller stores their sent message', () => {
+  assert.equal(canOpenOrderFulfillment({
+    provider_code: 'yandex_market',
+    status: 'delivered',
+    delivery_type: 'DIGITAL',
+    has_fulfillment_keys: false,
+    has_fulfillment_result: true,
+  }), true)
 })
 
 test('processing digital orders open before keys are prepared', () => {

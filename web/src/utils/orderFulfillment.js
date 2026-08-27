@@ -8,5 +8,5 @@ export function canOpenOrderFulfillment(order, fallbackProviderCode = '') {
 
   const isProcessingDigital = order?.status === 'processing'
     && String(order?.delivery_type || '').trim().toUpperCase() === 'DIGITAL'
-  return isProcessingDigital || Boolean(order?.has_fulfillment_keys)
+  return isProcessingDigital || Boolean(order?.has_fulfillment_result || order?.has_fulfillment_keys)
 }

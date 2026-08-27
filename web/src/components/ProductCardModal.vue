@@ -882,7 +882,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                             <strong>Заказ №{{ order.external_order_id }}</strong>
                             <div class="product-order__actions">
                               <span class="product-order__status" :class="`product-order__status--${order.status}`">{{ orderStatusLabel(order.status) }}</span>
-                              <button v-if="canOpenOrderFulfillment(order, item.provider_code)" type="button" :title="order.status === 'processing' ? 'Открыть выдачу' : 'Посмотреть выданный ключ'" :aria-label="`Открыть выдачу заказа ${order.external_order_id}`" @click="emit('open-order-fulfillment', order)">
+                              <button v-if="canOpenOrderFulfillment(order, item.provider_code)" type="button" :title="order.status === 'processing' ? 'Открыть выдачу' : 'Посмотреть выдачу'" :aria-label="`Открыть выдачу заказа ${order.external_order_id}`" @click="emit('open-order-fulfillment', order)">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v5h5M10 12h5M10 16h5" /></svg>
                               </button>
                             </div>

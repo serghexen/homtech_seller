@@ -193,6 +193,7 @@ class MarketplaceOrderItemOut(BaseModel):
     provider_status: str = ""
     delivery_type: str = ""
     has_fulfillment_keys: bool = False
+    has_fulfillment_result: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
     synced_at: datetime
@@ -212,6 +213,7 @@ def marketplace_order_from_row(row: tuple[Any, ...]) -> MarketplaceOrderItemOut:
         sku=str(row[6] or ""), title=str(row[7] or ""), quantity=int(row[8] or 0), status=str(row[9]),
         provider_status=str(row[10] or ""), delivery_type=str(row[11] or ""), created_at=row[12],
         updated_at=row[13], synced_at=row[14], has_fulfillment_keys=bool(row[15]) if len(row) > 15 else False,
+        has_fulfillment_result=bool(row[16]) if len(row) > 16 else bool(row[15]) if len(row) > 15 else False,
     )
 
 
@@ -1143,7 +1145,22 @@ def mount_marketplace_read_routes(
                              WHERE fulfillment.connection_id=item.connection_id
                                AND fulfillment.external_order_id=item.external_order_id
                                AND fulfillment.external_item_id=item.external_item_id
-                           ) AS has_fulfillment_keys
+                           ) AS has_fulfillment_keys,
+                           EXISTS (
+                             SELECT 1
+                             FROM seller.order_fulfillments AS fulfillment
+                             WHERE fulfillment.connection_id=item.connection_id
+                               AND fulfillment.external_order_id=item.external_order_id
+                               AND fulfillment.external_item_id=item.external_item_id
+                               AND (
+                                 btrim(COALESCE(fulfillment.support_message_snapshot, ''))<>''
+                                 OR EXISTS (
+                                   SELECT 1 FROM seller.fulfillment_key_reservations AS reservation
+                                   WHERE reservation.fulfillment_id=fulfillment.id
+                                     AND reservation.state IN ('reserved','consumed')
+                                 )
+                               )
+                           ) AS has_fulfillment_result
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE connection.workspace_id=%s AND item.connection_id=%s
@@ -1221,7 +1238,22 @@ def mount_marketplace_read_routes(
                              WHERE fulfillment.connection_id=item.connection_id
                                AND fulfillment.external_order_id=item.external_order_id
                                AND fulfillment.external_item_id=item.external_item_id
-                           ) AS has_fulfillment_keys
+                           ) AS has_fulfillment_keys,
+                           EXISTS (
+                             SELECT 1
+                             FROM seller.order_fulfillments AS fulfillment
+                             WHERE fulfillment.connection_id=item.connection_id
+                               AND fulfillment.external_order_id=item.external_order_id
+                               AND fulfillment.external_item_id=item.external_item_id
+                               AND (
+                                 btrim(COALESCE(fulfillment.support_message_snapshot, ''))<>''
+                                 OR EXISTS (
+                                   SELECT 1 FROM seller.fulfillment_key_reservations AS reservation
+                                   WHERE reservation.fulfillment_id=fulfillment.id
+                                     AND reservation.state IN ('reserved','consumed')
+                                 )
+                               )
+                           ) AS has_fulfillment_result
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE {where}
