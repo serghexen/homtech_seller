@@ -130,7 +130,7 @@ const stockPublicationDetail = computed(() => {
     && Number(props.stockPublication.target_stock) !== Number(props.stockPublication.requested_stock)) {
     return `Задано ${props.stockPublication.requested_stock}, дневной лимит разрешил опубликовать ${props.stockPublication.target_stock}`
   }
-  if (props.stockPublication.state === 'succeeded') return 'Яндекс Маркет подтвердил приём значения'
+  if (props.stockPublication.state === 'succeeded') return `${props.providerName} подтвердил приём значения`
   return `Запрошено: ${props.stockPublication.requested_stock}`
 })
 const instructionLength = computed(() => settingsForm.activation_instruction.length)
@@ -429,7 +429,7 @@ function shiftKeyPoolExpiry(monthsToAdd) {
 }
 
 function canOpenOrderFulfillment(order) {
-  return props.item.provider_code === 'yandex_market'
+  return ['yandex_market', 'ozon'].includes(props.item.provider_code)
     && String(order?.delivery_type || '').trim().toUpperCase() === 'DIGITAL'
 }
 
@@ -537,11 +537,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           <small>{{ settingsDirty ? 'Сохраните значение перед публикацией' : 'Сохранено в Seller и готово к отправке' }}</small>
                         </label>
                         <button
-                          v-if="item.provider_code === 'yandex_market'"
+                          v-if="['yandex_market', 'ozon'].includes(item.provider_code)"
                           class="stock-publish__button"
                           type="button"
                           :disabled="!canPublishStock"
-                          :title="settingsDirty ? 'Сначала сохраните изменения в Seller' : 'Принудительно отправить заданный остаток в Яндекс Маркет'"
+                          :title="settingsDirty ? 'Сначала сохраните изменения в Seller' : `Принудительно отправить заданный остаток в ${providerName}`"
                           @click="requestStockPublication"
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
@@ -566,8 +566,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         <svg viewBox="0 0 24 24"><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
                       </span>
                       <div>
-                        <strong id="stock-publish-title">Отправить остаток {{ stockTarget }} в Яндекс Маркет?</strong>
-                        <p>Значение уйдёт через защищённую очередь. Если задан дневной лимит, Seller может опубликовать меньше.</p>
+                        <strong id="stock-publish-title">Отправить остаток {{ stockTarget }} в {{ providerName }}?</strong>
+                        <p>Значение уйдёт через защищённую очередь.<template v-if="item.provider_code === 'yandex_market'"> Если задан дневной лимит, Seller может опубликовать меньше.</template></p>
                       </div>
                       <div class="stock-publish__confirm-actions">
                         <button type="button" @click="stockPublishConfirmation = false">Отмена</button>

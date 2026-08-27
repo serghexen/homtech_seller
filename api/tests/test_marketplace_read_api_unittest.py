@@ -273,6 +273,27 @@ class MarketplaceReadApiTests(unittest.TestCase):
         self.assertEqual(items[0]["normalized_status"], "delivered")
         self.assertEqual(items[0]["sku"], "5204479032")
 
+    def test_ozon_digital_order_uses_required_code_quantity_and_deadline(self) -> None:
+        items = normalize_order_items(
+            "ozon",
+            {
+                "posting_number": "0201103974-0044-1",
+                "status": "awaiting_packaging",
+                "__marketplace_source": "DIGITAL",
+                "waiting_deadline_for_digital_code": "2026-08-27T17:30:00Z",
+                "products": [{
+                    "product_id": 17162,
+                    "sku": 5204479032,
+                    "offer_id": "PSN-250",
+                    "quantity": 1,
+                    "required_qty_for_digital_code": 3,
+                }],
+            },
+        )
+        self.assertEqual(items[0]["quantity"], 3)
+        self.assertEqual(items[0]["normalized_status"], "processing")
+        self.assertEqual(items[0]["fulfillment_deadline_at"].isoformat(), "2026-08-27T17:30:00+00:00")
+
     def test_yandex_order_expands_items_and_normalizes_status(self) -> None:
         # Проверяет единый статус Seller для карточки Яндекс Маркета с несколькими полями ответа.
         items = normalize_order_items(

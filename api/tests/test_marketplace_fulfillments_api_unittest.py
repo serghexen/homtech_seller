@@ -80,7 +80,7 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         source = inspect.getsource(mount_marketplace_fulfillment_routes)
         self.assertIn("item.delivery_type", source)
         self.assertIn("upper() != \"DIGITAL\"", source)
-        self.assertIn("только для цифрового DBS-заказа", source)
+        self.assertIn("только для цифрового заказа", source)
 
     @patch.dict("os.environ", {"SELLER_MANUAL_FULFILLMENT_ENABLED": "false"})
     def test_kill_switch_rejects_direct_prepare_and_release_without_database_access(self) -> None:

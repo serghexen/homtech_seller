@@ -7,6 +7,7 @@ from hashlib import sha256
 import os
 
 from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
+from domains.ozon_stock_queue import enqueue_ozon_stock_publication
 
 
 @dataclass(frozen=True)
@@ -34,22 +35,26 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT external_item_id, offer_id, quantity, normalized_status, delivery_type
-            FROM seller.order_items
-            WHERE connection_id=%s AND external_order_id=%s
-            ORDER BY external_item_id
-            FOR UPDATE
+            SELECT item.external_item_id, item.offer_id, item.quantity,
+                   item.normalized_status, item.delivery_type, market.provider_code
+            FROM seller.order_items AS item
+            JOIN seller.marketplace_connections AS market ON market.id=item.connection_id
+            WHERE item.connection_id=%s AND item.external_order_id=%s
+            ORDER BY item.external_item_id
+            FOR UPDATE OF item
             """,
             (connection_id, str(external_order_id)),
         )
         order_items = cursor.fetchall()
-        for external_item_id, offer_id, quantity, normalized_status, delivery_type in order_items:
+        for order_item in order_items:
+            external_item_id, offer_id, quantity, normalized_status, delivery_type, *provider_values = order_item
+            provider_code = str(provider_values[0] or "yandex_market") if provider_values else "yandex_market"
             item_id = str(external_item_id)
             product_id = str(offer_id or "").strip()
             item_quantity = max(0, int(quantity or 0))
             market_state = str(normalized_status or "problem")
             is_digital = str(delivery_type or "").strip().upper() == "DIGITAL"
-            reservation_ref = f"seller:yandex_market:{connection_id}:{external_order_id}:{item_id}"
+            reservation_ref = f"seller:{provider_code}:{connection_id}:{external_order_id}:{item_id}"
 
             if market_state == "processing" and is_digital and product_id and item_quantity > 0:
                 cursor.execute(
@@ -125,7 +130,10 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
                     delivery_source=None if target_status == "delivered" else "external",
                 )
                 if target_status == "delivered":
-                    enqueue_yandex_stock_publication(cursor, fulfillment_id=fulfillment_id)
+                    if provider_code == "yandex_market":
+                        enqueue_yandex_stock_publication(cursor, fulfillment_id=fulfillment_id)
+                    elif provider_code == "ozon":
+                        enqueue_ozon_stock_publication(cursor, fulfillment_id=fulfillment_id)
             elif not is_digital and current_status in {
                 "pending", "reserved", "manual_required", "supplier_required", "failed",
             }:
@@ -333,7 +341,7 @@ def prepare_manual_keys(
             return ReservationResult(int(fulfillment_id), "missing", reason="Выдача не найдена")
         row_id, connection_id, offer_id = int(row[0]), int(row[1]), str(row[2])
         quantity, current_status, reservation_ref = int(row[3]), str(row[4]), str(row[5])
-        if current_status not in {"pending", "manual_required"}:
+        if current_status not in {"pending", "manual_required", "supplier_required"}:
             return ReservationResult(row_id, "skipped", reason=f"Статус {current_status} не допускает ручной комплект")
         if len(codes) != quantity:
             return ReservationResult(row_id, "skipped", reason=f"Для позиции требуется ключей: {quantity}")

@@ -21,6 +21,16 @@ const manualEntryOpen = ref(false)
 const manualCodesRaw = ref('')
 const unknownResolution = ref('')
 const copiedKeyId = ref(0)
+const marketplaceName = computed(() => props.detail?.provider_code === 'ozon' ? 'Ozon' : 'Яндекс Маркет')
+
+function formatDeadline(value) {
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(parsed)
+}
 
 watch(() => props.detail?.outbound_state, () => {
   sendConfirmation.value = false
@@ -65,14 +75,14 @@ const preparedCount = computed(() => props.detail?.delivery_source === 'support_
   ? Number(props.detail?.quantity || 0)
   : Number(props.detail?.reserved_count || 0))
 const outboundPresentation = computed(() => {
-  if (props.detail?.fulfillment_status === 'delivered') return 'Яндекс подтвердил доставку. Зарезервированный комплект окончательно списан из пула.'
+  if (props.detail?.fulfillment_status === 'delivered') return `${marketplaceName.value} подтвердил доставку. Зарезервированный комплект окончательно списан из пула.`
   return ({
   queued: 'Отправка ожидает worker. Пока она не началась, её можно отменить.',
   preparing: 'Worker проверяет комплект и инструкцию перед внешним запросом.',
   sending: 'Запрос выполняется. Автоматический откат и повтор уже запрещены.',
-  submitted: 'Яндекс принял комплект. Ожидаем подтверждение заказа уведомлением или сверкой.',
-  unknown: 'Нельзя отправлять повторно: сначала сверьте заказ в кабинете Яндекса.',
-  failed: props.detail?.outbound_last_error || 'Яндекс однозначно отклонил запрос. Комплект сохранён в резерве.',
+  submitted: `${marketplaceName.value} принял комплект. Ожидаем подтверждение заказа при следующей сверке.`,
+  unknown: `Нельзя отправлять повторно: сначала сверьте заказ в кабинете ${marketplaceName.value}.`,
+  failed: props.detail?.outbound_last_error || `${marketplaceName.value} однозначно отклонил запрос. Комплект сохранён в резерве.`,
   cancelled: 'Постановка в очередь отменена. Комплект остался в резерве.',
   }[props.detail?.outbound_state] || '')
 })
@@ -118,9 +128,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
             <section class="fulfillment-product" :class="{ 'fulfillment-product--view': viewOnly }">
               <div v-if="!viewOnly" class="fulfillment-product__index">{{ String(detail.quantity).padStart(2, '0') }}</div>
               <div>
-                <small>{{ detail.store_name }} · Яндекс Маркет</small>
+                <small>{{ detail.store_name }} · {{ marketplaceName }}</small>
                 <h3>{{ detail.title || order.title || 'Товар без названия' }}</h3>
                 <p>SKU: <strong>{{ detail.offer_id || order.offer_id || order.sku || '—' }}</strong></p>
+                <p v-if="detail.fulfillment_deadline_at">Код ожидается до: <strong>{{ formatDeadline(detail.fulfillment_deadline_at) }}</strong></p>
               </div>
             </section>
 
@@ -193,7 +204,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 <div class="fulfillment-reconciliation__mark">!</div>
                 <div>
                   <small>Ручная сверка</small>
-                  <strong>Проверьте заказ в кабинете Яндекса</strong>
+                  <strong>Проверьте заказ в кабинете {{ marketplaceName }}</strong>
                   <p>Seller не получил однозначный ответ и не станет повторять отправку самостоятельно.</p>
                 </div>
               </header>
@@ -205,7 +216,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                   @click="unknownResolution = 'accepted'"
                 >
                   <span class="fulfillment-reconciliation__icon">✓</span>
-                  <span><strong>Данные получены</strong><small>Яндекс показывает переданный ключ</small></span>
+                  <span><strong>Данные получены</strong><small>{{ marketplaceName }} показывает переданный ключ</small></span>
                 </button>
                 <button
                   type="button"
@@ -218,7 +229,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 </button>
               </div>
               <div v-if="unknownResolution" class="fulfillment-reconciliation__confirm">
-                <p v-if="unknownResolution === 'accepted'">Комплект останется заблокированным. Seller будет ожидать подтверждение доставки от Яндекса.</p>
+                <p v-if="unknownResolution === 'accepted'">Комплект останется заблокированным. Seller будет ожидать подтверждение доставки от {{ marketplaceName }}.</p>
                 <p v-else>Комплект вернётся в защищённый резерв. Повторная отправка всё равно потребует отдельного подтверждения.</p>
                 <button
                   type="button"
@@ -264,7 +275,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                   {{ actionLoading ? 'Защищаем…' : 'Защифровать и закрепить' }}
                 </button>
               </div>
-              <p>Подготовка не отправляет данные в Яндекс. Перед отправкой появится отдельное подтверждение.</p>
+              <p>Подготовка не отправляет данные в {{ marketplaceName }}. Перед отправкой появится отдельное подтверждение.</p>
             </section>
 
             <p v-if="error" class="fulfillment-card__error">{{ error }}</p>
@@ -275,7 +286,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 <p v-else-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
                 <p v-else-if="detail.can_prepare_manual">Выберите источник выше. После подготовки комплект можно будет проверить и отправить.</p>
                 <p v-else-if="detail.can_send && !sendConfirmation">Комплект готов. Отправка — отдельное необратимое действие.</p>
-                <p v-else-if="detail.can_send">Проверьте заказ: после подтверждения worker передаст комплект в Яндекс.</p>
+                <p v-else-if="detail.can_send">Проверьте заказ: после подтверждения worker передаст комплект в {{ marketplaceName }}.</p>
                 <p v-else-if="detail.can_cancel_send">Задание ещё не взято worker-ом, поэтому его можно безопасно отменить.</p>
                 <p v-else-if="detail.can_release">Резерв можно безопасно снять, пока отправка не поставлена в очередь.</p>
                 <p v-else>Для этого состояния локальные действия недоступны.</p>
@@ -313,7 +324,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                 :disabled="actionLoading"
                 @click="sendConfirmation = true"
               >
-                Отправить в Яндекс
+                Отправить в {{ marketplaceName }}
               </button>
               <button
                 v-else-if="detail.can_release"

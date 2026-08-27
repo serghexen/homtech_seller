@@ -13,6 +13,8 @@ import psycopg
 from fastapi import HTTPException
 
 from domains.marketplace_sync_service import execute_sync_job, record_connection_error
+from domains.ozon_outbound import build_ozon_outbound_processor
+from domains.ozon_stock_outbound import build_ozon_stock_outbound_processor
 from domains.supplier_fulfillment import build_supplier_fulfillment_processor
 from domains.yandex_market_webhook_processor import build_yandex_market_webhook_processor
 from domains.yandex_market_webhooks_api import webhook_processing_enabled
@@ -72,6 +74,48 @@ def advisory_lock_key(connection_id: int) -> int:
 def retry_delay_seconds(attempt_count: int) -> int:
     # Короткий exponential backoff ограничивает нагрузку и не оставляет пользователя ждать часами.
     return min(15 * (2 ** max(0, attempt_count - 1)), 300)
+
+
+def enqueue_due_ozon_order_jobs(connection, limit: int = 20) -> int:
+    """Ставит read-only polling Ozon в общую очередь без внешних действий."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, workspace_id, orders_poll_interval_seconds
+            FROM seller.marketplace_connections
+            WHERE provider_code='ozon' AND status='active'
+              AND orders_polling_enabled=true AND next_orders_poll_at <= now()
+            ORDER BY next_orders_poll_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT %s
+            """,
+            (max(1, min(int(limit), 100)),),
+        )
+        rows = cursor.fetchall()
+        queued = 0
+        for connection_id, workspace_id, interval_seconds in rows:
+            cursor.execute(
+                """
+                UPDATE seller.marketplace_connections
+                SET next_orders_poll_at=now() + (%s * interval '1 second'), updated_at=now()
+                WHERE id=%s
+                """,
+                (int(interval_seconds), int(connection_id)),
+            )
+            cursor.execute(
+                """
+                INSERT INTO seller.marketplace_sync_jobs(workspace_id, connection_id, sync_kind)
+                VALUES (%s,%s,'orders')
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                (int(workspace_id), int(connection_id)),
+            )
+            if cursor.fetchone():
+                queued += 1
+    connection.commit()
+    return queued
 
 
 def is_transient_sync_error(exc: Exception) -> bool:
@@ -269,7 +313,9 @@ def run_worker() -> int:
         processing_enabled=webhook_processing_enabled,
     )
     outbound = build_yandex_outbound_processor(database_url=database_url, psycopg=psycopg)
+    ozon_outbound = build_ozon_outbound_processor(database_url=database_url, psycopg=psycopg)
     stock_outbound = build_yandex_stock_outbound_processor(database_url=database_url, psycopg=psycopg)
+    ozon_stock_outbound = build_ozon_stock_outbound_processor(database_url=database_url, psycopg=psycopg)
     fulfillment = build_supplier_fulfillment_processor(database_url=database_url, psycopg=psycopg)
     print("Seller worker started", flush=True)
     while not stopping:
@@ -289,22 +335,40 @@ def run_worker() -> int:
             processed_outbound = outbound.process_pending_jobs(outbound_batch_size())
             if processed_outbound:
                 print(f"Processed Yandex outbound jobs: {processed_outbound}", flush=True)
+            requeued_ozon, unknown_ozon = ozon_outbound.recover_stale()
+            if requeued_ozon or unknown_ozon:
+                print(f"Recovered Ozon outbound jobs: requeued={requeued_ozon}, unknown={unknown_ozon}", flush=True)
+            processed_ozon_outbound = ozon_outbound.process_pending_jobs(outbound_batch_size())
+            if processed_ozon_outbound:
+                print(f"Processed Ozon outbound jobs: {processed_ozon_outbound}", flush=True)
             recovered_stock = stock_outbound.recover_stale()
             if recovered_stock:
                 print(f"Recovered Yandex stock jobs: {recovered_stock}", flush=True)
             processed_stock = stock_outbound.process_pending_jobs(stock_outbound_batch_size())
             if processed_stock:
                 print(f"Processed Yandex stock jobs: {processed_stock}", flush=True)
+            recovered_ozon_stock = ozon_stock_outbound.recover_stale()
+            if recovered_ozon_stock:
+                print(f"Recovered Ozon stock jobs: {recovered_ozon_stock}", flush=True)
+            processed_ozon_stock = ozon_stock_outbound.process_pending_jobs(stock_outbound_batch_size())
+            if processed_ozon_stock:
+                print(f"Processed Ozon stock jobs: {processed_ozon_stock}", flush=True)
             processed_webhooks = process_yandex_webhook.process_pending_events(webhook_batch_size())
             if processed_webhooks:
                 print(f"Processed Yandex webhook events: {processed_webhooks}", flush=True)
             with psycopg.connect(database_url()) as lock_connection:
+                scheduled_ozon = enqueue_due_ozon_order_jobs(lock_connection)
+                if scheduled_ozon:
+                    print(f"Scheduled Ozon order polls: {scheduled_ozon}", flush=True)
                 recovered = recover_stale_jobs(lock_connection)
                 if recovered:
                     print(f"Recovered stale sync jobs: {recovered}", flush=True)
                 job = claim_next_job(lock_connection)
                 if not job:
-                    if not processed_fulfillments and not processed_webhooks and not processed_outbound and not processed_stock:
+                    if not any((
+                        processed_fulfillments, processed_webhooks, processed_outbound, processed_stock,
+                        processed_ozon_outbound, processed_ozon_stock,
+                    )):
                         time.sleep(poll_seconds())
                     continue
                 try:
@@ -314,7 +378,9 @@ def run_worker() -> int:
                 except Exception as exc:
                     message = error_text(exc)
                     try:
-                        record_connection_error(database_url, psycopg, job.connection_id, message)
+                        record_connection_error(
+                            database_url, psycopg, job.connection_id, message, sync_kind=job.sync_kind,
+                        )
                     except Exception as record_exc:
                         print(f"Could not record connection error for job {job.id}: {record_exc}", flush=True)
                     state = fail_job(lock_connection, job, exc)

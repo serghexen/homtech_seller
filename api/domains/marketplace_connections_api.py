@@ -51,12 +51,22 @@ class MarketplaceConnectionOut(BaseModel):
     last_checked_at: datetime | None = None
     last_successful_sync_at: datetime | None = None
     last_error: str = ""
+    orders_polling_enabled: bool = False
+    orders_poll_interval_seconds: int = 60
+    next_orders_poll_at: datetime | None = None
+    last_orders_poll_at: datetime | None = None
+    last_orders_poll_error: str = ""
     created_at: datetime
 
 
 class MarketplaceConnectionListOut(BaseModel):
     workspace_name: str
     items: list[MarketplaceConnectionOut]
+
+
+class MarketplaceOrdersPollingIn(BaseModel):
+    enabled: bool
+    interval_seconds: int = Field(default=60, ge=10, le=3600)
 
 
 def mount_marketplace_connection_routes(
@@ -95,7 +105,12 @@ def mount_marketplace_connection_routes(
             last_checked_at=row[8],
             last_error=str(row[9] or ""),
             last_successful_sync_at=row[10],
-            created_at=row[11],
+            orders_polling_enabled=bool(row[11]),
+            orders_poll_interval_seconds=int(row[12] or 60),
+            next_orders_poll_at=row[13],
+            last_orders_poll_at=row[14],
+            last_orders_poll_error=str(row[15] or ""),
+            created_at=row[16],
         )
 
     def workspace_for_user(connection, user: AuthenticatedUser):
@@ -115,7 +130,9 @@ def mount_marketplace_connection_routes(
                     """
                     SELECT id, provider_code, display_name, client_id, business_id, campaign_id,
                            token_suffix, status, last_checked_at, last_error,
-                           last_successful_sync_at, created_at
+                           last_successful_sync_at, orders_polling_enabled,
+                           orders_poll_interval_seconds, next_orders_poll_at,
+                           last_orders_poll_at, last_orders_poll_error, created_at
                     FROM seller.marketplace_connections
                     WHERE workspace_id=%s
                     ORDER BY created_at DESC, id DESC
@@ -196,7 +213,9 @@ def mount_marketplace_connection_routes(
                         updated_at=now()
                     RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
                               token_suffix, status, last_checked_at, last_error,
-                              last_successful_sync_at, created_at
+                              last_successful_sync_at, orders_polling_enabled,
+                              orders_poll_interval_seconds, next_orders_poll_at,
+                              last_orders_poll_at, last_orders_poll_error, created_at
                     """,
                     (
                         seller_user.workspace_id,
@@ -230,13 +249,53 @@ def mount_marketplace_connection_routes(
                     WHERE id=%s AND workspace_id=%s
                     RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
                               token_suffix, status, last_checked_at, last_error,
-                              last_successful_sync_at, created_at
+                              last_successful_sync_at, orders_polling_enabled,
+                              orders_poll_interval_seconds, next_orders_poll_at,
+                              last_orders_poll_at, last_orders_poll_error, created_at
                     """,
                     (connection_id, seller_user.workspace_id),
                 )
                 row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Подключенный магазин не найден")
+        return connection_out(row)
+
+    @app.post(
+        "/marketplaces/connections/{connection_id}/orders-polling",
+        response_model=MarketplaceConnectionOut,
+    )
+    def configure_orders_polling(
+        connection_id: int,
+        payload: MarketplaceOrdersPollingIn,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceConnectionOut:
+        """Меняет read-only polling Ozon без рестарта приложения."""
+
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE seller.marketplace_connections
+                    SET orders_polling_enabled=%s, orders_poll_interval_seconds=%s,
+                        next_orders_poll_at=CASE WHEN %s THEN now() ELSE next_orders_poll_at END,
+                        last_orders_poll_error=CASE WHEN %s THEN '' ELSE last_orders_poll_error END,
+                        updated_at=now()
+                    WHERE id=%s AND workspace_id=%s AND provider_code='ozon'
+                    RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
+                              token_suffix, status, last_checked_at, last_error,
+                              last_successful_sync_at, orders_polling_enabled,
+                              orders_poll_interval_seconds, next_orders_poll_at,
+                              last_orders_poll_at, last_orders_poll_error, created_at
+                    """,
+                    (
+                        payload.enabled, payload.interval_seconds, payload.enabled, payload.enabled,
+                        connection_id, seller_user.workspace_id,
+                    ),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Подключенный магазин Ozon не найден")
         return connection_out(row)
 
     @app.post("/marketplaces/connections/{connection_id}/enable", response_model=MarketplaceConnectionOut)
@@ -287,7 +346,9 @@ def mount_marketplace_connection_routes(
                     WHERE id=%s AND workspace_id=%s
                     RETURNING id, provider_code, display_name, client_id, business_id, campaign_id,
                               token_suffix, status, last_checked_at, last_error,
-                              last_successful_sync_at, created_at
+                              last_successful_sync_at, orders_polling_enabled,
+                              orders_poll_interval_seconds, next_orders_poll_at,
+                              last_orders_poll_at, last_orders_poll_error, created_at
                     """,
                     (connection_id, workspace_id),
                 )

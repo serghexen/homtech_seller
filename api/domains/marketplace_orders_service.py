@@ -68,7 +68,10 @@ def normalize_marketplace_order_status(*, provider_code: str, status: str, subst
             return "cancelled"
         if normalized_status in {"delivering", "in_delivery"}:
             return "in_delivery"
-        if normalized_status in {"awaiting_deliver", "awaiting_delivery", "awaiting_registration", "accepted"}:
+        if normalized_status in {
+            "awaiting_deliver", "awaiting_delivery", "awaiting_registration", "awaiting_packaging",
+            "awaiting_digital_code", "awaiting_code", "accepted",
+        }:
             return "processing"
         return "problem"
     return "problem"

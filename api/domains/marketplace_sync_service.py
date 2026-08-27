@@ -29,7 +29,8 @@ def load_active_connection(connection, connection_id: int) -> tuple[Any, ...]:
         cursor.execute(
             """
             SELECT id, provider_code, display_name, client_id, business_id, campaign_id,
-                   pgp_sym_decrypt(token_ciphertext, %s), last_successful_sync_at
+                   pgp_sym_decrypt(token_ciphertext, %s), last_successful_sync_at,
+                   last_orders_poll_at
             FROM seller.marketplace_connections
             WHERE id=%s AND status='active'
             """,
@@ -43,7 +44,7 @@ def load_active_connection(connection, connection_id: int) -> tuple[Any, ...]:
 
 def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
     # Атомарно обновляет полный снимок и отличает исчезнувшие карточки от штатного архива маркетплейса.
-    connection_id, provider_code, _name, client_id, business_id, campaign_id, token, _last_sync = connection_row
+    connection_id, provider_code, _name, client_id, business_id, campaign_id, token, _last_sync, *_rest = connection_row
     rows = fetch_marketplace_catalog(
         provider_code=str(provider_code),
         token=str(token),
@@ -117,14 +118,18 @@ def sync_orders_connection(
     connection, connection_row: tuple[Any, ...], *, sync_started_at: datetime,
 ) -> int:
     # Использует сохранённый watermark и записывает позиции идемпотентно до его продвижения.
-    connection_id, provider_code, _name, client_id, business_id, campaign_id, token, last_successful_sync_at = connection_row
+    connection_id, provider_code, _name, client_id, business_id, campaign_id, token, last_successful_sync_at, *extra = connection_row
+    # Каталог и заказы синхронизируются независимо. Для Ozon используем отдельный
+    # watermark polling-а, иначе обновление каталога может пропустить новый заказ.
+    last_orders_poll_at = extra[0] if extra else None
+    order_watermark = last_orders_poll_at if str(provider_code) == "ozon" else last_successful_sync_at
     rows = fetch_marketplace_orders(
         provider_code=str(provider_code),
         token=str(token),
         client_id=str(client_id or ""),
         business_id=int(business_id) if str(business_id or "").isdigit() else None,
         campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
-        synced_after=last_successful_sync_at if isinstance(last_successful_sync_at, datetime) else None,
+        synced_after=order_watermark if isinstance(order_watermark, datetime) else None,
         synced_before=sync_started_at,
     )
     saved_items = save_order_snapshots(
@@ -133,11 +138,13 @@ def sync_orders_connection(
         provider_code=str(provider_code),
         rows=rows,
     )
-    if str(provider_code) == "yandex_market":
-        # Polling остаётся страховочной сеткой: пропущенный webhook не должен оставить резерв у отменённого заказа.
+    if str(provider_code) in {"yandex_market", "ozon"}:
+        # Для Яндекса polling страхует webhook, а для Ozon является основным источником цифровых заказов.
         seen_order_ids: set[str] = set()
         for row in rows:
-            order_id = str(row.get("orderId") or row.get("id") or "").strip() if isinstance(row, dict) else ""
+            order_id = str(
+                row.get("orderId") or row.get("posting_number") or row.get("id") or ""
+            ).strip() if isinstance(row, dict) else ""
             if not order_id or order_id in seen_order_ids:
                 continue
             seen_order_ids.add(order_id)
@@ -164,13 +171,29 @@ def save_order_snapshots(
     ]
     with connection.cursor() as cursor:
         for item, raw_payload in normalized_rows:
+            if provider_code == "ozon":
+                # Политики Seller привязаны к Ozon product_id, тогда как заказ несёт offer_id/SKU.
+                cursor.execute(
+                    """
+                    SELECT external_product_id
+                    FROM seller.catalog_items
+                    WHERE connection_id=%s
+                      AND (offer_id=%s OR sku=%s)
+                    ORDER BY CASE WHEN offer_id=%s THEN 0 ELSE 1 END, external_product_id
+                    LIMIT 1
+                    """,
+                    (connection_id, item["offer_id"], item["sku"], item["offer_id"]),
+                )
+                product_row = cursor.fetchone()
+                if product_row:
+                    item = {**item, "offer_id": str(product_row[0])}
             cursor.execute(
                 """
                 INSERT INTO seller.order_items(
                     connection_id, external_order_id, external_item_id, offer_id, sku, title, quantity,
                     provider_status, provider_substatus, normalized_status, delivery_type,
-                    created_at, updated_at, raw_payload, synced_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                    created_at, updated_at, fulfillment_deadline_at, raw_payload, synced_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
                 ON CONFLICT (connection_id, external_order_id, external_item_id) DO UPDATE SET
                     offer_id=EXCLUDED.offer_id, sku=EXCLUDED.sku, title=EXCLUDED.title,
                     quantity=EXCLUDED.quantity, provider_status=EXCLUDED.provider_status,
@@ -178,6 +201,7 @@ def save_order_snapshots(
                     delivery_type=EXCLUDED.delivery_type,
                     created_at=COALESCE(EXCLUDED.created_at, seller.order_items.created_at),
                     updated_at=COALESCE(EXCLUDED.updated_at, seller.order_items.updated_at),
+                    fulfillment_deadline_at=EXCLUDED.fulfillment_deadline_at,
                     raw_payload=EXCLUDED.raw_payload, synced_at=now()
                 """,
                 (
@@ -194,6 +218,7 @@ def save_order_snapshots(
                     item["delivery_type"],
                     item["created_at"],
                     item["updated_at"],
+                    item.get("fulfillment_deadline_at"),
                     json.dumps(raw_payload, ensure_ascii=False),
                 ),
             )
@@ -213,24 +238,30 @@ def mark_connection_success(
                     WHEN %s='orders' THEN %s
                     ELSE last_successful_sync_at
                 END,
+                last_orders_poll_at=CASE WHEN %s='orders' THEN now() ELSE last_orders_poll_at END,
+                last_orders_poll_error=CASE WHEN %s='orders' THEN '' ELSE last_orders_poll_error END,
                 updated_at=now()
             WHERE id=%s
             """,
-            (sync_kind, sync_started_at, connection_id),
+            (sync_kind, sync_started_at, sync_kind, sync_kind, connection_id),
         )
 
 
-def record_connection_error(database_url: Callable[[], str], psycopg, connection_id: int, message: str) -> None:
+def record_connection_error(
+    database_url: Callable[[], str], psycopg, connection_id: int, message: str, *, sync_kind: str = "",
+) -> None:
     # Ошибка задания сохраняется отдельно: неуспешная транзакция снимка уже откатилась.
     with psycopg.connect(database_url()) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 UPDATE seller.marketplace_connections
-                SET last_error=%s, last_checked_at=now(), updated_at=now()
+                SET last_error=%s, last_checked_at=now(),
+                    last_orders_poll_error=CASE WHEN %s='orders' THEN %s ELSE last_orders_poll_error END,
+                    updated_at=now()
                 WHERE id=%s
                 """,
-                (message[:1000], connection_id),
+                (message[:1000], sync_kind, message[:1000], connection_id),
             )
 
 

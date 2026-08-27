@@ -1,0 +1,299 @@
+"""Долговечная отправка цифровых кодов в Ozon без слепых повторов."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+import urllib.error
+import urllib.request
+from uuid import UUID
+
+from domains.marketplace_connection_verification import OZON_SELLER_BASE_URL, _ssl_context
+from domains.marketplace_sync_service import credentials_secret
+from domains.ozon_stock_queue import enqueue_ozon_stock_publication
+
+
+@dataclass(frozen=True)
+class OzonOutboundPayload:
+    job_id: int
+    lock_token: UUID
+    fulfillment_id: int
+    posting_number: str
+    sku: int
+    client_id: str
+    token: str
+    codes: tuple[str, ...]
+
+
+class OzonOutboundError(RuntimeError):
+    def __init__(self, message: str, *, definite: bool, accepted: bool = False) -> None:
+        super().__init__(message)
+        self.definite = definite
+        self.accepted = accepted
+
+
+def ozon_outbound_enabled() -> bool:
+    return str(os.getenv("SELLER_OZON_OUTBOUND_ENABLED", "false")).strip().lower() in {"1", "true", "yes"}
+
+
+def key_pool_secret() -> str:
+    value = str(os.getenv("SELLER_KEY_POOL_SECRET", "")).strip()
+    if len(value) < 32:
+        raise RuntimeError("SELLER_KEY_POOL_SECRET is not configured")
+    return value
+
+
+def outbound_timeout_seconds() -> int:
+    return max(3, min(int(os.getenv("OZON_OUTBOUND_TIMEOUT_SECONDS", "20")), 60))
+
+
+def send_ozon_digital_codes(payload: OzonOutboundPayload) -> None:
+    body = json.dumps({
+        "posting_number": payload.posting_number,
+        "exemplars_by_sku": [{
+            "sku": payload.sku,
+            "exemplar_qty": len(payload.codes),
+            "not_available_exemplar_qty": 0,
+            "exemplar_keys": list(payload.codes),
+        }],
+    }, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"{OZON_SELLER_BASE_URL}/v1/posting/digital/codes/upload",
+        data=body,
+        method="POST",
+        headers={"Client-Id": payload.client_id, "Api-Key": payload.token, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=outbound_timeout_seconds(), context=_ssl_context(),
+        ) as response:
+            value = json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        # Повторный ответ Done означает, что Ozon уже завершил отправление.
+        accepted = "done" in detail.lower()
+        definite = accepted or (400 <= int(exc.code) < 500 and int(exc.code) != 429)
+        raise OzonOutboundError(
+            "Ozon уже подтвердил цифровое отправление" if accepted else f"Ozon отклонил выдачу: HTTP {exc.code}",
+            definite=definite,
+            accepted=accepted,
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise OzonOutboundError("Результат отправки в Ozon неизвестен", definite=False) from exc
+    results = value.get("exemplars_by_sku") if isinstance(value, dict) else None
+    result = next((item for item in (results or []) if int(item.get("sku") or 0) == payload.sku), None)
+    if not isinstance(result, dict):
+        raise OzonOutboundError("Ozon не подтвердил комплект цифровых кодов", definite=False)
+    if int(result.get("received_qty") or 0) != len(payload.codes) or int(result.get("rejected_qty") or 0) != 0:
+        raise OzonOutboundError("Ozon принял не весь комплект цифровых кодов", definite=True)
+
+
+class OzonOutboundProcessor:
+    def __init__(self, *, database_url, psycopg, sender=send_ozon_digital_codes) -> None:
+        self._database_url = database_url
+        self._psycopg = psycopg
+        self._sender = sender
+
+    def recover_stale(self) -> tuple[int, int]:
+        with self._psycopg.connect(self._database_url()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE seller.fulfillment_outbound_jobs AS job
+                    SET state='queued', lock_token=NULL, locked_until=NULL,
+                        last_error='Worker был перезапущен до внешней отправки', updated_at=now()
+                    FROM seller.order_fulfillments AS fulfillment
+                    JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                    WHERE job.fulfillment_id=fulfillment.id AND market.provider_code='ozon'
+                      AND job.state='preparing' AND job.locked_until < now()
+                    """
+                )
+                requeued = cursor.rowcount
+                cursor.execute(
+                    """
+                    WITH stale AS (
+                      UPDATE seller.fulfillment_outbound_jobs AS job
+                      SET state='unknown', unknown_at=now(), lock_token=NULL, locked_until=NULL,
+                          last_error='Worker остановился после начала отправки; повтор запрещён', updated_at=now()
+                      FROM seller.order_fulfillments AS fulfillment
+                      JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                      WHERE job.fulfillment_id=fulfillment.id AND market.provider_code='ozon'
+                        AND job.state='sending' AND job.locked_until < now()
+                      RETURNING job.fulfillment_id
+                    )
+                    UPDATE seller.order_fulfillments
+                    SET status='unknown', last_error='Результат отправки в Ozon неизвестен; требуется сверка', updated_at=now()
+                    WHERE id IN (SELECT fulfillment_id FROM stale) AND status='sending'
+                    """
+                )
+                unknown = cursor.rowcount
+            connection.commit()
+        return int(requeued), int(unknown)
+
+    def process_pending_jobs(self, limit: int = 5) -> int:
+        if not ozon_outbound_enabled():
+            return 0
+        processed = 0
+        for _ in range(max(1, min(int(limit), 50))):
+            payload = self._claim_and_prepare()
+            if payload is None:
+                break
+            processed += 1
+            try:
+                self._sender(payload)
+            except OzonOutboundError as exc:
+                self._finish(payload, "submitted" if exc.accepted else ("failed" if exc.definite else "unknown"), str(exc))
+            except Exception:
+                self._finish(payload, "unknown", "Результат отправки в Ozon неизвестен")
+            else:
+                self._finish(payload, "submitted", "")
+        return processed
+
+    def _claim_and_prepare(self) -> OzonOutboundPayload | None:
+        with self._psycopg.connect(self._database_url()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT job.id
+                    FROM seller.fulfillment_outbound_jobs AS job
+                    JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
+                    JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                    WHERE job.state='queued' AND market.status='active'
+                      AND market.provider_code='ozon' AND market.fulfillment_outbound_enabled=true
+                    ORDER BY job.queued_at, job.id
+                    FOR UPDATE OF job SKIP LOCKED LIMIT 1
+                    """
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                job_id = int(row[0])
+                cursor.execute(
+                    """
+                    UPDATE seller.fulfillment_outbound_jobs
+                    SET state='preparing', attempt_count=attempt_count+1,
+                        lock_token=gen_random_uuid(), locked_until=now()+interval '2 minutes', updated_at=now()
+                    WHERE id=%s AND state='queued' RETURNING lock_token
+                    """,
+                    (job_id,),
+                )
+                lock_token = cursor.fetchone()[0]
+            try:
+                credential_key, material_key = credentials_secret(), key_pool_secret()
+            except RuntimeError as exc:
+                self._fail_before_send(connection, job_id, lock_token, str(exc))
+                return None
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT fulfillment.id, fulfillment.external_order_id, fulfillment.requested_quantity,
+                           fulfillment.status, fulfillment.reservation_ref, item.sku,
+                           item.normalized_status, item.delivery_type,
+                           market.client_id, market.status, market.fulfillment_outbound_enabled,
+                           pgp_sym_decrypt(market.token_ciphertext, %s)
+                    FROM seller.fulfillment_outbound_jobs AS job
+                    JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
+                    JOIN seller.order_items AS item
+                      ON item.connection_id=fulfillment.connection_id
+                     AND item.external_order_id=fulfillment.external_order_id
+                     AND item.external_item_id=fulfillment.external_item_id
+                    JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                    WHERE job.id=%s AND job.state='preparing' AND job.lock_token=%s
+                    FOR UPDATE OF job, fulfillment
+                    """,
+                    (credential_key, job_id, lock_token),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                fulfillment_id, quantity = int(row[0]), int(row[2])
+                try:
+                    sku = int(str(row[5]))
+                except (TypeError, ValueError):
+                    self._fail_before_send(connection, job_id, lock_token, "Ozon не вернул числовой SKU")
+                    return None
+                error = ""
+                if not ozon_outbound_enabled() or str(row[9]) != "active" or not bool(row[10]):
+                    error = "Внешняя отправка Ozon выключена"
+                elif str(row[3]) != "reserved":
+                    error = f"Статус {row[3]} не допускает отправку"
+                elif str(row[6]) != "processing" or str(row[7] or "").upper() != "DIGITAL":
+                    error = "Заказ Ozon уже не ожидает цифровой код"
+                if error:
+                    self._fail_before_send(connection, job_id, lock_token, error)
+                    return None
+                cursor.execute(
+                    """
+                    SELECT key.id, pgp_sym_decrypt(key.code_ciphertext, %s), key.code_hash
+                    FROM seller.fulfillment_key_reservations AS reservation
+                    JOIN seller.marketplace_keys AS key ON key.id=reservation.key_id
+                    WHERE reservation.fulfillment_id=%s AND reservation.state='reserved'
+                      AND key.status='reserved' AND key.issued_order_ref=%s
+                    ORDER BY reservation.id FOR UPDATE OF reservation, key
+                    """,
+                    (material_key, fulfillment_id, str(row[4])),
+                )
+                key_rows = cursor.fetchall()
+                if len(key_rows) != quantity:
+                    self._fail_before_send(connection, job_id, lock_token, "Зарезервирован неполный комплект ключей")
+                    return None
+                key_ids = [int(item[0]) for item in key_rows]
+                codes = tuple(str(item[1]) for item in key_rows)
+                fingerprint = hashlib.sha256(
+                    f"{row[1]}:{sku}:{'|'.join(str(item[2]) for item in key_rows)}".encode()
+                ).hexdigest()
+                cursor.execute("UPDATE seller.marketplace_keys SET status='sending',updated_at=now() WHERE id=ANY(%s) AND status='reserved'", (key_ids,))
+                if cursor.rowcount != quantity:
+                    raise RuntimeError("Не удалось зафиксировать полный комплект Ozon")
+                cursor.execute("UPDATE seller.order_fulfillments SET status='sending',last_error='',updated_at=now() WHERE id=%s AND status='reserved'", (fulfillment_id,))
+                cursor.execute(
+                    """UPDATE seller.fulfillment_outbound_jobs
+                       SET state='sending',request_fingerprint=%s,sending_at=now(),updated_at=now()
+                       WHERE id=%s AND state='preparing' AND lock_token=%s""",
+                    (fingerprint, job_id, lock_token),
+                )
+                cursor.execute("INSERT INTO seller.fulfillment_events(fulfillment_id,event_type,from_status,to_status) VALUES (%s,'outbound_started','reserved','sending')", (fulfillment_id,))
+            connection.commit()
+            return OzonOutboundPayload(job_id, lock_token, fulfillment_id, str(row[1]), sku, str(row[8]), str(row[11]), codes)
+
+    @staticmethod
+    def _fail_before_send(connection, job_id: int, lock_token: UUID, message: str) -> None:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE seller.fulfillment_outbound_jobs SET state='failed',failed_at=now(),last_error=%s,
+                   lock_token=NULL,locked_until=NULL,updated_at=now()
+                   WHERE id=%s AND state='preparing' AND lock_token=%s""",
+                (message[:1000], job_id, lock_token),
+            )
+        connection.commit()
+
+    def _finish(self, payload: OzonOutboundPayload, state: str, message: str) -> None:
+        with self._psycopg.connect(self._database_url()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT id FROM seller.fulfillment_outbound_jobs WHERE id=%s AND state='sending' AND lock_token=%s FOR UPDATE", (payload.job_id, payload.lock_token))
+                if not cursor.fetchone():
+                    return
+                if state == "submitted":
+                    cursor.execute("UPDATE seller.fulfillment_outbound_jobs SET state='submitted',submitted_at=now(),last_error='',lock_token=NULL,locked_until=NULL,updated_at=now() WHERE id=%s", (payload.job_id,))
+                    cursor.execute("UPDATE seller.order_fulfillments SET status='submitted',submitted_at=now(),last_error='',updated_at=now() WHERE id=%s AND status='sending'", (payload.fulfillment_id,))
+                    enqueue_ozon_stock_publication(cursor, fulfillment_id=payload.fulfillment_id)
+                    event_type, target = "outbound_submitted", "submitted"
+                elif state == "failed":
+                    cursor.execute("UPDATE seller.fulfillment_outbound_jobs SET state='failed',failed_at=now(),last_error=%s,lock_token=NULL,locked_until=NULL,updated_at=now() WHERE id=%s", (message[:1000], payload.job_id))
+                    cursor.execute("""UPDATE seller.marketplace_keys AS key SET status='reserved',updated_at=now()
+                                      WHERE key.id IN (SELECT key_id FROM seller.fulfillment_key_reservations WHERE fulfillment_id=%s AND state='reserved') AND key.status='sending'""", (payload.fulfillment_id,))
+                    cursor.execute("UPDATE seller.order_fulfillments SET status='reserved',last_error=%s,updated_at=now() WHERE id=%s AND status='sending'", (message[:1000], payload.fulfillment_id))
+                    event_type, target = "outbound_rejected", "reserved"
+                else:
+                    cursor.execute("UPDATE seller.fulfillment_outbound_jobs SET state='unknown',unknown_at=now(),last_error=%s,lock_token=NULL,locked_until=NULL,updated_at=now() WHERE id=%s", (message[:1000], payload.job_id))
+                    cursor.execute("UPDATE seller.order_fulfillments SET status='unknown',last_error=%s,updated_at=now() WHERE id=%s AND status='sending'", (message[:1000], payload.fulfillment_id))
+                    event_type, target = "outbound_unknown", "unknown"
+                cursor.execute("INSERT INTO seller.fulfillment_events(fulfillment_id,event_type,from_status,to_status,details) VALUES (%s,%s,'sending',%s,jsonb_build_object('message',(%s)::text))", (payload.fulfillment_id, event_type, target, message[:1000]))
+            connection.commit()
+
+
+def build_ozon_outbound_processor(*, database_url, psycopg) -> OzonOutboundProcessor:
+    return OzonOutboundProcessor(database_url=database_url, psycopg=psycopg)
+

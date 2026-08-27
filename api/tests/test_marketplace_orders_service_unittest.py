@@ -30,6 +30,7 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
     def test_normalizes_ozon_statuses_to_russian_domain_states(self) -> None:
         # Проверяет важные статусы Ozon, включая отмену с различными техническими суффиксами.
         self.assertEqual(normalize_marketplace_order_status(provider_code="ozon", status="awaiting_delivery"), "processing")
+        self.assertEqual(normalize_marketplace_order_status(provider_code="ozon", status="awaiting_packaging"), "processing")
         self.assertEqual(normalize_marketplace_order_status(provider_code="ozon", status="delivering"), "in_delivery")
         self.assertEqual(normalize_marketplace_order_status(provider_code="ozon", status="done"), "delivered")
         self.assertEqual(normalize_marketplace_order_status(provider_code="ozon", status="cancelled_by_seller"), "cancelled")

@@ -17,8 +17,9 @@ from domains.supplier_hub_client import (
     SupplierHubError,
     load_supplier_hub_settings,
 )
+from domains.ozon_outbound import ozon_outbound_enabled
 from domains.workspace_entitlements import FULFILLMENT_SUPPLIER, workspace_allows
-from domains.yandex_market_outbound import key_pool_secret
+from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enabled
 
 
 HUB_BLOCKING_STATES = {"created", "checked", "payment_started", "processing", "requires_attention"}
@@ -80,6 +81,7 @@ class FulfillmentContext:
     max_amount: Decimal | None
     workspace_id: int
     supplier_access_enabled: bool
+    store_outbound_enabled: bool = True
 
 
 class SupplierFulfillmentProcessor:
@@ -203,7 +205,8 @@ class SupplierFulfillmentProcessor:
                            CASE WHEN local_settings.connection_id IS NOT NULL
                                THEN local_settings.activation_instruction
                                ELSE COALESCE(imported_settings.activation_instruction, '') END,
-                           market.workspace_id
+                           market.workspace_id,
+                           market.fulfillment_outbound_enabled
                     FROM seller.order_fulfillments AS fulfillment
                     JOIN seller.order_items AS order_item
                       ON order_item.connection_id=fulfillment.connection_id
@@ -253,6 +256,7 @@ class SupplierFulfillmentProcessor:
             service_id=int(row[17]) if row[17] is not None else None,
             nominal_id=str(row[18] or ""), params=dict(params), max_amount=_decimal(row[20]),
             workspace_id=int(row[23]), supplier_access_enabled=supplier_access_enabled,
+            store_outbound_enabled=bool(row[24]),
         )
 
     def _supplier_access_enabled(self, workspace_id: int) -> bool:
@@ -265,6 +269,15 @@ class SupplierFulfillmentProcessor:
         if not context or context.status not in {"pending", "manual_required", "supplier_required"}:
             return
         if context.order_status != "processing" or context.delivery_type.strip().upper() != "DIGITAL":
+            return
+
+        provider_outbound_enabled = (
+            ozon_outbound_enabled()
+            if context.provider_code == "ozon"
+            else yandex_outbound_enabled()
+        )
+        if not context.store_outbound_enabled or not provider_outbound_enabled:
+            self._mark_manual(context.fulfillment_id, "Внешняя отправка магазина выключена")
             return
 
         # Инструкция обязательна для цифровой выдачи Яндекс Маркета, но это не
@@ -334,8 +347,9 @@ class SupplierFulfillmentProcessor:
         with self._psycopg.connect(self._database_url()) as connection:
             with connection.cursor() as cursor:
                 for unit_index in range(1, context.quantity + 1):
+                    provider_scope = "ozon" if context.provider_code == "ozon" else "yandex"
                     idempotency_key = (
-                        f"seller:yandex:{context.connection_id}:{context.external_order_id}:"
+                        f"seller:{provider_scope}:{context.connection_id}:{context.external_order_id}:"
                         f"{context.external_item_id}:{unit_index}"
                     )
                     cursor.execute(

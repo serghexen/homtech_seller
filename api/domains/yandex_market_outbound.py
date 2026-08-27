@@ -97,21 +97,27 @@ class YandexOutboundProcessor:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE seller.fulfillment_outbound_jobs
+                    UPDATE seller.fulfillment_outbound_jobs AS job
                     SET state='queued', lock_token=NULL, locked_until=NULL,
                         last_error='Worker был перезапущен до внешней отправки', updated_at=now()
-                    WHERE state='preparing' AND locked_until < now()
+                    FROM seller.order_fulfillments AS fulfillment
+                    JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                    WHERE job.fulfillment_id=fulfillment.id AND market.provider_code='yandex_market'
+                      AND job.state='preparing' AND job.locked_until < now()
                     """
                 )
                 requeued = cursor.rowcount
                 cursor.execute(
                     """
                     WITH stale AS (
-                      UPDATE seller.fulfillment_outbound_jobs
+                      UPDATE seller.fulfillment_outbound_jobs AS job
                       SET state='unknown', unknown_at=now(), lock_token=NULL, locked_until=NULL,
                           last_error='Worker был перезапущен после начала отправки; повтор запрещён', updated_at=now()
-                      WHERE state='sending' AND locked_until < now()
-                      RETURNING fulfillment_id
+                      FROM seller.order_fulfillments AS fulfillment
+                      JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
+                      WHERE job.fulfillment_id=fulfillment.id AND market.provider_code='yandex_market'
+                        AND job.state='sending' AND job.locked_until < now()
+                      RETURNING job.fulfillment_id
                     )
                     UPDATE seller.order_fulfillments AS fulfillment
                     SET status='unknown', last_error='Результат внешней отправки неизвестен; требуется сверка', updated_at=now()

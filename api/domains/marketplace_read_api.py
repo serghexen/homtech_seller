@@ -44,6 +44,12 @@ def yandex_stock_publication_enabled() -> bool:
     }
 
 
+def ozon_stock_publication_enabled() -> bool:
+    return str(os.getenv("SELLER_OZON_STOCK_OUTBOUND_ENABLED", "false")).strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
 def supplier_price_guard(amount: Decimal) -> Decimal:
     """Добавляет небольшой внутренний запас к котировке, не показывая его оператору."""
     return (amount * SUPPLIER_PRICE_GUARD_MULTIPLIER).quantize(Decimal("0.01"), rounding=ROUND_UP)
@@ -395,7 +401,10 @@ def normalize_order_items(provider_code: str, payload: dict[str, Any]) -> list[d
                     "offer_id": offer_id,
                     "sku": sku,
                     "title": first_text(product.get("name"), product.get("title"), payload.get("product_name")),
-                    "quantity": safe_int(product.get("quantity"), default=1),
+                    "quantity": safe_int(
+                        product.get("required_qty_for_digital_code") or product.get("quantity"),
+                        default=1,
+                    ),
                     "provider_status": provider_status,
                     "provider_substatus": substatus,
                     "normalized_status": normalize_marketplace_order_status(
@@ -404,6 +413,9 @@ def normalize_order_items(provider_code: str, payload: dict[str, Any]) -> list[d
                     "delivery_type": first_text(payload.get("__marketplace_source"), payload.get("delivery_method")),
                     "created_at": optional_datetime(payload.get("in_process_at") or payload.get("created_at")),
                     "updated_at": optional_datetime(payload.get("updated_at") or payload.get("status_updated_at")),
+                    "fulfillment_deadline_at": optional_datetime(
+                        payload.get("waiting_deadline_for_digital_code")
+                    ),
                 }
             )
         return result
@@ -439,6 +451,7 @@ def normalize_order_items(provider_code: str, payload: dict[str, Any]) -> list[d
                     "updated_at": optional_datetime(
                         payload.get("updateDate") or payload.get("updatedAt") or payload.get("statusUpdateDate")
                     ),
+                    "fulfillment_deadline_at": None,
                 }
             )
         return result
@@ -864,8 +877,6 @@ def mount_marketplace_read_routes(
         """Сохраняет намерение оператора; внешний PUT выполняет только stock worker."""
 
         product_id = str(payload.external_product_id).strip()
-        if not yandex_stock_publication_enabled():
-            raise HTTPException(status_code=409, detail="Ручная публикация остатков выключена в Seller")
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             if seller_user.role_code not in {"owner", "operator"}:
@@ -891,8 +902,14 @@ def mount_marketplace_read_routes(
                 card = cursor.fetchone()
                 if not card:
                     raise HTTPException(status_code=404, detail="Карточка товара не найдена")
-                if str(card[0]) != "yandex_market":
-                    raise HTTPException(status_code=400, detail="Публикация остатка доступна только для Яндекс Маркета")
+                provider_code = str(card[0])
+                publication_enabled = (
+                    yandex_stock_publication_enabled()
+                    if provider_code == "yandex_market"
+                    else ozon_stock_publication_enabled()
+                )
+                if provider_code not in {"yandex_market", "ozon"} or not publication_enabled:
+                    raise HTTPException(status_code=409, detail="Ручная публикация остатков выключена в Seller")
                 if str(card[1]) != "active" or not bool(card[2]):
                     raise HTTPException(status_code=409, detail="Синхронизация остатков магазина выключена")
                 if bool(card[3]):
@@ -902,9 +919,14 @@ def mount_marketplace_read_routes(
                         status_code=409,
                         detail="Сначала сохраните заданный остаток в Seller",
                     )
+                job_table = (
+                    "seller.yandex_stock_outbound_jobs"
+                    if provider_code == "yandex_market"
+                    else "seller.ozon_stock_outbound_jobs"
+                )
                 cursor.execute(
-                    """
-                    INSERT INTO seller.yandex_stock_outbound_jobs(
+                    f"""
+                    INSERT INTO {job_table}(
                       fulfillment_id, job_kind, connection_id, external_product_id,
                       requested_stock, requested_by_user_id, next_attempt_at
                     ) VALUES (NULL,'manual',%s,%s,%s,%s,now())
@@ -920,11 +942,11 @@ def mount_marketplace_read_routes(
                 row = cursor.fetchone()
                 if not row:
                     cursor.execute(
-                        """
+                        f"""
                         SELECT id, connection_id, external_product_id, requested_stock,
                                target_stock, state, last_error, created_at, updated_at,
                                succeeded_at, failed_at
-                        FROM seller.yandex_stock_outbound_jobs
+                        FROM {job_table}
                         WHERE connection_id=%s AND external_product_id=%s
                           AND job_kind='manual' AND state IN ('queued','preparing','sending')
                         ORDER BY id DESC LIMIT 1
@@ -942,6 +964,7 @@ def mount_marketplace_read_routes(
     )
     def get_catalog_stock_publication(
         job_id: int,
+        provider_code: Literal["yandex_market", "ozon"] = Query(default="yandex_market"),
         user: AuthenticatedUser = Depends(current_user),
     ) -> MarketplaceCatalogStockPublicationOut:
         """Возвращает подтверждённое состояние ручной публикации из локальной очереди."""
@@ -949,12 +972,17 @@ def mount_marketplace_read_routes(
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
+                job_table = (
+                    "seller.yandex_stock_outbound_jobs"
+                    if provider_code == "yandex_market"
+                    else "seller.ozon_stock_outbound_jobs"
+                )
                 cursor.execute(
-                    """
+                    f"""
                     SELECT job.id, job.connection_id, job.external_product_id, job.requested_stock,
                            job.target_stock, job.state, job.last_error, job.created_at, job.updated_at,
                            job.succeeded_at, job.failed_at
-                    FROM seller.yandex_stock_outbound_jobs AS job
+                    FROM {job_table} AS job
                     JOIN seller.marketplace_connections AS marketplace_connection
                       ON marketplace_connection.id=job.connection_id
                     WHERE job.id=%s AND job.job_kind='manual'

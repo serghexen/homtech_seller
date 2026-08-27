@@ -55,6 +55,11 @@ class Processor(SupplierFulfillmentProcessor):
         self.reset.append(fulfillment_id)
 
 
+@patch.dict(
+    os.environ,
+    {"SELLER_YANDEX_OUTBOUND_ENABLED": "true", "SELLER_OZON_OUTBOUND_ENABLED": "true"},
+    clear=False,
+)
 class SupplierFulfillmentTests(unittest.TestCase):
     @patch("domains.supplier_fulfillment.load_supplier_hub_settings")
     def test_uncertain_supplier_state_never_falls_through_to_pool(self, load_settings) -> None:
@@ -131,6 +136,17 @@ class SupplierFulfillmentTests(unittest.TestCase):
 
         self.assertEqual(processor.queued, [81])
         self.assertEqual(processor.manual, [])
+
+    @patch("domains.supplier_fulfillment.ozon_outbound_enabled", return_value=False)
+    def test_ozon_never_purchases_when_outbound_is_disabled(self, _outbound_enabled) -> None:
+        processor = Processor(result="reserved", provider_code="ozon", activation_instruction="")
+        processor._resolve_supplier = Mock(return_value="reserved")
+
+        processor._resolve(81)
+
+        processor._resolve_supplier.assert_not_called()
+        self.assertEqual(processor.queued, [])
+        self.assertEqual(processor.manual, [(81, "Внешняя отправка магазина выключена")])
 
     @patch.dict(os.environ, {"SELLER_FULFILLMENT_RESOLVER_ENABLED": "false"}, clear=False)
     def test_global_resolver_switch_prevents_database_claim(self) -> None:

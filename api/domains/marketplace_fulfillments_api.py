@@ -17,7 +17,10 @@ from domains.fulfillment_service import (
     reserve_pool_keys,
 )
 from domains.local_auth import AuthenticatedUser
+from domains.ozon_outbound import ozon_outbound_enabled
+from domains.ozon_stock_queue import enqueue_ozon_stock_publication
 from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enabled
+from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
 
 
 class FulfillmentIdentityIn(BaseModel):
@@ -54,6 +57,7 @@ class OrderFulfillmentOut(BaseModel):
     free_count: int = 0
     last_error: str = ""
     reserved_at: datetime | None = None
+    fulfillment_deadline_at: datetime | None = None
     can_prepare: bool = False
     can_release: bool = False
     manual_actions_enabled: bool = False
@@ -125,7 +129,8 @@ def mount_marketplace_fulfillment_routes(
                      THEN settings.support_message ELSE COALESCE(imported_settings.support_message, '') END,
                    CASE WHEN COALESCE(settings.support_message_overridden, false)
                      THEN settings.support_message_delivery_enabled
-                     ELSE COALESCE(imported_settings.support_message_delivery_enabled, false) END
+                     ELSE COALESCE(imported_settings.support_message_delivery_enabled, false) END,
+                   item.fulfillment_deadline_at
             FROM seller.order_items AS item
             JOIN seller.marketplace_connections AS marketplace_connection
               ON marketplace_connection.id=item.connection_id
@@ -151,18 +156,22 @@ def mount_marketplace_fulfillment_routes(
             raise HTTPException(status_code=404, detail="Позиция заказа не найдена")
         fulfillment_status = str(row[12] or "not_prepared")
         actions_enabled = manual_fulfillment_enabled()
-        outbound_available = yandex_outbound_enabled() and bool(row[18])
+        provider_code = str(row[3])
+        provider_outbound_enabled = (
+            yandex_outbound_enabled() if provider_code == "yandex_market" else ozon_outbound_enabled()
+        )
+        outbound_available = provider_outbound_enabled and bool(row[18])
         outbound_state = str(row[20] or "")
         outbound_active = outbound_state in {"queued", "preparing", "sending", "submitted", "unknown"}
         can_manage = role_code in {"owner", "operator"}
         can_prepare_any = bool(
             actions_enabled
             and can_manage
-            and str(row[3]) == "yandex_market"
+            and provider_code in {"yandex_market", "ozon"}
             and str(row[5]) == "active"
             and str(row[6]) == "processing"
             and str(row[7] or "").strip().upper() == "DIGITAL"
-            and fulfillment_status in {"not_prepared", "pending", "manual_required"}
+            and fulfillment_status in {"not_prepared", "pending", "manual_required", "supplier_required"}
         )
         can_prepare = can_prepare_any
         support_message_configured = bool(str(row[23] or "").strip()) and bool(row[24])
@@ -179,6 +188,7 @@ def mount_marketplace_fulfillment_routes(
             fulfillment_id=int(row[11]) if row[11] is not None else None,
             fulfillment_status=fulfillment_status, delivery_source=str(row[13] or "unassigned"),
             last_error=str(row[14] or ""), reserved_at=row[15],
+            fulfillment_deadline_at=row[25] if len(row) > 25 else None,
             reserved_count=int(row[16] or 0), free_count=int(row[17] or 0),
             can_prepare=can_prepare,
             can_release=bool(actions_enabled and can_manage and fulfillment_status == "reserved" and not outbound_active),
@@ -188,18 +198,19 @@ def mount_marketplace_fulfillment_routes(
             outbound_last_error=str(row[21] or ""),
             can_send=bool(
                 actions_enabled and outbound_available and can_manage
-                and str(row[3]) == "yandex_market" and str(row[5]) == "active"
+                and provider_code in {"yandex_market", "ozon"} and str(row[5]) == "active"
                 and str(row[6]) == "processing" and str(row[7] or "").strip().upper() == "DIGITAL"
                 and fulfillment_status == "reserved" and prepared_material_complete
-                and bool(str(row[19] or "").strip()) and outbound_state in {"", "failed", "cancelled"}
+                and (provider_code == "ozon" or bool(str(row[19] or "").strip()))
+                and outbound_state in {"", "failed", "cancelled"}
             ),
             can_cancel_send=bool(actions_enabled and can_manage and outbound_state == "queued"),
             can_resolve_unknown=bool(
-                actions_enabled and can_manage and str(row[3]) == "yandex_market"
+                actions_enabled and can_manage and provider_code in {"yandex_market", "ozon"}
                 and fulfillment_status == "unknown" and outbound_state == "unknown"
             ),
             can_prepare_manual=can_prepare_any,
-            can_prepare_support=bool(can_prepare_any and support_message_configured),
+            can_prepare_support=bool(can_prepare_any and provider_code == "yandex_market" and support_message_configured),
             support_message_configured=support_message_configured,
             can_reveal_keys=bool(can_manage and int(row[16] or 0) > 0),
         )
@@ -209,12 +220,12 @@ def mount_marketplace_fulfillment_routes(
             raise HTTPException(status_code=503, detail="Ручная подготовка выдачи временно отключена")
 
     def require_manual_action_allowed(detail: OrderFulfillmentOut) -> None:
-        if detail.provider_code != "yandex_market":
-            raise HTTPException(status_code=409, detail="Локальная подготовка выдачи пока доступна только для Яндекс Маркета")
+        if detail.provider_code not in {"yandex_market", "ozon"}:
+            raise HTTPException(status_code=409, detail="Маркетплейс пока не поддерживает локальную выдачу")
         if detail.connection_status != "active":
             raise HTTPException(status_code=409, detail="Магазин отключён")
         if detail.delivery_type.strip().upper() != "DIGITAL":
-            raise HTTPException(status_code=409, detail="Подготовка ключей доступна только для цифрового DBS-заказа")
+            raise HTTPException(status_code=409, detail="Подготовка ключей доступна только для цифрового заказа")
         if detail.order_status != "processing":
             raise HTTPException(status_code=409, detail="Подготовить ключи можно только для заказа в процессе")
 
@@ -397,8 +408,6 @@ def mount_marketplace_fulfillment_routes(
     ) -> OrderFulfillmentOut:
         # API только ставит неизменяемую ссылку на выдачу в очередь; расшифровка и HTTP-вызов живут в worker-е.
         require_manual_feature_enabled()
-        if not yandex_outbound_enabled():
-            raise HTTPException(status_code=503, detail="Внешняя отправка временно отключена")
         identity = normalized_identity(payload.connection_id, payload.external_order_id, payload.external_item_id)
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
@@ -408,6 +417,13 @@ def mount_marketplace_fulfillment_routes(
                 detail = read_fulfillment(
                     cursor, identity=identity, workspace_id=seller_user.workspace_id, role_code=seller_user.role_code,
                 )
+                provider_enabled = (
+                    yandex_outbound_enabled()
+                    if detail.provider_code == "yandex_market"
+                    else ozon_outbound_enabled()
+                )
+                if not provider_enabled:
+                    raise HTTPException(status_code=503, detail="Внешняя отправка временно отключена")
                 if not detail.can_send or not detail.fulfillment_id:
                     raise HTTPException(
                         status_code=409,
@@ -485,7 +501,7 @@ def mount_marketplace_fulfillment_routes(
         payload: FulfillmentUnknownResolutionIn,
         user: AuthenticatedUser = Depends(current_user),
     ) -> OrderFulfillmentOut:
-        """Фиксирует результат ручной сверки с Яндексом без внешнего HTTP-запроса."""
+        """Фиксирует результат ручной сверки с маркетплейсом без внешнего HTTP-запроса."""
 
         require_manual_feature_enabled()
         identity = normalized_identity(payload.connection_id, payload.external_order_id, payload.external_item_id)
@@ -534,6 +550,10 @@ def mount_marketplace_fulfillment_routes(
                         """,
                         (detail.fulfillment_id,),
                     )
+                    if detail.provider_code == "ozon":
+                        enqueue_ozon_stock_publication(cursor, fulfillment_id=detail.fulfillment_id)
+                    else:
+                        enqueue_yandex_stock_publication(cursor, fulfillment_id=detail.fulfillment_id)
                     event_type, target_status = "outbound_unknown_resolved_accepted", "submitted"
                 else:
                     if detail.order_status != "processing":
@@ -558,7 +578,7 @@ def mount_marketplace_fulfillment_routes(
                         """
                         UPDATE seller.fulfillment_outbound_jobs
                         SET state='failed', failed_at=now(),
-                            last_error='Оператор подтвердил, что Яндекс не получил данные',
+                            last_error='Оператор подтвердил, что маркетплейс не получил данные',
                             lock_token=NULL, locked_until=NULL, updated_at=now()
                         WHERE fulfillment_id=%s AND state='unknown'
                         """,
