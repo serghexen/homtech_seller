@@ -337,7 +337,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 </template>
 
 <style scoped>
-.fulfillment-backdrop { position: fixed; z-index: 12; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2,6,19,.76); backdrop-filter: blur(10px); }
+.fulfillment-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2,6,19,.76); backdrop-filter: blur(10px); }
 .fulfillment-card { width: min(100%,760px); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid rgba(125,151,220,.34); border-radius: 29px; color: #edf2ff; background: radial-gradient(circle at 100% 0,rgba(64,101,230,.18),transparent 36%),linear-gradient(145deg,#14213f,#0a1026 72%); box-shadow: 0 36px 120px rgba(0,0,0,.52); }
 .fulfillment-card__header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 26px 28px 22px; border-bottom: 1px solid rgba(137,158,208,.18); }
 .fulfillment-card__header span { color: #7795ff; font-size: 10px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }

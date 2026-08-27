@@ -1643,6 +1643,7 @@ onBeforeUnmount(() => {
       :key-pool-can-manage="user?.role_code === 'owner' || user?.role_code === 'operator'"
       :key-pool-revealing-id="selectedProductKeyPoolRevealingId"
       :key-pool-revealed="selectedProductKeyPoolRevealed"
+      :covered="Boolean(selectedOrderItem)"
       @refresh-stock="refreshSelectedProductStock"
       @publish-stock="publishSelectedProductStock"
       @refresh-orders="refreshSelectedProductOrders"

@@ -41,6 +41,7 @@ const props = defineProps({
   keyPoolCanManage: { type: Boolean, default: false },
   keyPoolRevealingId: { type: Number, default: 0 },
   keyPoolRevealed: { type: Object, default: () => ({}) },
+  covered: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['close', 'refresh-stock', 'publish-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'reveal-key', 'open-order-fulfillment', 'quote-supplier'])
@@ -447,7 +448,7 @@ function close() {
 }
 
 function closeOnEscape(event) {
-  if (event.key !== 'Escape') return
+  if (event.key !== 'Escape' || props.covered) return
   if (supplierPickerOpen.value) {
     supplierPickerOpen.value = false
     return
@@ -462,7 +463,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 <template>
   <Teleport to="body">
     <Transition name="product-card" appear>
-      <div class="product-card-backdrop" @click.self="close">
+      <div class="product-card-backdrop" :inert="covered" :aria-hidden="covered ? 'true' : null" @click.self="close">
         <section class="product-card-modal" role="dialog" aria-modal="true" aria-labelledby="product-card-title">
           <header class="product-card-modal__header">
             <h2 id="product-card-title">Карточка товара</h2>
