@@ -22,6 +22,7 @@ const manualCodesRaw = ref('')
 const unknownResolution = ref('')
 const copiedKeyId = ref(0)
 const marketplaceName = computed(() => props.detail?.provider_code === 'ozon' ? 'Ozon' : 'Яндекс Маркет')
+const automationInProgress = computed(() => Boolean(props.detail?.automation_in_progress))
 
 function formatDeadline(value) {
   if (!value) return ''
@@ -47,7 +48,9 @@ const statusPresentation = computed(() => {
   const status = props.detail?.fulfillment_status || 'not_prepared'
   return {
     not_prepared: { label: 'Не подготовлена', tone: 'idle', copy: 'Ключи к заказу ещё не закреплены.' },
-    pending: { label: 'Ожидает подготовки', tone: 'idle', copy: 'Локальная выдача создана, комплект пока свободен.' },
+    pending: automationInProgress.value
+      ? { label: 'Автовыдача запущена', tone: 'active', copy: 'Seller последовательно проверяет поставщика, пул и остальные настроенные способы.' }
+      : { label: 'Ожидает подготовки', tone: 'idle', copy: 'Локальная выдача создана, комплект пока свободен.' },
     manual_required: { label: 'Нужен комплект', tone: 'warning', copy: props.detail?.last_error || 'В пуле пока нет полного комплекта.' },
     reserved: {
       label: props.detail?.delivery_source === 'support_message' ? 'Сообщение подготовлено' : 'Комплект закреплён',
@@ -56,7 +59,9 @@ const statusPresentation = computed(() => {
         ? 'Снимок сообщения поддержки зафиксирован в Seller и ещё не отправлен.'
         : 'Ключи зарезервированы внутри Seller и не отправлены покупателю.',
     },
-    supplier_required: { label: 'Нужен поставщик', tone: 'warning', copy: 'Для продолжения потребуется Supplier Hub.' },
+    supplier_required: automationInProgress.value
+      ? { label: 'Поставщик обрабатывает', tone: 'active', copy: props.detail?.last_error || 'Supplier Hub готовит комплект. Ручное вмешательство временно заблокировано.' }
+      : { label: 'Нужен поставщик', tone: 'warning', copy: props.detail?.last_error || 'Для продолжения потребуется Supplier Hub.' },
     sending: { label: 'Отправляется', tone: 'active', copy: 'Состояние отправки нельзя откатывать автоматически.' },
     submitted: { label: 'Передано', tone: 'active', copy: 'Результат передан маркетплейсу и ожидает подтверждения.' },
     unknown: { label: 'Нужна сверка', tone: 'warning', copy: 'Результат внешней отправки пока неизвестен.' },
@@ -111,7 +116,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
         <section class="fulfillment-card" role="dialog" aria-modal="true" aria-labelledby="fulfillment-title">
           <header class="fulfillment-card__header">
             <div>
-              <span>{{ order.status === 'processing' ? 'Локальная подготовка' : 'Выдача ключа' }}</span>
+              <span>{{ automationInProgress ? 'Автоматическая выдача' : order.status === 'processing' ? 'Локальная подготовка' : 'Выдача ключа' }}</span>
               <h2 id="fulfillment-title">Заказ №{{ order.external_order_id }}</h2>
             </div>
             <button type="button" aria-label="Закрыть" :disabled="actionLoading" @click="emit('close')">
@@ -162,11 +167,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               </article>
             </div>
 
-            <div v-if="!viewOnly" class="fulfillment-safety" :class="{ 'is-outbound': detail.outbound_state }">
+            <div v-if="!viewOnly" class="fulfillment-safety" :class="{ 'is-outbound': detail.outbound_state, 'is-automatic': automationInProgress }">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3" /><rect x="5" y="10" width="14" height="10" rx="3" /><path d="M12 14v2" /></svg>
               <div>
-                <strong>{{ detail.outbound_state ? 'Внешняя отправка' : 'Защищённая подготовка' }}</strong>
-                <p v-if="detail.outbound_state">{{ outboundPresentation }}</p>
+                <strong>{{ automationInProgress ? 'Заказ контролирует автовыдача' : detail.outbound_state ? 'Внешняя отправка' : 'Защищённая подготовка' }}</strong>
+                <p v-if="automationInProgress">Ручные действия недоступны. Если автоматическая цепочка не подготовит комплект, Seller передаст заказ оператору.</p>
+                <p v-else-if="detail.outbound_state">{{ outboundPresentation }}</p>
                 <p v-else>Открытые коды загружаются только по отдельному запросу оператора. Отправка начнётся после отдельного подтверждения.</p>
               </div>
             </div>
@@ -241,7 +247,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               </div>
             </section>
 
-            <div v-if="!viewOnly && !detail.manual_actions_enabled" class="fulfillment-feature-lock">
+            <div v-if="!viewOnly && !automationInProgress && !detail.manual_actions_enabled" class="fulfillment-feature-lock">
               <span>Режим просмотра</span>
               Ручная подготовка выключена общим переключателем сервиса. Ни резерв, ни снятие резерва сейчас недоступны.
             </div>
@@ -283,6 +289,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
             <footer class="fulfillment-card__actions">
               <template v-if="!viewOnly">
                 <p v-if="detail.can_resolve_unknown">Сначала завершите ручную сверку выше. Повтор без подтверждения заблокирован.</p>
+                <p v-else-if="automationInProgress">Автовыдача продолжает работу. Состояние окна обновляется автоматически.</p>
                 <p v-else-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
                 <p v-else-if="detail.can_prepare_manual">Выберите источник выше. После подготовки комплект можно будет проверить и отправить.</p>
                 <p v-else-if="detail.can_send && !sendConfirmation">Комплект готов. Отправка — отдельное необратимое действие.</p>
@@ -371,6 +378,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .fulfillment-metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 11px; margin: 0 28px 18px; }.fulfillment-metrics article { padding: 16px; border: 1px solid rgba(137,158,208,.18); border-radius: 17px; background: rgba(17,28,57,.56); }.fulfillment-metrics article.is-ready { border-color: rgba(74,226,188,.35); background: rgba(24,74,74,.25); }.fulfillment-metrics span,.fulfillment-metrics small { display: block; color: #8f9dbb; font-size: 10px; }.fulfillment-metrics strong { display: block; margin: 8px 0 4px; font-size: 29px; line-height: 1; letter-spacing: -.05em; }
 .fulfillment-safety { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; margin: 0 28px 18px; padding: 15px; border: 1px dashed rgba(101,134,221,.33); border-radius: 16px; color: #8ea8f2; background: rgba(26,48,105,.17); }.fulfillment-safety p { margin: 4px 0 0; color: #9faccc; font-size: 11px; line-height: 1.5; }
 .fulfillment-safety.is-outbound { border-style: solid; border-color: rgba(101,134,221,.42); }
+.fulfillment-safety.is-automatic { border-style: solid; border-color: rgba(100,139,255,.52); background: linear-gradient(120deg,rgba(35,66,147,.28),rgba(21,42,95,.16)); box-shadow: inset 3px 0 0 rgba(100,139,255,.72); }
 .fulfillment-keys { margin: 0 28px 18px; padding: 17px; border: 1px solid rgba(82,226,190,.28); border-radius: 19px; background: radial-gradient(circle at 100% 0,rgba(65,224,184,.09),transparent 38%),rgba(10,31,44,.4); }.fulfillment-keys > header { display: grid; grid-template-columns: 40px minmax(0,1fr) auto; align-items: center; gap: 12px; }.fulfillment-keys__mark { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid rgba(85,226,190,.4); border-radius: 12px; color: #5be4bd; background: rgba(53,190,155,.09); }.fulfillment-keys svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }.fulfillment-keys header small,.fulfillment-keys header strong { display: block; }.fulfillment-keys header small { margin-bottom: 4px; color: #59caaa; font-size: 9px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }.fulfillment-keys header strong { color: #eafff9; font-size: 13px; }.fulfillment-keys header p { margin: 4px 0 0; color: #91aaab; font-size: 10px; }.fulfillment-keys header > button { display: inline-flex; min-height: 42px; align-items: center; justify-content: center; gap: 8px; padding: 0 13px; border: 1px solid rgba(78,224,187,.46); border-radius: 12px; color: #bffdec; background: rgba(35,128,111,.25); font-size: 10px; font-weight: 850; cursor: pointer; }.fulfillment-keys header > button:hover:not(:disabled) { border-color: rgba(91,236,199,.76); background: rgba(39,153,129,.34); }.fulfillment-keys header > button:disabled { cursor: wait; opacity: .65; }.fulfillment-keys__list { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(94,205,178,.15); }.fulfillment-keys__list article { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid rgba(111,196,181,.18); border-radius: 13px; background: rgba(4,14,25,.58); }.fulfillment-keys__list code { min-width: 0; color: #dffff6; font: 12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap: anywhere; }.fulfillment-keys__list button { display: inline-flex; min-height: 34px; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid rgba(104,171,190,.25); border-radius: 10px; color: #9fd6d2; background: rgba(32,67,84,.44); font-size: 9px; cursor: pointer; }.fulfillment-keys__list button:hover { border-color: rgba(87,226,190,.5); color: #dffff6; }.fulfillment-keys__list button svg { width: 14px; height: 14px; }.fulfillment-keys__error { margin: 11px 0 0; color: #ffaaa8; font-size: 10px; }
 .fulfillment-reconciliation { margin: 0 28px 18px; padding: 17px; border: 1px solid rgba(255,190,82,.38); border-radius: 19px; background: radial-gradient(circle at 100% 0,rgba(255,181,62,.12),transparent 38%),rgba(48,35,20,.28); box-shadow: inset 0 1px rgba(255,255,255,.025); }.fulfillment-reconciliation > header { display: grid; grid-template-columns: 38px minmax(0,1fr); align-items: start; gap: 12px; }.fulfillment-reconciliation__mark { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid rgba(255,198,95,.5); border-radius: 12px; color: #ffd078; background: rgba(255,183,61,.12); font: 900 17px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }.fulfillment-reconciliation header small,.fulfillment-reconciliation header strong { display: block; }.fulfillment-reconciliation header small { margin-bottom: 4px; color: #e2ad56; font-size: 9px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }.fulfillment-reconciliation header strong { color: #fff2d7; font-size: 14px; }.fulfillment-reconciliation header p { margin: 5px 0 0; color: #c8b998; font-size: 11px; line-height: 1.5; }.fulfillment-reconciliation__choices { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; margin-top: 14px; }.fulfillment-reconciliation__choices button { display: grid; grid-template-columns: 30px minmax(0,1fr); align-items: center; gap: 10px; min-height: 66px; padding: 11px; text-align: left; border: 1px solid rgba(199,175,128,.22); border-radius: 14px; color: #e8ddc7; background: rgba(17,24,44,.62); }.fulfillment-reconciliation__choices button.is-selected { border-color: rgba(255,201,99,.7); background: rgba(117,75,25,.34); box-shadow: 0 0 0 2px rgba(255,190,73,.08); }.fulfillment-reconciliation__choices strong,.fulfillment-reconciliation__choices small { display: block; }.fulfillment-reconciliation__choices strong { font-size: 11px; }.fulfillment-reconciliation__choices small { margin-top: 4px; color: #a89d88; font-size: 9px; line-height: 1.3; }.fulfillment-reconciliation__icon { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid rgba(255,202,105,.32); border-radius: 10px; color: #ffd078; background: rgba(255,190,76,.08); font-weight: 900; }.fulfillment-reconciliation__confirm { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 11px; padding: 11px 12px; border: 1px dashed rgba(255,199,96,.32); border-radius: 13px; background: rgba(10,15,29,.48); }.fulfillment-reconciliation__confirm p { margin: 0; color: #c7bba4; font-size: 9px; line-height: 1.45; }.fulfillment-reconciliation__confirm button { min-height: 40px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(255,196,87,.58); border-radius: 11px; color: #1a1308; background: linear-gradient(135deg,#ffc55d,#ffe08c); font-size: 9px; font-weight: 900; }
 .fulfillment-feature-lock { margin: 0 28px 18px; padding: 12px 14px; border: 1px solid rgba(255,194,91,.25); border-radius: 14px; color: #b9c2d8; background: rgba(77,57,28,.22); font-size: 11px; line-height: 1.5; }.fulfillment-feature-lock span { display: inline-flex; margin-right: 7px; padding: 3px 7px; border-radius: 999px; color: #ffd178; background: rgba(255,193,82,.1); font-size: 9px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }

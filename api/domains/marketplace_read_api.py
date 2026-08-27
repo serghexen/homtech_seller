@@ -192,6 +192,7 @@ class MarketplaceOrderItemOut(BaseModel):
     status: str
     provider_status: str = ""
     delivery_type: str = ""
+    has_fulfillment_keys: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
     synced_at: datetime
@@ -210,7 +211,7 @@ def marketplace_order_from_row(row: tuple[Any, ...]) -> MarketplaceOrderItemOut:
         external_order_id=str(row[3]), external_item_id=str(row[4]), offer_id=str(row[5] or ""),
         sku=str(row[6] or ""), title=str(row[7] or ""), quantity=int(row[8] or 0), status=str(row[9]),
         provider_status=str(row[10] or ""), delivery_type=str(row[11] or ""), created_at=row[12],
-        updated_at=row[13], synced_at=row[14],
+        updated_at=row[13], synced_at=row[14], has_fulfillment_keys=bool(row[15]) if len(row) > 15 else False,
     )
 
 
@@ -1132,7 +1133,17 @@ def mount_marketplace_read_routes(
                     SELECT item.connection_id, connection.provider_code, connection.display_name,
                            item.external_order_id, item.external_item_id, item.offer_id, item.sku, item.title,
                            item.quantity, item.normalized_status, item.provider_status, item.delivery_type,
-                           item.created_at, item.updated_at, item.synced_at
+                           item.created_at, item.updated_at, item.synced_at,
+                           EXISTS (
+                             SELECT 1
+                             FROM seller.order_fulfillments AS fulfillment
+                             JOIN seller.fulfillment_key_reservations AS reservation
+                               ON reservation.fulfillment_id=fulfillment.id
+                              AND reservation.state IN ('reserved','consumed')
+                             WHERE fulfillment.connection_id=item.connection_id
+                               AND fulfillment.external_order_id=item.external_order_id
+                               AND fulfillment.external_item_id=item.external_item_id
+                           ) AS has_fulfillment_keys
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE connection.workspace_id=%s AND item.connection_id=%s
@@ -1200,7 +1211,17 @@ def mount_marketplace_read_routes(
                     SELECT item.connection_id, connection.provider_code, connection.display_name,
                            item.external_order_id, item.external_item_id, item.offer_id, item.sku, item.title,
                            item.quantity, item.normalized_status, item.provider_status, item.delivery_type,
-                           item.created_at, item.updated_at, item.synced_at
+                           item.created_at, item.updated_at, item.synced_at,
+                           EXISTS (
+                             SELECT 1
+                             FROM seller.order_fulfillments AS fulfillment
+                             JOIN seller.fulfillment_key_reservations AS reservation
+                               ON reservation.fulfillment_id=fulfillment.id
+                              AND reservation.state IN ('reserved','consumed')
+                             WHERE fulfillment.connection_id=item.connection_id
+                               AND fulfillment.external_order_id=item.external_order_id
+                               AND fulfillment.external_item_id=item.external_item_id
+                           ) AS has_fulfillment_keys
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE {where}

@@ -9,7 +9,8 @@ import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
-import { isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
+import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
+import { canOpenOrderFulfillment, isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
 import { liveSearchDelay } from './utils/search.js'
 import {
   isSyncJobActive,
@@ -161,12 +162,6 @@ function providerLogo(providerCode) {
 function hasProductInstruction(item) {
   // Литеральные переносы из старой CRM не должны считаться содержательной инструкцией сами по себе.
   return Boolean(normalizeEscapedLineBreaks(item?.activation_instruction).trim())
-}
-
-function isDigitalFulfillmentOrder(item) {
-  // Локальная выдача поддерживает цифровые заказы Яндекс Маркета и Ozon.
-  return ['yandex_market', 'ozon'].includes(item?.provider_code)
-    && String(item?.delivery_type || '').trim().toUpperCase() === 'DIGITAL'
 }
 
 async function openProductCard(item) {
@@ -602,8 +597,8 @@ function connectionActivity(connection) {
   if (connection.status === 'disabled') return 'Сохранённые данные доступны для просмотра'
   if (connection.last_error) return 'Не удалось обновить данные. Проверьте ключ или повторите позже.'
   if (connection.provider_code === 'ozon' && !connection.orders_polling_enabled) return 'Автоматическое получение заказов выключено'
-  if (connection.provider_code === 'ozon' && connection.last_orders_poll_at) return `Заказы проверены: ${formatDate(connection.last_orders_poll_at)}`
-  if (connection.last_checked_at) return `Последняя успешная проверка: ${formatDate(connection.last_checked_at)}`
+  const checkedAt = connectionLastCheckedAt(connection)
+  if (checkedAt) return `Последняя успешная проверка: ${formatDate(checkedAt)}`
   return 'Ожидает первой проверки'
 }
 
@@ -1435,9 +1430,7 @@ onBeforeUnmount(() => {
           <div><h2>{{ connection.display_name }}</h2><p>{{ providerName(connection.provider_code) }}</p></div>
           <dl>
             <div><dt>API-ключ</dt><dd>{{ connection.token_masked }}</dd></div>
-            <div v-if="connection.provider_code === 'ozon'"><dt>Client ID</dt><dd>{{ connection.client_id }}</dd></div>
-            <div v-else><dt>Кабинет / магазин</dt><dd>{{ connection.business_id }} / {{ connection.campaign_id }}</dd></div>
-            <div v-if="connection.provider_code === 'ozon'"><dt>Получение заказов</dt><dd>{{ connection.orders_polling_enabled ? `Каждые ${connection.orders_poll_interval_seconds} сек.` : 'Выключено' }}</dd></div>
+            <div><dt>Кабинет / магазин</dt><dd>{{ connectionAccountValue(connection) }}</dd></div>
           </dl>
           <p class="connection-card__activity" :class="{ 'connection-card__activity--error': connection.last_error }" :title="connection.last_error || ''">{{ connectionActivity(connection) }}</p>
           <footer>
@@ -1630,7 +1623,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="snapshot-grid">
             <article v-for="item in orders" :key="`${item.connection_id}-${item.external_order_id}-${item.external_item_id}`" class="snapshot-card order-card">
-              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="isDigitalFulfillmentOrder(item)" class="order-card__fulfillment" type="button" :title="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" :aria-label="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
+              <div class="snapshot-card__head"><span class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></span><div><h2>Заказ №{{ item.external_order_id }}</h2><p>{{ item.store_name }} · {{ providerName(item.provider_code) }}<span v-if="isConnectionDisabled(item.connection_id)" class="snapshot-archive-label">Архив</span></p></div><div class="order-card__actions"><span class="order-status" :class="`order-status--${item.status}`">{{ orderStatus(item.status) }}</span><button v-if="canOpenOrderFulfillment(item)" class="order-card__fulfillment" type="button" :title="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" :aria-label="item.status === 'processing' ? 'Открыть локальную выдачу' : 'Посмотреть выданные ключи'" @click="openOrderFulfillment(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v8L12 21l-8-4.5z" /><path d="m4 8.5 8 4.5 8-4.5M12 13v8" /><path d="M8.5 6 16 10.2" /></svg></button></div></div>
               <div class="order-card__body"><strong>{{ item.title || 'Товар без названия' }}</strong></div>
               <div class="snapshot-card__footer"><span>SKU: <strong>{{ item.sku || item.offer_id || '—' }}</strong></span><time :datetime="item.updated_at || item.created_at || item.synced_at">{{ formatDate(item.updated_at || item.created_at || item.synced_at) }}</time></div>
             </article>

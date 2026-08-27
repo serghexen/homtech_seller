@@ -19,6 +19,7 @@ from domains.fulfillment_service import (
 from domains.local_auth import AuthenticatedUser
 from domains.ozon_outbound import ozon_outbound_enabled
 from domains.ozon_stock_queue import enqueue_ozon_stock_publication
+from domains.supplier_fulfillment import automatic_fulfillment_resolver_enabled
 from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enabled
 from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
 
@@ -71,6 +72,48 @@ class OrderFulfillmentOut(BaseModel):
     can_prepare_support: bool = False
     support_message_configured: bool = False
     can_reveal_keys: bool = False
+    automation_in_progress: bool = False
+
+
+def automation_controls_fulfillment(
+    *,
+    fulfillment_status: str,
+    handling_mode: str,
+    outbound_state: str,
+    resolver_enabled: bool,
+    resolver_active: bool,
+    supplier_attempt_active: bool,
+) -> bool:
+    return bool(
+        resolver_active
+        or supplier_attempt_active
+        or (
+            handling_mode == "automatic"
+            and (
+                fulfillment_status in {"pending", "supplier_required", "sending", "submitted"}
+                or (fulfillment_status == "reserved" and outbound_state in {"", "queued", "preparing"})
+            )
+        )
+        or (
+            resolver_enabled
+            and handling_mode == "unassigned"
+            and fulfillment_status in {"not_prepared", "pending", "supplier_required"}
+        )
+    )
+
+
+def manual_preparation_stage_ready(
+    *, fulfillment_status: str, handling_mode: str, resolver_enabled: bool, automation_in_progress: bool,
+) -> bool:
+    if automation_in_progress:
+        return False
+    if fulfillment_status == "manual_required" and handling_mode != "automatic":
+        return True
+    return bool(
+        not resolver_enabled
+        and handling_mode != "automatic"
+        and fulfillment_status in {"not_prepared", "pending", "supplier_required"}
+    )
 
 
 def mount_marketplace_fulfillment_routes(
@@ -130,7 +173,23 @@ def mount_marketplace_fulfillment_routes(
                    CASE WHEN COALESCE(settings.support_message_overridden, false)
                      THEN settings.support_message_delivery_enabled
                      ELSE COALESCE(imported_settings.support_message_delivery_enabled, false) END,
-                   item.fulfillment_deadline_at
+                   item.fulfillment_deadline_at,
+                   COALESCE(fulfillment.handling_mode, 'unassigned'),
+                   COALESCE(
+                     fulfillment.resolver_lock_token IS NOT NULL
+                     AND fulfillment.resolver_locked_until >= now(),
+                     false
+                   ),
+                   EXISTS (
+                     SELECT 1
+                     FROM seller.supplier_purchase_attempts AS attempt
+                     WHERE attempt.fulfillment_id=fulfillment.id
+                       AND attempt.result_key_id IS NULL
+                       AND (
+                         attempt.state IN ('queued','created','checked','payment_started','processing','requires_attention')
+                         OR attempt.blocks_fallback=true
+                       )
+                   )
             FROM seller.order_items AS item
             JOIN seller.marketplace_connections AS marketplace_connection
               ON marketplace_connection.id=item.connection_id
@@ -164,6 +223,24 @@ def mount_marketplace_fulfillment_routes(
         outbound_state = str(row[20] or "")
         outbound_active = outbound_state in {"queued", "preparing", "sending", "submitted", "unknown"}
         can_manage = role_code in {"owner", "operator"}
+        resolver_enabled = automatic_fulfillment_resolver_enabled()
+        handling_mode = str(row[26] or "unassigned") if len(row) > 26 else "unassigned"
+        resolver_active = bool(row[27]) if len(row) > 27 else False
+        supplier_attempt_active = bool(row[28]) if len(row) > 28 else False
+        automation_in_progress = automation_controls_fulfillment(
+            fulfillment_status=fulfillment_status,
+            handling_mode=handling_mode,
+            outbound_state=outbound_state,
+            resolver_enabled=resolver_enabled,
+            resolver_active=resolver_active,
+            supplier_attempt_active=supplier_attempt_active,
+        )
+        preparation_stage_ready = manual_preparation_stage_ready(
+            fulfillment_status=fulfillment_status,
+            handling_mode=handling_mode,
+            resolver_enabled=resolver_enabled,
+            automation_in_progress=automation_in_progress,
+        )
         can_prepare_any = bool(
             actions_enabled
             and can_manage
@@ -171,7 +248,8 @@ def mount_marketplace_fulfillment_routes(
             and str(row[5]) == "active"
             and str(row[6]) == "processing"
             and str(row[7] or "").strip().upper() == "DIGITAL"
-            and fulfillment_status in {"not_prepared", "pending", "manual_required", "supplier_required"}
+            and not automation_in_progress
+            and preparation_stage_ready
         )
         can_prepare = can_prepare_any
         support_message_configured = bool(str(row[23] or "").strip()) and bool(row[24])
@@ -191,7 +269,10 @@ def mount_marketplace_fulfillment_routes(
             fulfillment_deadline_at=row[25] if len(row) > 25 else None,
             reserved_count=int(row[16] or 0), free_count=int(row[17] or 0),
             can_prepare=can_prepare,
-            can_release=bool(actions_enabled and can_manage and fulfillment_status == "reserved" and not outbound_active),
+            can_release=bool(
+                actions_enabled and can_manage and fulfillment_status == "reserved"
+                and not outbound_active and not automation_in_progress
+            ),
             manual_actions_enabled=actions_enabled,
             outbound_enabled=outbound_available,
             outbound_state=outbound_state,
@@ -203,8 +284,11 @@ def mount_marketplace_fulfillment_routes(
                 and fulfillment_status == "reserved" and prepared_material_complete
                 and (provider_code == "ozon" or bool(str(row[19] or "").strip()))
                 and outbound_state in {"", "failed", "cancelled"}
+                and not automation_in_progress
             ),
-            can_cancel_send=bool(actions_enabled and can_manage and outbound_state == "queued"),
+            can_cancel_send=bool(
+                actions_enabled and can_manage and outbound_state == "queued" and not automation_in_progress
+            ),
             can_resolve_unknown=bool(
                 actions_enabled and can_manage and provider_code in {"yandex_market", "ozon"}
                 and fulfillment_status == "unknown" and outbound_state == "unknown"
@@ -213,6 +297,7 @@ def mount_marketplace_fulfillment_routes(
             can_prepare_support=bool(can_prepare_any and provider_code == "yandex_market" and support_message_configured),
             support_message_configured=support_message_configured,
             can_reveal_keys=bool(can_manage and int(row[16] or 0) > 0),
+            automation_in_progress=automation_in_progress,
         )
 
     def require_manual_feature_enabled() -> None:
@@ -228,6 +313,61 @@ def mount_marketplace_fulfillment_routes(
             raise HTTPException(status_code=409, detail="Подготовка ключей доступна только для цифрового заказа")
         if detail.order_status != "processing":
             raise HTTPException(status_code=409, detail="Подготовить ключи можно только для заказа в процессе")
+        if not detail.can_prepare_manual:
+            if detail.automation_in_progress:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Заказ обрабатывается автовыдачей. Ручной ввод станет доступен после передачи оператору",
+                )
+            raise HTTPException(status_code=409, detail="Заказ пока не передан на ручную подготовку")
+
+    def lock_manual_preparation(connection, fulfillment_id: int) -> None:
+        # Повторяет проверку под блокировкой строки: worker не сможет начать
+        # покупку между чтением окна и ручным закреплением комплекта.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT fulfillment.status, fulfillment.handling_mode,
+                       COALESCE(
+                         fulfillment.resolver_lock_token IS NOT NULL
+                         AND fulfillment.resolver_locked_until >= now(),
+                         false
+                       ),
+                       EXISTS (
+                         SELECT 1
+                         FROM seller.supplier_purchase_attempts AS attempt
+                         WHERE attempt.fulfillment_id=fulfillment.id
+                           AND attempt.result_key_id IS NULL
+                           AND (
+                             attempt.state IN ('queued','created','checked','payment_started','processing','requires_attention')
+                             OR attempt.blocks_fallback=true
+                           )
+                       )
+                FROM seller.order_fulfillments AS fulfillment
+                WHERE fulfillment.id=%s
+                FOR UPDATE
+                """,
+                (fulfillment_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="Локальная выдача не найдена")
+        status, handling_mode = str(row[0]), str(row[1] or "unassigned")
+        resolver_active, supplier_attempt_active = bool(row[2]), bool(row[3])
+        if resolver_active or supplier_attempt_active:
+            raise HTTPException(status_code=409, detail="Автовыдача уже обрабатывает этот заказ")
+        if handling_mode == "automatic" and status != "manual_required":
+            raise HTTPException(status_code=409, detail="Автовыдача ещё не передала заказ оператору")
+        if automatic_fulfillment_resolver_enabled() and status != "manual_required":
+            raise HTTPException(
+                status_code=409,
+                detail="Дождитесь завершения автовыдачи или передачи заказа оператору",
+            )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE seller.order_fulfillments SET handling_mode='manual', updated_at=now() WHERE id=%s",
+                (fulfillment_id,),
+            )
 
     def fulfillment_id_after_observe(connection, identity: tuple[int, str, str]) -> int:
         observe_order_fulfillments(connection, connection_id=identity[0], external_order_id=identity[1])
@@ -278,6 +418,7 @@ def mount_marketplace_fulfillment_routes(
                 )
             require_manual_action_allowed(detail)
             fulfillment_id = fulfillment_id_after_observe(connection, identity)
+            lock_manual_preparation(connection, fulfillment_id)
             result = reserve_pool_keys(
                 connection, fulfillment_id=fulfillment_id, require_automatic_gates=False,
             )
@@ -312,6 +453,7 @@ def mount_marketplace_fulfillment_routes(
                 )
             require_manual_action_allowed(detail)
             fulfillment_id = fulfillment_id_after_observe(connection, identity)
+            lock_manual_preparation(connection, fulfillment_id)
             try:
                 result = prepare_manual_keys(
                     connection, fulfillment_id=fulfillment_id, codes=prepared_codes,
@@ -363,6 +505,7 @@ def mount_marketplace_fulfillment_routes(
                 support_row = cursor.fetchone() or ("", False)
                 message = str(support_row[0] or "").strip() if bool(support_row[1]) else ""
             fulfillment_id = fulfillment_id_after_observe(connection, identity)
+            lock_manual_preparation(connection, fulfillment_id)
             result = prepare_support_message(
                 connection, fulfillment_id=fulfillment_id, message=message, user_id=seller_user.id,
             )
@@ -391,6 +534,10 @@ def mount_marketplace_fulfillment_routes(
                 )
             if not detail.fulfillment_id:
                 raise HTTPException(status_code=409, detail="Для заказа ещё нет локальной выдачи")
+            if not detail.can_release:
+                if detail.automation_in_progress:
+                    raise HTTPException(status_code=409, detail="Автовыдача управляет резервом этого заказа")
+                raise HTTPException(status_code=409, detail="Резерв сейчас нельзя снять")
             if detail.outbound_state in {"queued", "preparing", "sending", "submitted", "unknown"}:
                 raise HTTPException(status_code=409, detail="Сначала завершите или сверьте внешнюю отправку")
             result = release_pool_keys(connection, fulfillment_id=detail.fulfillment_id)

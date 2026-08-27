@@ -11,11 +11,51 @@ from fastapi import FastAPI, HTTPException
 from domains.marketplace_fulfillments_api import (
     FulfillmentIdentityIn,
     FulfillmentUnknownResolutionIn,
+    automation_controls_fulfillment,
+    manual_preparation_stage_ready,
     mount_marketplace_fulfillment_routes,
 )
 
 
 class MarketplaceFulfillmentsApiTests(unittest.TestCase):
+    def test_automatic_chain_owns_pending_and_active_supplier_states(self) -> None:
+        self.assertTrue(automation_controls_fulfillment(
+            fulfillment_status="pending", handling_mode="automatic", outbound_state="",
+            resolver_enabled=True, resolver_active=False, supplier_attempt_active=False,
+        ))
+        self.assertTrue(automation_controls_fulfillment(
+            fulfillment_status="supplier_required", handling_mode="manual", outbound_state="",
+            resolver_enabled=False, resolver_active=False, supplier_attempt_active=True,
+        ))
+        self.assertFalse(manual_preparation_stage_ready(
+            fulfillment_status="supplier_required", handling_mode="automatic",
+            resolver_enabled=True, automation_in_progress=True,
+        ))
+
+    def test_only_explicit_handoff_or_disabled_resolver_allows_manual_preparation(self) -> None:
+        self.assertTrue(manual_preparation_stage_ready(
+            fulfillment_status="manual_required", handling_mode="manual",
+            resolver_enabled=True, automation_in_progress=False,
+        ))
+        self.assertTrue(manual_preparation_stage_ready(
+            fulfillment_status="pending", handling_mode="unassigned",
+            resolver_enabled=False, automation_in_progress=False,
+        ))
+        self.assertFalse(manual_preparation_stage_ready(
+            fulfillment_status="pending", handling_mode="unassigned",
+            resolver_enabled=True, automation_in_progress=True,
+        ))
+
+    def test_failed_automatic_outbound_is_no_longer_presented_as_running(self) -> None:
+        self.assertTrue(automation_controls_fulfillment(
+            fulfillment_status="reserved", handling_mode="automatic", outbound_state="queued",
+            resolver_enabled=True, resolver_active=False, supplier_attempt_active=False,
+        ))
+        self.assertFalse(automation_controls_fulfillment(
+            fulfillment_status="reserved", handling_mode="automatic", outbound_state="failed",
+            resolver_enabled=True, resolver_active=False, supplier_attempt_active=False,
+        ))
+
     def test_mounts_read_local_actions_and_durable_outbound_actions(self) -> None:
         app = FastAPI()
         mount_marketplace_fulfillment_routes(
@@ -81,6 +121,16 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         self.assertIn("item.delivery_type", source)
         self.assertIn("upper() != \"DIGITAL\"", source)
         self.assertIn("только для цифрового заказа", source)
+
+    def test_manual_preparation_waits_for_explicit_automatic_handoff(self) -> None:
+        route_source = inspect.getsource(mount_marketplace_fulfillment_routes)
+        state_source = inspect.getsource(manual_preparation_stage_ready)
+
+        self.assertIn('fulfillment_status == "manual_required"', state_source)
+        self.assertIn('fulfillment_status in {"not_prepared", "pending", "supplier_required"}', state_source)
+        self.assertIn("automation_in_progress=automation_in_progress", route_source)
+        self.assertIn("FOR UPDATE", route_source)
+        self.assertIn("Автовыдача уже обрабатывает этот заказ", route_source)
 
     @patch.dict("os.environ", {"SELLER_MANUAL_FULFILLMENT_ENABLED": "false"})
     def test_kill_switch_rejects_direct_prepare_and_release_without_database_access(self) -> None:

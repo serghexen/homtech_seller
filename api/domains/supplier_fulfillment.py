@@ -141,6 +141,7 @@ class SupplierFulfillmentProcessor:
                     JOIN seller.marketplace_connections AS market
                       ON market.id=fulfillment.connection_id
                     WHERE fulfillment.status IN ('pending', 'manual_required', 'supplier_required')
+                      AND fulfillment.handling_mode<>'manual'
                       AND fulfillment.next_resolve_at <= now()
                       AND (fulfillment.resolver_locked_until IS NULL OR fulfillment.resolver_locked_until < now())
                       AND market.status='active'
@@ -156,7 +157,8 @@ class SupplierFulfillmentProcessor:
                 cursor.execute(
                     """
                     UPDATE seller.order_fulfillments
-                    SET resolver_lock_token=%s, resolver_locked_until=now() + interval '2 minutes', updated_at=now()
+                    SET handling_mode='automatic', resolver_lock_token=%s,
+                        resolver_locked_until=now() + interval '2 minutes', updated_at=now()
                     WHERE id=%s
                     """,
                     (lock_token, fulfillment_id),
@@ -635,7 +637,8 @@ class SupplierFulfillmentProcessor:
                 cursor.execute(
                     """
                     UPDATE seller.order_fulfillments
-                    SET status='manual_required', delivery_source='unassigned', last_error=%s,
+                    SET status='manual_required', handling_mode='manual',
+                        delivery_source='unassigned', last_error=%s,
                         next_resolve_at=now() + interval '1 day', updated_at=now()
                     WHERE id=%s AND status IN ('pending','manual_required','supplier_required')
                     """,

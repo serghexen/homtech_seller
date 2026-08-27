@@ -168,6 +168,16 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("WHERE plan.code='pro'", joined)
         self.assertIn("Сохранение текущих возможностей Seller", joined)
 
+    def test_fulfillment_handling_mode_separates_automation_from_operator(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260827_03_fulfillment_handling_mode.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("handling_mode text NOT NULL DEFAULT 'unassigned'", joined)
+        self.assertIn("status='manual_required'", joined)
+        self.assertIn("supplier_purchase_attempts", joined)
+        self.assertIn("'automatic','manual'", joined)
+
     def test_manual_stock_publication_reuses_durable_outbox(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260826_06_manual_stock_publication.sql"

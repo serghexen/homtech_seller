@@ -208,6 +208,7 @@ class FulfillmentServiceTests(unittest.TestCase):
         all_sql = "\n".join(sql for sql, _params in connection.scripted_cursor.executions)
         self.assertIn("state='released'", all_sql)
         self.assertIn("delivery_source='unassigned'", all_sql)
+        self.assertIn("handling_mode='manual'", all_sql)
         self.assertNotIn("pgp_sym_decrypt", all_sql)
 
     def test_operator_can_encrypt_and_attach_exact_manual_set(self) -> None:

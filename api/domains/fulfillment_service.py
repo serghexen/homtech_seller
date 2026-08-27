@@ -303,7 +303,7 @@ def release_pool_keys(connection, *, fulfillment_id: int, reason: str = "operato
         cursor.execute(
             """
             UPDATE seller.order_fulfillments
-            SET status='pending', delivery_source='unassigned', reserved_at=NULL,
+            SET status='pending', handling_mode='manual', delivery_source='unassigned', reserved_at=NULL,
                 support_message_snapshot='', last_error='', updated_at=now()
             WHERE id=%s
             """,

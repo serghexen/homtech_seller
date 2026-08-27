@@ -2,7 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { addMonthsToDate, keyCountLabel, keyOrderLabel, parseKeyLines } from '../utils/keyPool.js'
+import { canOpenOrderFulfillment } from '../utils/orderFulfillment.js'
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
+import { supportsStockPublication } from '../utils/stockPublication.js'
 import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
 
 const props = defineProps({
@@ -113,13 +115,13 @@ const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.va
 const stockTarget = computed(() => Math.trunc(Number(settingsForm.manual_stock_limit)))
 const stockTargetValid = computed(() => Number.isInteger(stockTarget.value) && stockTarget.value >= 0 && stockTarget.value <= 1_000_000)
 const stockPublicationActive = computed(() => ['queued', 'preparing', 'sending'].includes(props.stockPublication?.state))
-const canPublishStock = computed(() => props.item.provider_code === 'yandex_market'
+const canPublishStock = computed(() => supportsStockPublication(props.item.provider_code)
   && props.stockPublicationEnabled && stockTargetValid.value && !settingsDirty.value
   && !props.stockPublicationLoading && !stockPublicationActive.value)
 const stockPublicationTitle = computed(() => ({
   queued: 'Публикация поставлена в очередь',
   preparing: 'Готовим остаток к отправке',
-  sending: 'Отправляем остаток в Яндекс',
+  sending: `Отправляем остаток в ${props.providerName}`,
   succeeded: `Опубликован остаток ${props.stockPublication?.target_stock ?? props.stockPublication?.requested_stock ?? ''}`.trim(),
   failed: 'Не удалось опубликовать остаток',
 })[props.stockPublication?.state] || '')
@@ -426,11 +428,6 @@ function submitKeyPool() {
 
 function shiftKeyPoolExpiry(monthsToAdd) {
   keyPoolForm.expires_at = addMonthsToDate(keyPoolForm.expires_at, monthsToAdd)
-}
-
-function canOpenOrderFulfillment(order) {
-  return ['yandex_market', 'ozon'].includes(props.item.provider_code)
-    && String(order?.delivery_type || '').trim().toUpperCase() === 'DIGITAL'
 }
 
 watch(() => props.keyPoolNotice, (notice) => {
@@ -885,7 +882,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                             <strong>Заказ №{{ order.external_order_id }}</strong>
                             <div class="product-order__actions">
                               <span class="product-order__status" :class="`product-order__status--${order.status}`">{{ orderStatusLabel(order.status) }}</span>
-                              <button v-if="canOpenOrderFulfillment(order)" type="button" :title="order.status === 'processing' ? 'Открыть выдачу' : 'Посмотреть выданный ключ'" :aria-label="`Открыть выдачу заказа ${order.external_order_id}`" @click="emit('open-order-fulfillment', order)">
+                              <button v-if="canOpenOrderFulfillment(order, item.provider_code)" type="button" :title="order.status === 'processing' ? 'Открыть выдачу' : 'Посмотреть выданный ключ'" :aria-label="`Открыть выдачу заказа ${order.external_order_id}`" @click="emit('open-order-fulfillment', order)">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v5h5M10 12h5M10 16h5" /></svg>
                               </button>
                             </div>

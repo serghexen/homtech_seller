@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import unittest
 from decimal import Decimal
@@ -153,6 +154,12 @@ class SupplierFulfillmentTests(unittest.TestCase):
         processor = Processor()
         self.assertEqual(processor.process_pending(), 0)
         processor._psycopg.connect.assert_not_called()
+
+    def test_resolver_claim_excludes_orders_already_handed_to_operator(self) -> None:
+        source = inspect.getsource(SupplierFulfillmentProcessor._claim)
+
+        self.assertIn("handling_mode<>'manual'", source)
+        self.assertIn("handling_mode='automatic'", source)
 
 
 if __name__ == "__main__":
