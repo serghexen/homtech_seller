@@ -653,7 +653,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           <template v-else>
                             <div class="product-delivery-supplier__fields">
                               <div class="product-delivery-supplier__service">
-                                <label for="supplier-service-search">Товар Interhub</label>
+                                <label for="supplier-service-search">Товар</label>
                                 <div class="supplier-combobox">
                                   <svg class="supplier-combobox__search" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16 16 4 4" /></svg>
                                   <input
@@ -776,8 +776,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           </div>
                           <template v-else>
                             <div class="product-key-pool__list-head">
-                              <div><strong>Ключи пула</strong><small>Здесь только ключи, добавленные через это окно</small></div>
-                              <span>Значения открываются только по кнопке</span>
+                              <strong>Ключи пула</strong>
                             </div>
                             <div class="product-key-pool__table-wrap">
                               <table class="product-key-pool__table">
@@ -806,11 +805,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                               <button type="button" :disabled="keyPoolLoading || keyPool.page >= keyPoolPageCount" @click="emit('load-key-pool', keyPool.page + 1)">Вперёд</button>
                             </div>
                           </template>
-
-                          <p class="stock-readonly__notice">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                            Включение способа сохраняет приоритет карточки, но не запускает выдачу и ничего не отправляет в Яндекс.
-                          </p>
                         </div>
                       </article>
 

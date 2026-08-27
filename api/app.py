@@ -22,7 +22,7 @@ from domains.workspace_entitlements import WorkspaceAccess, read_workspace_acces
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.57")
+app = FastAPI(title="HomTech Seller API", version="0.0.58")
 
 
 def cors_origins() -> list[str]:
