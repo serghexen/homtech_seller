@@ -178,6 +178,16 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("supplier_purchase_attempts", joined)
         self.assertIn("'automatic','manual'", joined)
 
+    def test_marketplace_identity_is_globally_unique_across_workspaces(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260827_04_marketplace_connection_identity.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("uq_marketplace_connections_yandex_campaign_global", joined)
+        self.assertIn("provider_code='yandex_market' AND campaign_id<>''", joined)
+        self.assertIn("uq_marketplace_connections_ozon_client_global", joined)
+        self.assertIn("provider_code='ozon' AND client_id<>''", joined)
+
     def test_manual_stock_publication_reuses_durable_outbox(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260826_06_manual_stock_publication.sql"

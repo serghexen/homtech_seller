@@ -190,6 +190,27 @@ def mount_marketplace_connection_routes(
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
+                # Webhook Яндекса содержит campaignId, а polling Ozon определяется Client ID.
+                # Один внешний магазин закрепляется ровно за одним workspace: advisory lock
+                # закрывает гонку двух регистраций, глобальный индекс страхует обход API.
+                identity_value = client_id if payload.provider_code == "ozon" else campaign_id
+                identity_column = "client_id" if payload.provider_code == "ozon" else "campaign_id"
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"marketplace:{payload.provider_code}:{identity_value}",),
+                )
+                cursor.execute(
+                    f"""
+                    SELECT workspace_id
+                    FROM seller.marketplace_connections
+                    WHERE provider_code=%s AND {identity_column}=%s
+                    LIMIT 1
+                    """,
+                    (payload.provider_code, identity_value),
+                )
+                existing_owner = cursor.fetchone()
+                if existing_owner and int(existing_owner[0]) != seller_user.workspace_id:
+                    raise HTTPException(status_code=409, detail="Этот магазин уже подключён в другом аккаунте Seller")
                 cursor.execute(
                     """
                     INSERT INTO seller.marketplace_connections(

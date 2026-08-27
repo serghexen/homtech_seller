@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from inspect import getsource
 
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -49,3 +50,11 @@ class MarketplaceConnectionsContractTests(unittest.TestCase):
         paths = {route.path for route in app.routes}
         self.assertIn("/marketplaces/connections/{connection_id}/disable", paths)
         self.assertIn("/marketplaces/connections/{connection_id}/enable", paths)
+
+    def test_connection_creation_claims_external_store_for_one_workspace(self) -> None:
+        source = getsource(mount_marketplace_connection_routes)
+
+        self.assertIn("pg_advisory_xact_lock", source)
+        self.assertIn("identity_column", source)
+        self.assertIn("existing_owner", source)
+        self.assertIn("другом аккаунте Seller", source)
