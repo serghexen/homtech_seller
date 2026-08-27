@@ -33,26 +33,39 @@ def _request_json(url: str, *, method: str, headers: dict[str, str], payload: di
 
 
 def _fetch_ozon_catalog(*, client_id: str, token: str) -> list[dict[str, Any]]:
-    # Читает список и детали товаров Ozon, чтобы получить названия без изменения карточек или остатков.
-    rows: list[dict[str, Any]] = []
-    last_id = ""
+    # Ozon не включает архив в visibility=ALL, поэтому читаем оба снимка отдельно.
+    rows_by_id: dict[str, dict[str, Any]] = {}
     headers = {"Client-Id": client_id, "Api-Key": token}
-    for _page in range(1000):
-        payload = _request_json(
-            f"{OZON_SELLER_BASE_URL}/v3/product/list", method="POST", headers=headers,
-            payload={"filter": {"offer_id": [], "product_id": [], "visibility": "ALL"}, "last_id": last_id, "limit": 1000},
-        )
-        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        items = result.get("items") if isinstance(result.get("items"), list) else []
-        rows.extend(item for item in items if isinstance(item, dict))
-        next_last_id = str(result.get("last_id") or "").strip()
-        if not items or not next_last_id:
-            break
-        if next_last_id == last_id:
-            raise HTTPException(502, "Ozon не продвинул постраничное чтение каталога")
-        last_id = next_last_id
-    else:
-        raise HTTPException(502, "Каталог Ozon превысил безопасный лимит страниц")
+    for visibility, archived in (("ALL", False), ("ARCHIVED", True)):
+        last_id = ""
+        for _page in range(1000):
+            payload = _request_json(
+                f"{OZON_SELLER_BASE_URL}/v3/product/list", method="POST", headers=headers,
+                payload={
+                    "filter": {"offer_id": [], "product_id": [], "visibility": visibility},
+                    "last_id": last_id,
+                    "limit": 1000,
+                },
+            )
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            items = result.get("items") if isinstance(result.get("items"), list) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                product_id = str(item.get("product_id") or item.get("id") or item.get("offer_id") or "").strip()
+                if not product_id:
+                    continue
+                # В /v3/product/list у архивных строк нет собственного признака ARCHIVED.
+                rows_by_id[product_id] = {**item, "archived": archived}
+            next_last_id = str(result.get("last_id") or "").strip()
+            if not items or not next_last_id:
+                break
+            if next_last_id == last_id:
+                raise HTTPException(502, "Ozon не продвинул постраничное чтение каталога")
+            last_id = next_last_id
+        else:
+            raise HTTPException(502, "Каталог Ozon превысил безопасный лимит страниц")
+    rows = list(rows_by_id.values())
     details: dict[str, dict[str, Any]] = {}
     for offset in range(0, len(rows), 1000):
         ids = [item.get("product_id") for item in rows[offset:offset + 1000] if str(item.get("product_id") or "").isdigit()]
@@ -68,7 +81,15 @@ def _fetch_ozon_catalog(*, client_id: str, token: str) -> list[dict[str, Any]]:
             product_id = str(item.get("product_id") or item.get("id") or "").strip() if isinstance(item, dict) else ""
             if product_id.isdigit():
                 details[product_id] = item
-    return [{**row, **details.get(str(row.get("product_id") or row.get("id") or ""), {})} for row in rows]
+    return [
+        {
+            **row,
+            **details.get(str(row.get("product_id") or row.get("id") or ""), {}),
+            # Подробный ответ также может не содержать visibility, сохраняем контекст списка.
+            "archived": bool(row.get("archived")),
+        }
+        for row in rows
+    ]
 
 
 def _fetch_yandex_catalog(*, business_id: int, campaign_id: int | None, token: str) -> list[dict[str, Any]]:
