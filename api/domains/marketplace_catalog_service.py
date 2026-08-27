@@ -92,6 +92,76 @@ def _fetch_ozon_catalog(*, client_id: str, token: str) -> list[dict[str, Any]]:
     ]
 
 
+def ozon_stock_snapshot(payload: Any) -> dict[str, Any]:
+    """Нормализует read-only остаток из подробной карточки Ozon."""
+
+    if not isinstance(payload, dict):
+        return {"found": False, "available_stock": None, "updated_at": ""}
+    stock_payload = payload.get("stocks")
+    if isinstance(stock_payload, dict):
+        rows = stock_payload.get("stocks") if isinstance(stock_payload.get("stocks"), list) else []
+        stock_contract_present = "has_stock" in stock_payload or "stocks" in stock_payload
+    elif isinstance(stock_payload, list):
+        rows = stock_payload
+        stock_contract_present = True
+    else:
+        rows = []
+        stock_contract_present = False
+
+    present_values: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("present") is None:
+            continue
+        try:
+            present_values.append(max(0, int(row["present"])))
+        except (TypeError, ValueError):
+            continue
+    if present_values:
+        available_stock: int | None = sum(present_values)
+    elif stock_contract_present:
+        # Явно переданный пустой набор Ozon означает нулевой остаток, а не отсутствие снимка.
+        available_stock = 0
+    else:
+        available_stock = None
+    return {
+        "found": available_stock is not None,
+        "available_stock": available_stock,
+        "updated_at": str(payload.get("updated_at") or "").strip(),
+    }
+
+
+def _fetch_ozon_stocks(*, client_id: str, token: str, offer_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Читает подробности только выбранных офферов Ozon и не изменяет остаток."""
+
+    normalized_offer_ids = list(dict.fromkeys(
+        str(value or "").strip()
+        for value in offer_ids
+        if str(value or "").strip()
+    ))
+    stocks_by_offer: dict[str, dict[str, Any]] = {
+        offer_id: {"found": False, "available_stock": None, "updated_at": ""}
+        for offer_id in normalized_offer_ids
+    }
+    headers = {"Client-Id": client_id, "Api-Key": token}
+    for offset in range(0, len(normalized_offer_ids), 1000):
+        batch = normalized_offer_ids[offset:offset + 1000]
+        payload = _request_json(
+            f"{OZON_SELLER_BASE_URL}/v3/product/info/list",
+            method="POST",
+            headers=headers,
+            payload={"offer_id": batch, "product_id": [], "sku": []},
+        )
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else result.get("items", [])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            offer_id = str(item.get("offer_id") or "").strip()
+            if offer_id in stocks_by_offer:
+                stocks_by_offer[offer_id] = ozon_stock_snapshot(item)
+    return stocks_by_offer
+
+
 def _fetch_yandex_catalog(*, business_id: int, campaign_id: int | None, token: str) -> list[dict[str, Any]]:
     # Читает активные и архивные карточки выбранного магазина постранично, не изменяя офферы.
     rows: list[dict[str, Any]] = []
@@ -197,11 +267,11 @@ def fetch_marketplace_catalog(
 
 
 def fetch_marketplace_stocks(
-    *, provider_code: str, token: str, campaign_id: int | None, offer_ids: list[str],
+    *, provider_code: str, token: str, campaign_id: int | None, offer_ids: list[str], client_id: str = "",
 ) -> dict[str, dict[str, Any]]:
-    # На текущем этапе отдельный снимок остатков нужен Яндекс Маркету; Ozon продолжает отдавать их в деталях товара.
+    # Читает остатки без публикации: Яндекс отдельным методом, Ozon через подробности карточек.
     if provider_code == "yandex_market" and campaign_id:
         return _fetch_yandex_stocks(campaign_id=campaign_id, token=token, offer_ids=offer_ids)
-    if provider_code == "ozon":
-        return {}
+    if provider_code == "ozon" and client_id:
+        return _fetch_ozon_stocks(client_id=client_id, token=token, offer_ids=offer_ids)
     raise HTTPException(400, "Для чтения остатков не хватает идентификатора магазина")

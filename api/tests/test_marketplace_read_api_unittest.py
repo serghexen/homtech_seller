@@ -126,6 +126,36 @@ class MarketplaceReadApiTests(unittest.TestCase):
         image = catalog_primary_image("ozon", {"primary_image": "https://cdn1.ozone.ru/example.jpg"})
         self.assertEqual(image, "https://cdn1.ozone.ru/example.jpg")
 
+    def test_ozon_catalog_card_reads_embedded_stock(self) -> None:
+        details = catalog_card_details(
+            "ozon",
+            {
+                "price": "133.00",
+                "currency_code": "RUB",
+                "stocks": {"has_stock": True, "stocks": [
+                    {"sku": 5196324554, "source": "fbo", "present": 5, "reserved": 0},
+                ]},
+            },
+        )
+
+        self.assertEqual(details["available_stock"], 5)
+        self.assertIsNone(details["stock_synced_at"])
+
+    def test_ozon_catalog_card_prefers_checked_snapshot(self) -> None:
+        details = catalog_card_details(
+            "ozon",
+            {
+                "stocks": {"has_stock": True, "stocks": [{"present": 5}]},
+                "_sellerSnapshot": {
+                    "availableStock": 4,
+                    "stockCheckedAt": "2026-08-27T16:30:00+00:00",
+                },
+            },
+        )
+
+        self.assertEqual(details["available_stock"], 4)
+        self.assertEqual(details["stock_synced_at"], "2026-08-27T16:30:00+00:00")
+
     def test_stock_snapshot_preserves_marketplace_payload(self) -> None:
         checked_at = datetime(2026, 8, 24, 16, 25, tzinfo=timezone.utc)
         payload = catalog_payload_with_stock(

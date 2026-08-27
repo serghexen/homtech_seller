@@ -198,7 +198,7 @@ async function openProductCard(item) {
       nominal_id: item.supplier_nominal_id || '',
     }))
   }
-  if (item.provider_code === 'yandex_market' && !item.archived && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
+  if (['yandex_market', 'ozon'].includes(item.provider_code) && !item.archived && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
   await Promise.allSettled(requests)
 }
 
@@ -429,7 +429,7 @@ async function refreshSelectedProductOrders() {
 async function refreshSelectedProductStock() {
   // Обновляет только остаток одной открытой карточки read-only запросом, не перезагружая весь каталог.
   const item = selectedCatalogItem.value
-  if (!item || item.provider_code !== 'yandex_market' || selectedStockLoading.value) return
+  if (!item || !['yandex_market', 'ozon'].includes(item.provider_code) || selectedStockLoading.value) return
   if (isConnectionDisabled(item.connection_id)) {
     selectedStockError.value = 'Магазин отключён. Показан последний сохранённый остаток.'
     return

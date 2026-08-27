@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from domains.buyer_text import normalize_buyer_text
 from domains.local_auth import AuthenticatedUser
-from domains.marketplace_catalog_service import fetch_marketplace_stocks
+from domains.marketplace_catalog_service import fetch_marketplace_stocks, ozon_stock_snapshot
 from domains.marketplace_orders_service import normalize_marketplace_order_status
 from domains.supplier_hub_client import SupplierHubClient, SupplierHubError, load_supplier_hub_settings
 from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
@@ -293,12 +293,19 @@ def catalog_card_details(provider_code: str, payload: Any) -> dict[str, Any]:
             "stock_synced_at": first_text(seller_snapshot.get("stockCheckedAt")) or None,
         }
     if provider_code == "ozon":
+        seller_snapshot = payload.get("_sellerSnapshot") if isinstance(payload.get("_sellerSnapshot"), dict) else {}
+        stock = ozon_stock_snapshot(payload)
+        available_stock = seller_snapshot.get("availableStock", stock.get("available_stock"))
+        try:
+            available_stock = max(0, int(available_stock)) if available_stock is not None else None
+        except (TypeError, ValueError):
+            available_stock = None
         return {
             "market_sku": "",
             "price": first_text(payload.get("price"), payload.get("marketing_price")),
             "currency_code": first_text(payload.get("currency_code"), payload.get("currency")),
-            "available_stock": None,
-            "stock_synced_at": None,
+            "available_stock": available_stock,
+            "stock_synced_at": first_text(seller_snapshot.get("stockCheckedAt")) or None,
         }
     return {"market_sku": "", "price": "", "currency_code": "", "available_stock": None, "stock_synced_at": None}
 
@@ -1001,14 +1008,14 @@ def mount_marketplace_read_routes(
         payload: MarketplaceCatalogStockRefreshIn,
         user: AuthenticatedUser = Depends(current_user),
     ) -> MarketplaceCatalogStockOut:
-        # Интерактивно читает один остаток. Вызов к Яндексу использует только POST просмотра и не публикует значение.
+        # Интерактивно читает один остаток и сохраняет только локальный снимок, ничего не публикуя.
         offer_id = str(payload.offer_id).strip()
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT connection.provider_code, connection.campaign_id,
+                    SELECT connection.provider_code, connection.client_id, connection.campaign_id,
                            pgp_sym_decrypt(connection.token_ciphertext, %s), item.raw_payload
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
@@ -1021,18 +1028,19 @@ def mount_marketplace_read_routes(
                 row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Карточка или подключенный магазин не найдены")
-        provider_code, campaign_id, token, raw_payload = row
-        if str(provider_code) != "yandex_market":
-            raise HTTPException(status_code=400, detail="Интерактивное обновление остатка пока доступно для Яндекс Маркета")
+        provider_code, client_id, campaign_id, token, raw_payload = row
+        if str(provider_code) not in {"yandex_market", "ozon"}:
+            raise HTTPException(status_code=400, detail="Интерактивное обновление остатка недоступно для этого маркетплейса")
         stocks = fetch_marketplace_stocks(
             provider_code=str(provider_code),
             token=str(token),
             campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
             offer_ids=[offer_id],
+            client_id=str(client_id or ""),
         )
         stock = stocks.get(offer_id, {})
         if not stock.get("found") or stock.get("available_stock") is None:
-            raise HTTPException(status_code=502, detail="Яндекс Маркет не вернул актуальный остаток этой карточки")
+            raise HTTPException(status_code=502, detail="Маркетплейс не вернул актуальный остаток этой карточки")
         checked_at = datetime.now(timezone.utc)
         available_stock = max(0, int(stock["available_stock"]))
         provider_updated_at = str(stock.get("updated_at") or "")

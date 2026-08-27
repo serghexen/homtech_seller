@@ -70,7 +70,7 @@ const settingsForm = reactive({
 const keyPoolForm = reactive({ codes_raw: '', expires_at: '' })
 const keyPoolFormError = ref('')
 const showProductImage = computed(() => Boolean(props.item.primary_image) && !imageFailed.value)
-const canRefreshStock = computed(() => props.item.provider_code === 'yandex_market' && props.stockRefreshEnabled)
+const canRefreshStock = computed(() => ['yandex_market', 'ozon'].includes(props.item.provider_code) && props.stockRefreshEnabled)
 const currentStock = computed(() => Number.isInteger(props.item.available_stock) ? props.item.available_stock : '—')
 const hasSalesMetrics = computed(() => Boolean(props.item.sales_metrics_available))
 const hasSalesLimit = computed(() => settingsForm.sales_limit_enabled)

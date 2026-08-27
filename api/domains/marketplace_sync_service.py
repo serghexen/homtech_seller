@@ -10,7 +10,7 @@ from typing import Any, Callable
 from fastapi import HTTPException
 
 from domains.fulfillment_service import observe_order_fulfillments
-from domains.marketplace_catalog_service import fetch_marketplace_catalog, fetch_marketplace_stocks
+from domains.marketplace_catalog_service import fetch_marketplace_catalog, fetch_marketplace_stocks, ozon_stock_snapshot
 from domains.marketplace_orders_service import fetch_marketplace_orders
 from domains.marketplace_read_api import catalog_payload_with_stock, normalize_catalog_item, normalize_order_items
 
@@ -59,24 +59,30 @@ def sync_catalog_connection(connection, connection_row: tuple[Any, ...]) -> int:
     normalized_rows = [(item, payload) for item, payload in normalized_candidates if item is not None]
     current_product_ids = [str(item["external_product_id"]) for item, _payload in normalized_rows]
     stock_checked_at = datetime.now(timezone.utc)
-    stocks_by_offer = fetch_marketplace_stocks(
-        provider_code=str(provider_code),
-        token=str(token),
-        campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
-        offer_ids=[str(item["offer_id"]) for item, _payload in normalized_rows if not item["is_archived"]],
-    )
+    stocks_by_offer = {}
+    if str(provider_code) == "yandex_market":
+        stocks_by_offer = fetch_marketplace_stocks(
+            provider_code=str(provider_code),
+            token=str(token),
+            campaign_id=int(campaign_id) if str(campaign_id or "").isdigit() else None,
+            offer_ids=[str(item["offer_id"]) for item, _payload in normalized_rows if not item["is_archived"]],
+        )
     with connection.cursor() as cursor:
         for item, raw_payload in normalized_rows:
             persisted_payload = dict(raw_payload)
             if str(provider_code) == "yandex_market":
                 stock = stocks_by_offer.get(str(item["offer_id"]), {})
-                if stock.get("found") and stock.get("available_stock") is not None:
-                    persisted_payload = catalog_payload_with_stock(
-                        raw_payload,
-                        available_stock=int(stock["available_stock"]),
-                        checked_at=stock_checked_at,
-                        provider_updated_at=str(stock.get("updated_at") or ""),
-                    )
+            elif str(provider_code) == "ozon":
+                stock = ozon_stock_snapshot(raw_payload)
+            else:
+                stock = {}
+            if not item["is_archived"] and stock.get("found") and stock.get("available_stock") is not None:
+                persisted_payload = catalog_payload_with_stock(
+                    raw_payload,
+                    available_stock=int(stock["available_stock"]),
+                    checked_at=stock_checked_at,
+                    provider_updated_at=str(stock.get("updated_at") or ""),
+                )
             cursor.execute(
                 """
                 INSERT INTO seller.catalog_items(
