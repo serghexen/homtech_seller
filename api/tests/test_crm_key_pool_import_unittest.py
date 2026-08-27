@@ -11,6 +11,8 @@ from scripts.import_crm_key_pools import (
     normalized_source_key,
     seller_key_hash,
     source_inflight_count,
+    target_catalog,
+    target_connection,
 )
 
 
@@ -80,7 +82,29 @@ class CrmKeyPoolImportTests(unittest.TestCase):
         sql = cursor.execute.call_args.args[0]
         self.assertNotIn("pgp_sym_decrypt", sql)
         self.assertIn("status IN ('reserved', 'sending')", sql)
+        self.assertEqual(cursor.execute.call_args.args[1], ("yandex_market", "joycards"))
         source.commit.assert_called_once_with()
+
+    def test_ozon_target_is_selected_by_exact_connection_id(self):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(3, "ASAT")]
+        target = MagicMock()
+        target.cursor.return_value = nullcontext(cursor)
+
+        self.assertEqual(
+            target_connection(target, connection_id=3, marketplace="ozon"),
+            (3, "ASAT"),
+        )
+        self.assertEqual(cursor.execute.call_args.args[1], (3, "ozon"))
+
+    def test_ozon_pool_uses_external_product_id_as_product_key(self):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [("5639743995", "5639743995")]
+        target = MagicMock()
+        target.cursor.return_value = nullcontext(cursor)
+
+        self.assertEqual(target_catalog(target, 3, marketplace="ozon"), {"5639743995": "5639743995"})
+        self.assertEqual(cursor.execute.call_args.args[1], ("ozon", 3))
 
 
 if __name__ == "__main__":

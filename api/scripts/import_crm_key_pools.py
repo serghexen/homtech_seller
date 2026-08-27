@@ -84,34 +84,52 @@ def seller_key_hash(value: str) -> str:
     return sha256(f"seller-marketplace-key:v1:{value}".encode("utf-8")).hexdigest()
 
 
-def target_connection(target, campaign_id: str) -> tuple[int, str]:
-    # Связывает магазин по неизменяемому campaign_id, а не по отображаемому названию.
+def target_connection(
+    target,
+    campaign_id: str | None = None,
+    *,
+    connection_id: int | None = None,
+    marketplace: str = "yandex_market",
+) -> tuple[int, str]:
+    # Яндекс связываем по campaign_id, а Ozon — по точному внутреннему id подключения Seller.
     with target.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT id, display_name
-            FROM seller.marketplace_connections
-            WHERE provider_code='yandex_market' AND campaign_id=%s
-            ORDER BY id
-            """,
-            (campaign_id,),
-        )
+        if connection_id is not None:
+            cursor.execute(
+                """
+                SELECT id, display_name
+                FROM seller.marketplace_connections
+                WHERE id=%s AND provider_code=%s
+                """,
+                (connection_id, marketplace),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, display_name
+                FROM seller.marketplace_connections
+                WHERE provider_code='yandex_market' AND campaign_id=%s
+                ORDER BY id
+                """,
+                (campaign_id,),
+            )
         rows = cursor.fetchall()
     if len(rows) != 1:
-        raise RuntimeError(f"campaign_id={campaign_id} matches {len(rows)} Seller connections")
+        selector = f"connection_id={connection_id}" if connection_id is not None else f"campaign_id={campaign_id}"
+        raise RuntimeError(f"{selector} matches {len(rows)} Seller connections")
     return int(rows[0][0]), str(rows[0][1])
 
 
-def target_catalog(target, connection_id: int) -> dict[str, str]:
+def target_catalog(target, connection_id: int, *, marketplace: str = "yandex_market") -> dict[str, str]:
     # Строит точное соответствие CRM product_key к карточке уже синхронизированного каталога Seller.
     with target.cursor() as cursor:
         cursor.execute(
             """
-            SELECT offer_id, external_product_id
+            SELECT CASE WHEN %s='ozon' THEN external_product_id ELSE offer_id END,
+                   external_product_id
             FROM seller.catalog_items
             WHERE connection_id=%s
             """,
-            (connection_id,),
+            (marketplace, connection_id),
         )
         rows = cursor.fetchall()
     result: dict[str, str] = {}
@@ -334,7 +352,9 @@ def import_batch(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Import one CRM marketplace key pool into Seller")
     parser.add_argument("--source-store-code", required=True)
-    parser.add_argument("--target-campaign-id", required=True)
+    target_selector = parser.add_mutually_exclusive_group(required=True)
+    target_selector.add_argument("--target-campaign-id")
+    target_selector.add_argument("--target-connection-id", type=int)
     parser.add_argument("--marketplace", default="yandex_market", choices=["yandex_market", "ozon"])
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--apply", action="store_true")
@@ -360,10 +380,15 @@ def main() -> int:
             cursor.execute("SET statement_timeout='5s'")
             cursor.execute("SET lock_timeout='500ms'")
         source.commit()
-        connection_id, display_name = target_connection(target, args.target_campaign_id)
+        connection_id, display_name = target_connection(
+            target,
+            args.target_campaign_id,
+            connection_id=args.target_connection_id,
+            marketplace=args.marketplace,
+        )
         if not target_tables_ready(target):
             raise RuntimeError("Seller fulfillment tables are missing; apply database migrations first")
-        catalog = target_catalog(target, connection_id)
+        catalog = target_catalog(target, connection_id, marketplace=args.marketplace)
         inflight_count = source_inflight_count(
             source,
             marketplace=args.marketplace,
