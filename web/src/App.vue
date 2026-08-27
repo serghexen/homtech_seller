@@ -9,6 +9,7 @@ import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
 import { catalogEmptyStateMessage, catalogSearchDelay } from './utils/catalog.js'
+import { isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
 import {
   isSyncJobActive,
   syncActivityAutoDismissDelay,
@@ -1616,6 +1617,7 @@ onBeforeUnmount(() => {
       v-if="selectedOrderItem"
       :order="selectedOrderItem"
       :detail="selectedOrderFulfillment"
+      :view-only="isOrderFulfillmentViewOnly(selectedOrderItem)"
       :loading="selectedOrderFulfillmentLoading"
       :action-loading="selectedOrderFulfillmentActionLoading"
       :error="selectedOrderFulfillmentError"

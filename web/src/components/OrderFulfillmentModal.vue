@@ -6,6 +6,7 @@ import { keyCountLabel, parseKeyLines } from '../utils/keyPool.js'
 const props = defineProps({
   order: { type: Object, required: true },
   detail: { type: Object, default: null },
+  viewOnly: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   actionLoading: { type: Boolean, default: false },
   error: { type: String, default: '' },
@@ -114,8 +115,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
           </div>
 
           <template v-else-if="detail">
-            <section class="fulfillment-product">
-              <div class="fulfillment-product__index">{{ String(detail.quantity).padStart(2, '0') }}</div>
+            <section class="fulfillment-product" :class="{ 'fulfillment-product--view': viewOnly }">
+              <div v-if="!viewOnly" class="fulfillment-product__index">{{ String(detail.quantity).padStart(2, '0') }}</div>
               <div>
                 <small>{{ detail.store_name }} · Яндекс Маркет</small>
                 <h3>{{ detail.title || order.title || 'Товар без названия' }}</h3>
@@ -132,7 +133,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               </div>
             </section>
 
-            <div class="fulfillment-metrics">
+            <div v-if="!viewOnly" class="fulfillment-metrics">
               <article>
                 <span>Нужно для заказа</span>
                 <strong>{{ detail.quantity }}</strong>
@@ -150,7 +151,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               </article>
             </div>
 
-            <div class="fulfillment-safety" :class="{ 'is-outbound': detail.outbound_state }">
+            <div v-if="!viewOnly" class="fulfillment-safety" :class="{ 'is-outbound': detail.outbound_state }">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3" /><rect x="5" y="10" width="14" height="10" rx="3" /><path d="M12 14v2" /></svg>
               <div>
                 <strong>{{ detail.outbound_state ? 'Внешняя отправка' : 'Защищённая подготовка' }}</strong>
@@ -187,7 +188,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               <p v-if="revealError" class="fulfillment-keys__error" role="alert">{{ revealError }}</p>
             </section>
 
-            <section v-if="detail.can_resolve_unknown" class="fulfillment-reconciliation">
+            <section v-if="!viewOnly && detail.can_resolve_unknown" class="fulfillment-reconciliation">
               <header>
                 <div class="fulfillment-reconciliation__mark">!</div>
                 <div>
@@ -229,12 +230,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               </div>
             </section>
 
-            <div v-if="!detail.manual_actions_enabled" class="fulfillment-feature-lock">
+            <div v-if="!viewOnly && !detail.manual_actions_enabled" class="fulfillment-feature-lock">
               <span>Режим просмотра</span>
               Ручная подготовка выключена общим переключателем сервиса. Ни резерв, ни снятие резерва сейчас недоступны.
             </div>
 
-            <section v-else-if="detail.can_prepare_manual" class="fulfillment-preparation">
+            <section v-else-if="!viewOnly && detail.can_prepare_manual" class="fulfillment-preparation">
               <header>
                 <div><small>Источник выдачи</small><strong>Выберите, что подготовить для этого заказа</strong></div>
                 <span>Без отправки</span>
@@ -269,16 +270,26 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
             <p v-if="error" class="fulfillment-card__error">{{ error }}</p>
 
             <footer class="fulfillment-card__actions">
-              <p v-if="detail.can_resolve_unknown">Сначала завершите ручную сверку выше. Повтор без подтверждения заблокирован.</p>
-              <p v-else-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
-              <p v-else-if="detail.can_prepare_manual">Выберите источник выше. После подготовки комплект можно будет проверить и отправить.</p>
-              <p v-else-if="detail.can_send && !sendConfirmation">Комплект готов. Отправка — отдельное необратимое действие.</p>
-              <p v-else-if="detail.can_send">Проверьте заказ: после подтверждения worker передаст комплект в Яндекс.</p>
-              <p v-else-if="detail.can_cancel_send">Задание ещё не взято worker-ом, поэтому его можно безопасно отменить.</p>
-              <p v-else-if="detail.can_release">Резерв можно безопасно снять, пока отправка не поставлена в очередь.</p>
-              <p v-else>Для этого состояния локальные действия недоступны.</p>
+              <template v-if="!viewOnly">
+                <p v-if="detail.can_resolve_unknown">Сначала завершите ручную сверку выше. Повтор без подтверждения заблокирован.</p>
+                <p v-else-if="!detail.manual_actions_enabled">Для включения требуется контролируемое переключение Seller с CRM.</p>
+                <p v-else-if="detail.can_prepare_manual">Выберите источник выше. После подготовки комплект можно будет проверить и отправить.</p>
+                <p v-else-if="detail.can_send && !sendConfirmation">Комплект готов. Отправка — отдельное необратимое действие.</p>
+                <p v-else-if="detail.can_send">Проверьте заказ: после подтверждения worker передаст комплект в Яндекс.</p>
+                <p v-else-if="detail.can_cancel_send">Задание ещё не взято worker-ом, поэтому его можно безопасно отменить.</p>
+                <p v-else-if="detail.can_release">Резерв можно безопасно снять, пока отправка не поставлена в очередь.</p>
+                <p v-else>Для этого состояния локальные действия недоступны.</p>
+              </template>
               <button
-                v-if="detail.can_cancel_send"
+                v-if="viewOnly"
+                class="fulfillment-action fulfillment-action--quiet"
+                type="button"
+                @click="emit('close')"
+              >
+                Закрыть
+              </button>
+              <button
+                v-else-if="detail.can_cancel_send"
                 class="fulfillment-action fulfillment-action--release"
                 type="button"
                 :disabled="actionLoading"
@@ -337,6 +348,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 .fulfillment-card__pulse { width: 42px; aspect-ratio: 1; border: 2px solid rgba(84,123,255,.28); border-top-color: #6d8cff; border-radius: 50%; animation: fulfillment-spin .85s linear infinite; }
 .fulfillment-card__pulse--small { width: 16px; border-width: 2px; }
 .fulfillment-product { display: grid; grid-template-columns: 60px minmax(0,1fr); align-items: center; gap: 18px; margin: 26px 28px 18px; }
+.fulfillment-product--view { grid-template-columns: minmax(0,1fr); }
 .fulfillment-product__index { display: grid; width: 60px; height: 60px; place-items: center; border: 1px solid rgba(84,128,255,.56); border-radius: 18px; color: #83a0ff; background: rgba(41,74,177,.22); font: 900 15px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
 .fulfillment-product small,.fulfillment-product p { color: #aab6d1; }
 .fulfillment-product h3 { margin: 5px 0 7px; font-size: 19px; line-height: 1.3; letter-spacing: -.025em; }
