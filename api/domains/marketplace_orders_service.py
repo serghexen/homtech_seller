@@ -120,7 +120,10 @@ def _fetch_ozon_orders(
             )
         )
     rows_by_posting: dict[str, dict[str, Any]] = {}
-    for row in [*digital_rows, *fbo_rows]:
+    # Одно цифровое отправление Ozon может одновременно присутствовать в общем FBO-списке.
+    # Сначала сохраняем общий снимок, затем цифровой: только digital endpoint достоверно
+    # подтверждает, что Seller имеет право создать выдачу ключа.
+    for row in [*fbo_rows, *digital_rows]:
         posting_number = str(row.get("posting_number") or "").strip()
         if posting_number:
             rows_by_posting[posting_number] = row

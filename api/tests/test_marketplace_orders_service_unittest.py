@@ -197,3 +197,28 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
         last_period = digital_orders.call_args_list[-1].kwargs
         self.assertEqual(first_period["period_from"], datetime(2026, 5, 31, 23, 55, tzinfo=timezone.utc))
         self.assertEqual(last_period["period_to"], datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc))
+
+    @patch("domains.marketplace_orders_service._fetch_ozon_fbo_orders")
+    @patch("domains.marketplace_orders_service._fetch_ozon_digital_orders")
+    def test_ozon_digital_snapshot_wins_when_posting_is_also_in_fbo(self, digital_orders, fbo_orders) -> None:
+        digital_orders.return_value = [{
+            "posting_number": "04259716-0133-1",
+            "__marketplace_source": "DIGITAL",
+            "products": [{"sku": 5196324554, "required_qty_for_digital_code": 1}],
+        }]
+        fbo_orders.return_value = [{
+            "posting_number": "04259716-0133-1",
+            "__marketplace_source": "FBO",
+            "products": [{"sku": 5196324554, "quantity": 1}],
+        }]
+
+        rows = _fetch_ozon_orders(
+            client_id="123",
+            token="secret",
+            synced_after=datetime(2026, 8, 27, 15, 50, tzinfo=timezone.utc),
+            synced_before=datetime(2026, 8, 27, 15, 55, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["__marketplace_source"], "DIGITAL")
+        self.assertEqual(rows[0]["products"][0]["required_qty_for_digital_code"], 1)

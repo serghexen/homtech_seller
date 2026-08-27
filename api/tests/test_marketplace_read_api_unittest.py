@@ -56,6 +56,23 @@ class MarketplaceReadApiTests(unittest.TestCase):
             "is_archived": False,
         })
 
+    def test_ozon_digital_order_keeps_digital_delivery_type(self) -> None:
+        items = normalize_order_items("ozon", {
+            "posting_number": "04259716-0133-1",
+            "status": "awaiting_packaging",
+            "__marketplace_source": "DIGITAL",
+            "products": [{
+                "product_id": 5639743995,
+                "sku": 5196324554,
+                "offer_id": "17162",
+                "required_qty_for_digital_code": 1,
+            }],
+        })
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["delivery_type"], "DIGITAL")
+        self.assertEqual(items[0]["quantity"], 1)
+
     def test_yandex_catalog_uses_seller_offer_as_sku(self) -> None:
         # Фиксирует видимый продавцу SKU Яндекс Маркета вместо технического marketSku.
         result = normalize_catalog_item(
