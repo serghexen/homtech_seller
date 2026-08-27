@@ -63,6 +63,26 @@ services:
     mem_limit: 350m
     cpus: "0.50"
 
+  notifier:
+    build: ./api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SELLER_TELEGRAM_NOTIFICATIONS_ENABLED: ${SELLER_TELEGRAM_NOTIFICATIONS_ENABLED:-false}
+      SELLER_TELEGRAM_BOT_TOKEN: ${SELLER_TELEGRAM_BOT_TOKEN:-}
+      SELLER_TELEGRAM_API_BASE: ${SELLER_TELEGRAM_API_BASE:-https://api.telegram.org}
+      SELLER_TELEGRAM_POLL_SECONDS: ${SELLER_TELEGRAM_POLL_SECONDS:-10}
+      SELLER_TELEGRAM_LEASE_SECONDS: ${SELLER_TELEGRAM_LEASE_SECONDS:-90}
+      SELLER_TELEGRAM_BATCH_SIZE: ${SELLER_TELEGRAM_BATCH_SIZE:-20}
+      SELLER_TELEGRAM_REQUEST_ATTEMPTS: ${SELLER_TELEGRAM_REQUEST_ATTEMPTS:-3}
+    command: ["python", "notifier.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 100m
+    cpus: "0.15"
+
   migrate:
     build: ./api
     profiles: ["maintenance"]

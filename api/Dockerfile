@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY worker.py .
+COPY notifier.py .
 COPY domains ./domains
 COPY scripts ./scripts
 

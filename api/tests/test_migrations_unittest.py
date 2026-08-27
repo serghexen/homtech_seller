@@ -188,6 +188,19 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("uq_marketplace_connections_ozon_client_global", joined)
         self.assertIn("provider_code='ozon' AND client_id<>''", joined)
 
+    def test_telegram_notifications_are_durable_and_workspace_scoped(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260827_05_telegram_notifications.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.telegram_notification_events", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.telegram_notification_recipients", joined)
+        self.assertIn("workspace_id bigint NOT NULL", joined)
+        self.assertIn("UNIQUE (event_id, recipient_id)", joined)
+        self.assertIn("state IN ('queued', 'sending', 'retry', 'sent', 'dead')", joined)
+        self.assertIn("AFTER INSERT OR UPDATE OF status, last_error", joined)
+        self.assertIn("fulfillment_notification_alert_key", joined)
+
     def test_manual_stock_publication_reuses_durable_outbox(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260826_06_manual_stock_publication.sql"
