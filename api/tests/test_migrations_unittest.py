@@ -155,6 +155,19 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("event.event_type='manual_keys_prepared'", joined)
         self.assertIn("key_origin IN ('pool', 'order')", joined)
 
+    def test_workspace_plans_keep_existing_workspaces_on_pro_and_basic_pool_enabled(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260827_02_workspace_plans.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.workspace_subscriptions", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.workspace_entitlement_overrides", joined)
+        self.assertIn("'fulfillment.pool'", joined)
+        self.assertIn("'supplier_mapping.manage'", joined)
+        self.assertIn("WHERE plan.code='basic'", joined)
+        self.assertIn("WHERE plan.code='pro'", joined)
+        self.assertIn("Сохранение текущих возможностей Seller", joined)
+
     def test_manual_stock_publication_reuses_durable_outbox(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260826_06_manual_stock_publication.sql"

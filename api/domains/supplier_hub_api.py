@@ -13,6 +13,7 @@ from domains.supplier_hub_client import (
     load_supplier_hub_settings,
     supplier_hub_status,
 )
+from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
 
 
 class SupplierHubStatusOut(BaseModel):
@@ -43,14 +44,32 @@ class SupplierHubQuoteOut(BaseModel):
     provider_message: str = ""
 
 
-def mount_supplier_hub_routes(app: FastAPI, *, current_user: Callable[..., Any]) -> None:
+def mount_supplier_hub_routes(
+    app: FastAPI,
+    *,
+    database_url: Callable[[], str],
+    psycopg,
+    current_user: Callable[..., Any],
+    user_with_workspace: Callable,
+) -> None:
+    def require_supplier_mapping_access(user: Any) -> None:
+        with psycopg.connect(database_url()) as connection:
+            seller_user = user_with_workspace(connection, user.user_id)
+            if not seller_user:
+                raise HTTPException(status_code=401, detail="Рабочая область недоступна")
+            with connection.cursor() as cursor:
+                allowed = workspace_allows(cursor, seller_user.workspace_id, SUPPLIER_MAPPING_MANAGE)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Настройка Supplier Hub доступна на тарифе Pro")
+
     @app.get("/integrations/supplier-hub/status", response_model=SupplierHubStatusOut)
     def read_supplier_hub_status(_user: Any = Depends(current_user)) -> SupplierHubStatusOut:
         # Не возвращает URL и ключ; недоступность Hub не делает весь Seller неработоспособным.
         return SupplierHubStatusOut(**supplier_hub_status())
 
     @app.get("/integrations/supplier-hub/services", response_model=SupplierHubServicesOut)
-    def read_supplier_hub_services(_user: Any = Depends(current_user)) -> SupplierHubServicesOut:
+    def read_supplier_hub_services(user: Any = Depends(current_user)) -> SupplierHubServicesOut:
+        require_supplier_mapping_access(user)
         try:
             items = SupplierHubClient(load_supplier_hub_settings()).services()
         except SupplierHubError as exc:
@@ -60,9 +79,10 @@ def mount_supplier_hub_routes(app: FastAPI, *, current_user: Callable[..., Any])
     @app.post("/integrations/supplier-hub/quote", response_model=SupplierHubQuoteOut)
     def read_supplier_hub_quote(
         payload: SupplierHubQuoteIn,
-        _user: Any = Depends(current_user),
+        user: Any = Depends(current_user),
     ) -> SupplierHubQuoteOut:
         # calculate/quote не создаёт покупку и доступен при выключенном purchase-флаге Hub.
+        require_supplier_mapping_access(user)
         try:
             result = SupplierHubClient(load_supplier_hub_settings()).quote(
                 service_id=payload.service_id,

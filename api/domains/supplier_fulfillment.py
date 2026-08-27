@@ -17,6 +17,7 @@ from domains.supplier_hub_client import (
     SupplierHubError,
     load_supplier_hub_settings,
 )
+from domains.workspace_entitlements import FULFILLMENT_SUPPLIER, workspace_allows
 from domains.yandex_market_outbound import key_pool_secret
 
 
@@ -77,6 +78,8 @@ class FulfillmentContext:
     nominal_id: str
     params: dict[str, Any]
     max_amount: Decimal | None
+    workspace_id: int
+    supplier_access_enabled: bool
 
 
 class SupplierFulfillmentProcessor:
@@ -199,7 +202,8 @@ class SupplierFulfillmentProcessor:
                            market.provider_code,
                            CASE WHEN local_settings.connection_id IS NOT NULL
                                THEN local_settings.activation_instruction
-                               ELSE COALESCE(imported_settings.activation_instruction, '') END
+                               ELSE COALESCE(imported_settings.activation_instruction, '') END,
+                           market.workspace_id
                     FROM seller.order_fulfillments AS fulfillment
                     JOIN seller.order_items AS order_item
                       ON order_item.connection_id=fulfillment.connection_id
@@ -230,6 +234,9 @@ class SupplierFulfillmentProcessor:
                     (fulfillment_id,),
                 )
                 row = cursor.fetchone()
+                supplier_access_enabled = bool(row) and workspace_allows(
+                    cursor, int(row[23]), FULFILLMENT_SUPPLIER,
+                )
         if not row:
             return None
         params = row[19] if isinstance(row[19], dict) else {}
@@ -245,7 +252,13 @@ class SupplierFulfillmentProcessor:
             mapping_id=int(row[16]) if row[16] is not None else None,
             service_id=int(row[17]) if row[17] is not None else None,
             nominal_id=str(row[18] or ""), params=dict(params), max_amount=_decimal(row[20]),
+            workspace_id=int(row[23]), supplier_access_enabled=supplier_access_enabled,
         )
+
+    def _supplier_access_enabled(self, workspace_id: int) -> bool:
+        with self._psycopg.connect(self._database_url()) as connection:
+            with connection.cursor() as cursor:
+                return workspace_allows(cursor, workspace_id, FULFILLMENT_SUPPLIER)
 
     def _resolve(self, fulfillment_id: int) -> None:
         context = self._context(fulfillment_id)
@@ -268,7 +281,7 @@ class SupplierFulfillmentProcessor:
             )
             return
 
-        if context.supplier_issue_enabled:
+        if context.supplier_issue_enabled and context.supplier_access_enabled:
             if not context.mapping_id or not context.service_id or not context.max_amount:
                 self._wait_for_supplier(context, "Для карточки не завершена настройка Supplier Hub")
                 return
@@ -276,6 +289,16 @@ class SupplierFulfillmentProcessor:
             if not context.store_supplier_enabled or not hub_settings.fulfillment_enabled:
                 self._wait_for_supplier(context, "Автовыдача Supplier Hub выключена защитным переключателем")
                 return
+            supplier_result = self._resolve_supplier(context)
+            if supplier_result == "reserved":
+                self._queue_outbound(context.fulfillment_id)
+                return
+            if supplier_result == "blocked":
+                return
+
+        elif context.supplier_issue_enabled and self._attempt_rows(context.fulfillment_id):
+            # После downgrade не начинаем новую покупку, но обязательно доводим
+            # уже известную Hub операцию до безопасного состояния.
             supplier_result = self._resolve_supplier(context)
             if supplier_result == "reserved":
                 self._queue_outbound(context.fulfillment_id)
@@ -346,7 +369,8 @@ class SupplierFulfillmentProcessor:
                 return list(cursor.fetchall())
 
     def _resolve_supplier(self, context: FulfillmentContext) -> str:
-        self._ensure_attempts(context)
+        if context.supplier_access_enabled:
+            self._ensure_attempts(context)
         client = self._client_factory()
         for row in self._attempt_rows(context.fulfillment_id):
             attempt_id, idempotency_key, request_id = int(row[0]), str(row[2]), str(row[3] or "")
@@ -356,6 +380,11 @@ class SupplierFulfillmentProcessor:
                 continue
             try:
                 if not purchase_id:
+                    # Тариф перечитывается непосредственно перед необратимой покупкой.
+                    # Уже созданные покупки после downgrade продолжаем только сверять.
+                    if not self._supplier_access_enabled(context.workspace_id):
+                        self._mark_attempt_failed(attempt_id, "Автовыдача Supplier Hub недоступна на текущем тарифе")
+                        continue
                     request_id = request_id or f"seller-{uuid4()}"
                     payload = client.create_purchase(
                         idempotency_key=idempotency_key,

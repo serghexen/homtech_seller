@@ -17,6 +17,7 @@ from domains.local_auth import AuthenticatedUser
 from domains.marketplace_catalog_service import fetch_marketplace_stocks
 from domains.marketplace_orders_service import normalize_marketplace_order_status
 from domains.supplier_hub_client import SupplierHubClient, SupplierHubError, load_supplier_hub_settings
+from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
 
 
 CATALOG_SEARCH_EXPRESSIONS = (
@@ -642,12 +643,6 @@ def mount_marketplace_read_routes(
         instruction = normalize_buyer_text(payload.activation_instruction)
         support_message = normalize_buyer_text(payload.support_message)
         nominal_id = str(payload.supplier_nominal_id or "").strip()
-        if payload.supplier_issue_enabled and payload.supplier_service_id is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Для автовыдачи выберите товар Supplier Hub",
-            )
-
         # Сначала читаем существующую связку и закрываем транзакцию. Внешний quote
         # нельзя выполнять с открытой транзакцией PostgreSQL: медленный поставщик не
         # должен удерживать соединение или блокировки Seller.
@@ -657,7 +652,8 @@ def mount_marketplace_read_routes(
                 cursor.execute(
                     """
                     SELECT mapping.service_id, mapping.nominal_id, mapping.max_amount,
-                           mapping.quoted_amount, mapping.quoted_at
+                           mapping.quoted_amount, mapping.quoted_at,
+                           COALESCE(policy.supplier_issue_enabled, false)
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS marketplace_connection
                       ON marketplace_connection.id=item.connection_id
@@ -665,6 +661,9 @@ def mount_marketplace_read_routes(
                       ON mapping.connection_id=item.connection_id
                      AND mapping.external_product_id=item.external_product_id
                      AND mapping.provider_code='interhub' AND mapping.priority=1
+                    LEFT JOIN seller.product_fulfillment_policies AS policy
+                      ON policy.connection_id=item.connection_id
+                     AND policy.external_product_id=item.external_product_id
                     WHERE item.connection_id=%s AND item.external_product_id=%s
                       AND item.is_present=true AND marketplace_connection.workspace_id=%s
                     LIMIT 1
@@ -674,6 +673,23 @@ def mount_marketplace_read_routes(
                 existing_mapping = cursor.fetchone()
                 if not existing_mapping:
                     raise HTTPException(status_code=404, detail="Карточка товара не найдена")
+                supplier_mapping_allowed = workspace_allows(
+                    cursor, seller_user.workspace_id, SUPPLIER_MAPPING_MANAGE,
+                )
+
+        existing_service_id = int(existing_mapping[0]) if existing_mapping[0] is not None else None
+        supplier_fields_changed = (
+            bool(payload.supplier_issue_enabled) != bool(existing_mapping[5])
+            or payload.supplier_service_id != existing_service_id
+            or nominal_id != str(existing_mapping[1] or "")
+        )
+        if supplier_fields_changed and not supplier_mapping_allowed:
+            raise HTTPException(status_code=403, detail="Настройка Supplier Hub доступна на тарифе Pro")
+        if supplier_mapping_allowed and payload.supplier_issue_enabled and payload.supplier_service_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Для автовыдачи выберите товар Supplier Hub",
+            )
 
         supplier_max_amount: Decimal | None = None
         supplier_quoted_amount: Decimal | None = None
@@ -684,9 +700,11 @@ def mount_marketplace_read_routes(
                 and int(existing_mapping[0]) == payload.supplier_service_id
                 and str(existing_mapping[1] or "") == nominal_id
             )
-            if same_mapping and existing_mapping[2] is not None and existing_mapping[3] is not None:
-                supplier_max_amount = Decimal(existing_mapping[2])
-                supplier_quoted_amount = Decimal(existing_mapping[3])
+            if same_mapping and (not supplier_mapping_allowed or (
+                existing_mapping[2] is not None and existing_mapping[3] is not None
+            )):
+                supplier_max_amount = Decimal(existing_mapping[2]) if existing_mapping[2] is not None else None
+                supplier_quoted_amount = Decimal(existing_mapping[3]) if existing_mapping[3] is not None else None
                 supplier_quoted_at = existing_mapping[4]
             else:
                 try:
@@ -713,6 +731,11 @@ def mount_marketplace_read_routes(
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
+                supplier_mapping_allowed_current = workspace_allows(
+                    cursor, seller_user.workspace_id, SUPPLIER_MAPPING_MANAGE,
+                )
+                if supplier_fields_changed and not supplier_mapping_allowed_current:
+                    raise HTTPException(status_code=403, detail="Настройка Supplier Hub доступна на тарифе Pro")
                 cursor.execute(
                     """
                     SELECT 1
@@ -781,7 +804,7 @@ def mount_marketplace_read_routes(
                         seller_user.id,
                     ),
                 )
-                if payload.supplier_service_id is not None and supplier_max_amount is not None:
+                if supplier_mapping_allowed_current and payload.supplier_service_id is not None and supplier_max_amount is not None:
                     cursor.execute(
                         """
                         INSERT INTO seller.product_supplier_mappings(
@@ -804,7 +827,7 @@ def mount_marketplace_read_routes(
                             seller_user.id,
                         ),
                     )
-                else:
+                elif supplier_mapping_allowed_current:
                     cursor.execute(
                         """
                         UPDATE seller.product_supplier_mappings

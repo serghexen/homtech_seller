@@ -46,6 +46,7 @@ test('requires complete Supplier Hub mapping before enabling supplier delivery',
     supplier_issue_enabled: true,
   })
   assert.match(validateProductSettings(invalid), /выберите товар/)
+  assert.equal(validateProductSettings(invalid, { supplierAccessEnabled: false }), '')
 })
 
 test('validates numeric limits before saving', () => {

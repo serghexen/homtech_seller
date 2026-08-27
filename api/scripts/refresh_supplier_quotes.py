@@ -21,6 +21,7 @@ import psycopg
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from domains.supplier_hub_client import SupplierHubClient, load_supplier_hub_settings
+from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
 
 
 def price_limit(amount: Decimal, percent: Decimal) -> Decimal:
@@ -42,14 +43,12 @@ def main() -> int:
     database_url = str(os.getenv("DATABASE_URL", "")).strip()
     if not database_url:
         raise RuntimeError("DATABASE_URL is required")
-    client = SupplierHubClient(load_supplier_hub_settings())
-
     with psycopg.connect(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT id, fulfillment_reservation_enabled, fulfillment_outbound_enabled,
-                       supplier_fulfillment_enabled
+                       supplier_fulfillment_enabled, workspace_id
                 FROM seller.marketplace_connections
                 WHERE provider_code='yandex_market' AND campaign_id=%s
                 """,
@@ -59,8 +58,10 @@ def main() -> int:
             if len(rows) != 1:
                 raise RuntimeError(f"campaign_id={args.campaign_id} matches {len(rows)} Seller connections")
             connection_id = int(rows[0][0])
-            if any(bool(value) for value in rows[0][1:]):
+            if any(bool(value) for value in rows[0][1:4]):
                 raise RuntimeError("Store fulfillment gates must stay disabled while quotes are prepared")
+            if not workspace_allows(cursor, int(rows[0][4]), SUPPLIER_MAPPING_MANAGE):
+                raise RuntimeError("Supplier Hub mappings require the Pro plan")
             cursor.execute(
                 """
                 SELECT id, external_product_id, service_id, nominal_id, params,
@@ -72,6 +73,7 @@ def main() -> int:
                 (connection_id,),
             )
             mappings = list(cursor.fetchall())
+    client = SupplierHubClient(load_supplier_hub_settings())
     if args.limit is not None:
         mappings = mappings[:max(0, args.limit)]
 

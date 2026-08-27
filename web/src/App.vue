@@ -27,6 +27,7 @@ const loading = ref(false)
 const error = ref('')
 const notice = ref('')
 const user = ref(null)
+const workspaceAccess = ref(null)
 const isRestoringSession = ref(true)
 const connections = ref([])
 const connectionsLoading = ref(false)
@@ -138,6 +139,7 @@ const catalogEmptyMessage = computed(() => catalogEmptyStateMessage({
 }))
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
 const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
+const canManageSupplier = computed(() => workspaceAccess.value?.capabilities?.includes('supplier_mapping.manage') === true)
 
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
@@ -187,8 +189,9 @@ async function openProductCard(item) {
   selectedProductKeyPoolNotice.value = ''
   selectedProductKeyPoolRevealingId.value = 0
   selectedProductKeyPoolRevealed.value = {}
-  const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool(), loadSupplierServices()]
-  if (item.supplier_service_id) {
+  const requests = [loadSelectedProductOrders(), loadSelectedProductKeyPool()]
+  if (canManageSupplier.value) requests.push(loadSupplierServices())
+  if (canManageSupplier.value && item.supplier_service_id) {
     requests.push(quoteSelectedSupplier({
       service_id: item.supplier_service_id,
       nominal_id: item.supplier_nominal_id || '',
@@ -232,6 +235,7 @@ function closeProductCard() {
 
 async function loadSupplierServices() {
   // Каталог услуг читается через Seller → Supplier Hub и не связан с покупкой.
+  if (!canManageSupplier.value) return
   if (supplierServices.value.length || supplierServicesLoading.value) return
   supplierServicesLoading.value = true
   supplierServicesError.value = ''
@@ -250,7 +254,7 @@ async function quoteSelectedSupplier(payload) {
   const item = selectedCatalogItem.value
   const serviceId = Number(payload?.service_id)
   const nominalId = String(payload?.nominal_id || '').trim()
-  if (!item || !Number.isInteger(serviceId) || serviceId <= 0) return
+  if (!canManageSupplier.value || !item || !Number.isInteger(serviceId) || serviceId <= 0) return
   const identity = `${item.connection_id}:${item.external_product_id}`
   const requestSequence = ++supplierQuoteSequence
   selectedSupplierQuoteLoading.value = true
@@ -1138,6 +1142,7 @@ async function submit() {
       : { email: form.email, password: form.password }
     const result = await apiRequest(path, { method: 'POST', body: JSON.stringify(body) })
     user.value = result.user
+    workspaceAccess.value = result.access
     form.password = ''
     await loadConnections()
     await restoreActiveSyncJobs()
@@ -1154,6 +1159,7 @@ async function logout() {
   try {
     await apiRequest('/auth/logout', { method: 'POST' })
     user.value = null
+    workspaceAccess.value = null
     connections.value = []
     catalogItems.value = []
     orders.value = []
@@ -1307,10 +1313,12 @@ onMounted(async () => {
   try {
     const result = await apiRequest('/auth/me')
     user.value = result.user
+    workspaceAccess.value = result.access
     await loadConnections()
     await restoreActiveSyncJobs()
   } catch {
     user.value = null
+    workspaceAccess.value = null
   } finally {
     isRestoringSession.value = false
   }
@@ -1629,6 +1637,7 @@ onBeforeUnmount(() => {
       :supplier-quote="selectedSupplierQuote"
       :supplier-quote-loading="selectedSupplierQuoteLoading"
       :supplier-quote-error="selectedSupplierQuoteError"
+      :supplier-access-enabled="canManageSupplier"
       :orders="selectedProductOrders"
       :orders-total="selectedProductOrdersTotal"
       :orders-loading="selectedProductOrdersLoading"

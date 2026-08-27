@@ -20,6 +20,7 @@ def context(**overrides) -> FulfillmentContext:
         store_supplier_enabled=True, supplier_issue_enabled=True, pool_issue_enabled=True,
         support_issue_enabled=True, support_message="Напишите в поддержку", mapping_id=11,
         service_id=11125, nominal_id="250", params={}, max_amount=Decimal("500"),
+        workspace_id=4, supplier_access_enabled=True,
     )
     values.update(overrides)
     return FulfillmentContext(**values)
@@ -40,6 +41,9 @@ class Processor(SupplierFulfillmentProcessor):
 
     def _resolve_supplier(self, _context):
         return self.result
+
+    def _attempt_rows(self, _fulfillment_id):
+        return []
 
     def _queue_outbound(self, fulfillment_id):
         self.queued.append(fulfillment_id)
@@ -77,6 +81,24 @@ class SupplierFulfillmentTests(unittest.TestCase):
         self.assertEqual(result, "reserved")
         processor._reserve_supplier_results.assert_called_once_with(context(), [91])
 
+    def test_plan_is_rechecked_immediately_before_new_supplier_purchase(self) -> None:
+        processor = Processor()
+        client = Mock()
+        processor._ensure_attempts = Mock()
+        processor._client_factory = Mock(return_value=client)
+        processor._supplier_access_enabled = Mock(return_value=False)
+        processor._mark_attempt_failed = Mock()
+        processor._attempt_rows = Mock(side_effect=[
+            [(1, 1, "seller:test", "", "", "created", Decimal("500"), False, False, None, 11125, "250", {})],
+            [(1, 1, "seller:test", "", "", "failed", Decimal("500"), False, False, None, 11125, "250", {})],
+        ])
+
+        result = SupplierFulfillmentProcessor._resolve_supplier(processor, context())
+
+        self.assertEqual(result, "failed")
+        client.create_purchase.assert_not_called()
+        processor._mark_attempt_failed.assert_called_once()
+
     def test_yandex_instruction_is_required_before_supplier_purchase(self) -> None:
         processor = Processor(result="reserved", activation_instruction="")
         processor._resolve_supplier = Mock(return_value="reserved")
@@ -86,6 +108,19 @@ class SupplierFulfillmentTests(unittest.TestCase):
         processor._resolve_supplier.assert_not_called()
         self.assertEqual(processor.queued, [])
         self.assertEqual(processor.manual, [(81, "Не заполнена инструкция покупателю для Яндекс Маркета")])
+
+    def test_basic_skips_supplier_and_keeps_non_supplier_fallbacks_available(self) -> None:
+        processor = Processor(
+            supplier_access_enabled=False,
+            pool_issue_enabled=False,
+            support_issue_enabled=False,
+        )
+        processor._resolve_supplier = Mock(return_value="blocked")
+
+        processor._resolve(81)
+
+        processor._resolve_supplier.assert_not_called()
+        self.assertEqual(processor.manual, [(81, "Автоматические способы не подготовили полный комплект")])
 
     @patch("domains.supplier_fulfillment.load_supplier_hub_settings")
     def test_ozon_does_not_require_activation_instruction(self, load_settings) -> None:

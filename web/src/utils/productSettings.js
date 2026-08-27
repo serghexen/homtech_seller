@@ -20,7 +20,7 @@ export function normalizeProductSettings(values) {
   }
 }
 
-export function validateProductSettings(values) {
+export function validateProductSettings(values, { supplierAccessEnabled = true } = {}) {
   if (!Number.isInteger(values.manual_stock_limit) || values.manual_stock_limit < 0 || values.manual_stock_limit > PRODUCT_SETTING_MAX) {
     return 'Заданный остаток должен быть целым числом от 0 до 1 000 000'
   }
@@ -39,7 +39,7 @@ export function validateProductSettings(values) {
   if (values.support_message_delivery_enabled && !values.support_message) {
     return 'Для выдачи через поддержку сначала заполните сообщение'
   }
-  if (values.supplier_issue_enabled && !values.supplier_service_id) {
+  if (supplierAccessEnabled && values.supplier_issue_enabled && !values.supplier_service_id) {
     return 'Для автовыдачи выберите товар, номинал и дождитесь актуальной цены'
   }
   return ''
