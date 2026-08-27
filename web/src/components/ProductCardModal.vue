@@ -44,7 +44,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'refresh-stock', 'publish-stock', 'refresh-orders', 'save-settings', 'load-key-pool', 'add-keys', 'reveal-key', 'open-order-fulfillment', 'quote-supplier'])
-const openSection = ref('delivery')
+const openSection = ref('')
 const openDeliveryMethod = ref('')
 const supplierSearch = ref('')
 const supplierPickerOpen = ref(false)
@@ -468,7 +468,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
             <h2 id="product-card-title">Карточка товара</h2>
             <div class="product-card-modal__head-actions">
               <span v-if="item.archived" class="product-card-modal__archive-state">В архиве</span>
-              <span class="product-card-modal__mode">Настройки Seller</span>
               <button type="button" aria-label="Вернуться к каталогу" title="К каталогу" @click="close">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m11 18-6-6 6-6" /></svg>
               </button>
@@ -613,15 +612,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                     </section>
                   </div>
                   <div v-else-if="section.id === 'delivery'" class="product-delivery">
-                    <header class="product-delivery__summary">
-                      <div>
-                        <span>Порядок выдачи</span>
-                        <strong>{{ deliveryPriority.join(' → ') }}</strong>
-                        <p>Seller проверит включённые способы сверху вниз. Ручной ввод всегда остаётся последним безопасным вариантом.</p>
-                      </div>
-                      <span class="product-delivery__local-badge">Настройка без запуска</span>
-                    </header>
-
                     <div class="product-delivery__methods">
                       <article class="product-delivery-method" :class="{ 'is-enabled': settingsForm.supplier_issue_enabled, 'is-expanded': openDeliveryMethod === 'supplier' }">
                         <div class="product-delivery-method__head product-delivery-method__head--expandable">
@@ -848,10 +838,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                         </div>
                       </article>
                     </div>
-
-                    <p class="product-delivery__notice">
-                      Сейчас сохраняется только политика карточки. Общие переключатели Seller остаются выключены, поэтому автоматическая выдача не начнётся.
-                    </p>
                   </div>
                   <div v-else class="product-orders">
                     <div class="product-orders__toolbar">
@@ -910,9 +896,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                   <svg viewBox="0 0 24 24"><path d="M6 4h10l3 3v13H6z" /><path d="M9 4v6h7V4M9 16h7" /></svg>
                 </span>
                 <div>
-                  <strong>{{ settingsDirty ? 'Есть несохранённые изменения' : settingsNotice || (item.settings_saved_at ? 'Локальные настройки сохранены' : 'Готово к настройке') }}</strong>
+                  <strong>{{ settingsDirty ? 'Есть несохранённые изменения' : settingsNotice || (item.settings_saved_at ? 'Настройки сохранены' : 'Готово к настройке') }}</strong>
                   <p v-if="settingsFormError || settingsError" class="product-settings-savebar__error">{{ settingsFormError || settingsError }}</p>
-                  <p v-else>{{ item.settings_saved_at ? 'Последнее сохранение находится в Seller' : 'Маркетплейс не получит эти значения' }}</p>
+                  <p v-else-if="!item.settings_saved_at">Маркетплейс не получит эти значения</p>
                 </div>
               </div>
               <div class="product-settings-savebar__actions">
@@ -983,19 +969,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-}
-
-.product-card-modal__mode {
-  margin-right: 3px;
-  padding: 7px 10px;
-  border: 1px solid rgba(120, 148, 224, .3);
-  border-radius: 999px;
-  color: #9eafd5;
-  background: rgba(34, 52, 94, .54);
-  font-size: 9px;
-  font-weight: 850;
-  letter-spacing: .08em;
-  text-transform: uppercase;
 }
 
 .product-card-modal__archive-state {
@@ -2318,55 +2291,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   gap: 13px;
 }
 
-.product-delivery__summary {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 15px 16px;
-  border: 1px solid rgba(83, 125, 255, .32);
-  border-radius: 14px;
-  background: radial-gradient(circle at 100% 0, rgba(70, 112, 255, .16), transparent 48%), rgba(8, 15, 34, .5);
-}
-
-.product-delivery__summary > div {
-  display: grid;
-  gap: 5px;
-}
-
-.product-delivery__summary span:first-child {
-  color: #7f94c5;
-  font-size: 8px;
-  font-weight: 900;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-
-.product-delivery__summary strong {
-  color: #edf2ff;
-  font-size: 15px;
-  line-height: 1.35;
-}
-
-.product-delivery__summary p {
-  margin: 0;
-  color: #8999bb;
-  font-size: 10px;
-  line-height: 1.45;
-}
-
-.product-delivery__local-badge {
-  flex: 0 0 auto;
-  padding: 7px 9px;
-  border: 1px solid rgba(126, 151, 217, .28);
-  border-radius: 999px;
-  color: #a7b5d2 !important;
-  background: rgba(26, 39, 72, .72);
-  font-size: 8px !important;
-  letter-spacing: .07em !important;
-  white-space: nowrap;
-}
-
 .product-delivery__methods {
   display: grid;
   gap: 8px;
@@ -2789,18 +2713,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   font-size: 9px;
 }
 
-.product-delivery-support p,
-.product-delivery__notice {
+.product-delivery-support p {
   margin: 0;
   color: #7889ad;
   font-size: 9px;
   line-height: 1.45;
-}
-
-.product-delivery__notice {
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(126, 151, 217, .055);
 }
 
 .product-key-pool {
@@ -3258,10 +3175,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
     width: 100%;
   }
 
-  .product-card-modal__mode {
-    margin-right: auto;
-  }
-
   .product-card-modal__body {
     max-height: calc(100vh - 150px);
     padding: 18px;
@@ -3339,10 +3252,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
   .product-instruction__content {
     grid-template-columns: 1fr;
-  }
-
-  .product-delivery__summary {
-    flex-direction: column;
   }
 
   .product-delivery-method__head {

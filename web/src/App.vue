@@ -565,7 +565,7 @@ async function saveSelectedProductSettings(settings) {
     Object.assign(selectedCatalogItem.value, savedSettings)
     const listItem = catalogItems.value.find((candidate) => `${candidate.connection_id}:${candidate.external_product_id}` === identity)
     if (listItem) Object.assign(listItem, savedSettings)
-    selectedSettingsNotice.value = 'Настройки сохранены только в Seller'
+    selectedSettingsNotice.value = 'Настройки сохранены'
   } catch (requestError) {
     if (selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
       selectedSettingsError.value = requestError.message || 'Не удалось сохранить настройки карточки'
