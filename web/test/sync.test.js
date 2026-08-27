@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  SYNC_ACTIVITY_SUCCESS_VISIBLE_MS,
   isSyncJobActive,
+  syncActivityAutoDismissDelay,
   syncActivityDetail,
   syncActivityState,
   syncActivityTitle,
 } from '../src/utils/sync.js'
+
+test('successful sync result remains visible for three seconds', () => {
+  assert.equal(SYNC_ACTIVITY_SUCCESS_VISIBLE_MS, 3000)
+  assert.equal(syncActivityAutoDismissDelay('succeeded'), 3000)
+  assert.equal(syncActivityAutoDismissDelay('failed'), null)
+  assert.equal(syncActivityAutoDismissDelay('running'), null)
+})
 
 test('active sync jobs remain visible while queued or running', () => {
   assert.equal(isSyncJobActive({ status: 'queued' }), true)

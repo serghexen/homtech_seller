@@ -1,4 +1,9 @@
 const ACTIVE_SYNC_STATUSES = new Set(['queued', 'running'])
+export const SYNC_ACTIVITY_SUCCESS_VISIBLE_MS = 3000
+
+export function syncActivityAutoDismissDelay(state) {
+  return state === 'succeeded' ? SYNC_ACTIVITY_SUCCESS_VISIBLE_MS : null
+}
 
 export function isSyncJobActive(job) {
   return ACTIVE_SYNC_STATUSES.has(job?.status)

@@ -10,6 +10,7 @@ import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
 import {
   isSyncJobActive,
+  syncActivityAutoDismissDelay,
   syncActivityDetail,
   syncActivityState as resolveSyncActivityState,
   syncActivityTitle,
@@ -99,6 +100,7 @@ const connectionForm = reactive({ provider_code: 'ozon', display_name: '', clien
 let catalogRequestSequence = 0
 let ordersRequestSequence = 0
 let syncMonitorSequence = 0
+let syncActivityDismissTimer = null
 let supplierQuoteSequence = 0
 let fulfillmentMonitorTimer = null
 let fulfillmentMonitorRequestActive = false
@@ -758,12 +760,31 @@ async function waitForSyncJobs(jobIds) {
 }
 
 function dismissSyncActivity() {
-  // Завершённый результат остаётся заметным, пока пользователь сам его не закроет.
+  // Ошибку оставляет до ручного закрытия, а успешный результат может вызвать эту же очистку по таймеру.
   if (currentSyncActivityState.value === 'running') return
+  clearSyncActivityDismissTimer()
   syncMonitorSequence += 1
   syncJobs.value = []
   syncMonitorError.value = ''
   syncActivityVisible.value = false
+}
+
+function clearSyncActivityDismissTimer() {
+  if (syncActivityDismissTimer === null) return
+  window.clearTimeout(syncActivityDismissTimer)
+  syncActivityDismissTimer = null
+}
+
+function scheduleSyncActivityDismiss(monitorId) {
+  // Даёт оператору три секунды на чтение успеха после фактического обновления локальных списков.
+  clearSyncActivityDismissTimer()
+  const delay = syncActivityAutoDismissDelay(currentSyncActivityState.value)
+  if (delay === null) return
+  syncActivityDismissTimer = window.setTimeout(() => {
+    syncActivityDismissTimer = null
+    if (monitorId !== syncMonitorSequence || currentSyncActivityState.value !== 'succeeded') return
+    dismissSyncActivity()
+  }, delay)
 }
 
 async function refreshSnapshotsAfterSync(jobs) {
@@ -790,6 +811,7 @@ async function monitorSyncJobs(jobIds) {
       syncActivityVisible.value = true
       if (result.items.every((job) => !isSyncJobActive(job))) {
         await refreshSnapshotsAfterSync(result.items)
+        scheduleSyncActivityDismiss(monitorId)
         return
       }
       await wait(2500)
@@ -808,6 +830,7 @@ function startSyncMonitor(jobs) {
   // Сразу показывает поставленные в очередь задания и продолжает наблюдение без блокировки вызвавшей кнопки.
   const jobIds = jobs.map((job) => job.id).filter(Boolean)
   if (!jobIds.length) return false
+  clearSyncActivityDismissTimer()
   syncJobs.value = jobs
   syncMonitorError.value = ''
   syncActivityVisible.value = true
@@ -1081,6 +1104,7 @@ async function logout() {
     catalogRequestSequence += 1
     ordersRequestSequence += 1
     syncMonitorSequence += 1
+    clearSyncActivityDismissTimer()
     syncEnqueueing.value = false
     syncJobs.value = []
     syncMonitorError.value = ''
@@ -1235,6 +1259,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearSyncActivityDismissTimer()
   stopOrderFulfillmentMonitor()
   stopStockPublicationMonitor()
 })
