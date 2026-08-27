@@ -8,6 +8,7 @@ import HamsterLoader from './components/HamsterLoader.vue'
 import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
+import { catalogEmptyStateMessage, catalogSearchDelay } from './utils/catalog.js'
 import {
   isSyncJobActive,
   syncActivityAutoDismissDelay,
@@ -98,6 +99,7 @@ const selectedOrderRevealError = ref('')
 const form = reactive({ email: '', password: '', display_name: '' })
 const connectionForm = reactive({ provider_code: 'ozon', display_name: '', client_id: '', token: '' })
 let catalogRequestSequence = 0
+let catalogSearchTimer = null
 let ordersRequestSequence = 0
 let syncMonitorSequence = 0
 let syncActivityDismissTimer = null
@@ -127,6 +129,10 @@ const currentSyncActivityDetail = computed(() => syncActivityDetail(syncJobs.val
 const pageSize = 24
 const catalogPageCount = computed(() => Math.max(1, Math.ceil(catalogTotal.value / pageSize)))
 const ordersPageCount = computed(() => Math.max(1, Math.ceil(ordersTotal.value / pageSize)))
+const catalogEmptyMessage = computed(() => catalogEmptyStateMessage({
+  query: catalogSearch.value,
+  state: catalogState.value,
+}))
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
 const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
 
@@ -870,6 +876,7 @@ async function loadConnections() {
 async function loadCatalog() {
   // Загружает страницу сохранённого каталога без нового обращения к маркетплейсу на каждый поиск.
   if (!user.value || !hasConnections.value) return
+  clearCatalogSearchTimer()
   const requestId = ++catalogRequestSequence
   catalogLoading.value = true
   error.value = ''
@@ -915,6 +922,7 @@ async function loadOrders() {
 
 async function changeSection(section) {
   // Переключает рабочий раздел и загружает его локальный снимок только при первом открытии или возврате.
+  if (section !== 'catalog') clearCatalogSearchTimer()
   activeSection.value = section
   error.value = ''
   notice.value = ''
@@ -1023,16 +1031,33 @@ async function syncCurrentSnapshot() {
 }
 
 async function applyCatalogSearch() {
-  // Применяет поиск каталога отдельным действием, чтобы не отправлять запрос при каждом символе.
+  // Enter и очистка строки применяются сразу, не дожидаясь отложенного поиска.
+  clearCatalogSearchTimer()
   catalogPage.value = 1
   await loadCatalog()
 }
 
-async function handleCatalogSearchInput(event) {
-  // Очистка строки сразу возвращает полный каталог, как и в поиске по заказам.
+function clearCatalogSearchTimer() {
+  if (catalogSearchTimer === null) return
+  window.clearTimeout(catalogSearchTimer)
+  catalogSearchTimer = null
+}
+
+function handleCatalogSearchInput(event) {
+  // Запускает локальный поиск уже с первого символа, объединяя быстрый ввод в один запрос.
   catalogSearch.value = event.target.value.trim()
-  if (catalogSearch.value) return
-  await applyCatalogSearch()
+  clearCatalogSearchTimer()
+  catalogRequestSequence += 1
+  catalogPage.value = 1
+  const delay = catalogSearchDelay(catalogSearch.value)
+  if (delay === 0) {
+    loadCatalog()
+    return
+  }
+  catalogSearchTimer = window.setTimeout(() => {
+    catalogSearchTimer = null
+    if (activeSection.value === 'catalog') loadCatalog()
+  }, delay)
 }
 
 async function applyOrderFilters() {
@@ -1102,6 +1127,7 @@ async function logout() {
     catalogItems.value = []
     orders.value = []
     catalogRequestSequence += 1
+    clearCatalogSearchTimer()
     ordersRequestSequence += 1
     syncMonitorSequence += 1
     clearSyncActivityDismissTimer()
@@ -1259,6 +1285,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearCatalogSearchTimer()
   clearSyncActivityDismissTimer()
   stopOrderFulfillmentMonitor()
   stopStockPublicationMonitor()
@@ -1314,9 +1341,8 @@ onBeforeUnmount(() => {
 
       <div v-if="activeSection === 'stores'" class="dashboard-heading">
         <div>
-          <p class="kicker">{{ user.workspace_name }}</p>
           <h1>Магазины</h1>
-          <p>Подключите кабинеты, чтобы получать единый каталог и заказы. Seller пока работает с маркетплейсами только в режиме чтения.</p>
+          <p>Подключите кабинеты, чтобы управлять единым каталогом, заказами и автоматической выдачей.</p>
         </div>
       </div>
       <p v-if="error" class="form-error">{{ error }}</p>
@@ -1336,7 +1362,7 @@ onBeforeUnmount(() => {
           </dl>
           <p class="connection-card__activity" :class="{ 'connection-card__activity--error': connection.last_error }" :title="connection.last_error || ''">{{ connectionActivity(connection) }}</p>
           <footer>
-            <span>{{ connection.status === 'disabled' ? 'Архивный снимок' : connection.last_error ? 'Требует внимания' : 'Режим чтения' }}</span>
+            <span>{{ connection.status === 'disabled' ? 'Архивный снимок' : connection.last_error ? 'Требует внимания' : 'Подключён к Seller' }}</span>
             <button
               type="button"
               :class="{ 'connection-card__action--enable': connection.status === 'disabled' }"
@@ -1371,12 +1397,6 @@ onBeforeUnmount(() => {
                   @input="handleCatalogSearchInput"
                   @keyup.enter="applyCatalogSearch"
                 />
-                <Transition name="search-action">
-                  <button v-if="catalogSearch.trim()" class="search-submit" type="button" @click="applyCatalogSearch">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
-                    <span>Найти</span>
-                  </button>
-                </Transition>
               </div>
               <div v-else class="snapshot-search__row">
                 <input
@@ -1465,9 +1485,7 @@ onBeforeUnmount(() => {
           <p class="snapshot-count">Найдено: {{ activeSection === 'catalog' ? catalogTotal : ordersTotal }}</p>
           <div v-if="(activeSection === 'catalog' && catalogLoading) || (activeSection === 'orders' && ordersLoading)" class="empty-state">Загружаем локальный снимок…</div>
           <div v-else-if="activeSection === 'catalog' && !catalogItems.length" class="empty-state">
-            {{ catalogState === 'archived'
-              ? 'В архиве пока нет карточек.'
-              : 'Каталог пока пуст. Нажмите «Обновить», чтобы прочитать товары из выбранного магазина.' }}
+            {{ catalogEmptyMessage }}
           </div>
           <div v-else-if="activeSection === 'orders' && !orders.length" class="empty-state">Заказов пока нет в снимке. Нажмите «Обновить», чтобы прочитать свежие заказы.</div>
 
@@ -1675,7 +1693,7 @@ onBeforeUnmount(() => {
 .provider-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 26px 0; } .provider-picker button { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 800; } .provider-picker button.active { border-color: var(--brand-blue-bright); background: linear-gradient(115deg,rgba(23,72,220,.38),rgba(75,115,255,.22)); } .provider-picker .market-mark { width: 35px; height: 35px; border-radius: 10px; }
 .yandex-discovery { display: grid; gap: 13px; } .yandex-discovery__hint { margin: 0; color: #9eabc7; font-size: 13px; line-height: 1.5; } .secondary-button { min-height: 48px; padding: 0 16px; } .store-choice { display: grid; gap: 8px; } .store-choice > span { color: #b7c2da; font-size: 13px; font-weight: 750; } .store-choice button { display: flex; justify-content: space-between; padding: 12px; border: 1px solid rgba(149,164,203,.25); border-radius: 12px; color: #edf1ff; background: rgba(24,34,61,.7); text-align: left; } .store-choice button.active { border-color: var(--brand-blue-bright); background: var(--brand-blue-soft); } .store-choice small { color: #aeb9d4; } .connection-form__actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 9px; } .connection-form__actions .primary-button { min-width: 190px; }
 .snapshot-view { display: grid; gap: 18px; margin-top: 46px; } .snapshot-toolbar { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(0, 1.6fr) auto; align-items: end; gap: 14px; } .snapshot-search { display: grid; gap: 7px; } .snapshot-search label, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .snapshot-search input, .orders-filter-row input, .orders-filter-row select { width: 100%; min-height: 50px; padding: 0 15px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); } .orders-filter-row input, .orders-filter-row select { height: 52px; min-height: 52px; } .store-filters { display: flex; min-width: 0; gap: 8px; overflow-x: auto; padding-bottom: 1px; } .store-filters button { display: inline-flex; min-height: 50px; align-items: center; gap: 8px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; color: #cbd5eb; background: rgba(31,40,70,.72); font-weight: 800; } .store-filters button > span:last-child { display: grid; gap: 1px; text-align: left; } .store-filters button small { color: #929db8; font-size: 9px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; } .store-filters button.active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .store-filters button.active small { color: #dce5ff; } .store-filters button.store-filter--disabled:not(.active) { border-style: dashed; color: #9ca7c0; background: rgba(25,32,55,.6); } .store-filters .market-mark { width: 25px; height: 25px; border-radius: 8px; font-size: 8px; } .store-filters .market-mark--yandex_market { font-size: 16px; } .sync-button { display: inline-flex; min-width: 142px; min-height: 52px; align-items: center; justify-content: center; gap: 9px; padding: 0 17px; border: 1px solid #ee6cb5; border-radius: 50px; color: #fff; background: linear-gradient(140deg,#f13b9e,#cf206e); box-shadow: 0 12px 28px rgba(242,52,152,.27); font-weight: 850; } .sync-button > span:first-child { font-size: 25px; line-height: 1; } .spinning { animation: snapshot-spin .8s linear infinite; } @keyframes snapshot-spin { to { transform: rotate(360deg); } } .snapshot-archive-notice { margin: 0; padding: 11px 14px; border: 1px dashed rgba(149,164,203,.28); border-radius: 13px; color: #aeb9d4; background: rgba(20,28,52,.56); font-size: 13px; } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 6px; border: 1px solid rgba(159,172,202,.3); border-radius: 999px; color: #aeb9d4; font-size: 9px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
-.snapshot-search__row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; } .search-submit, .filter-toggle { display: inline-flex; min-height: 50px; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border-radius: 13px; font-weight: 800; } .search-submit { border: 1px solid rgba(75,115,255,.76); color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); box-shadow: 0 10px 24px rgba(32,77,220,.22); } .search-submit svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; } .search-submit:hover { filter: brightness(1.08); } .search-action-enter-active, .search-action-leave-active { transition: opacity .15s ease, transform .15s ease; } .search-action-enter-from, .search-action-leave-to { opacity: 0; transform: translateX(-5px); } .filter-toggle { border: 1px solid rgba(149,164,203,.28); color: #cbd5eb; background: rgba(31,40,70,.72); } .filter-toggle svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; } .filter-toggle small { display: grid; min-width: 20px; height: 20px; place-items: center; border-radius: 50%; color: #fff; background: var(--brand-blue-bright); font-size: 11px; } .filter-toggle--active { border-color: rgba(91,123,255,.64); color: #fff; background: rgba(42,67,145,.42); }
+.snapshot-search__row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; } .snapshot-search__row--catalog { grid-template-columns: minmax(0,1fr); } .search-submit, .filter-toggle { display: inline-flex; min-height: 50px; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border-radius: 13px; font-weight: 800; } .search-submit { border: 1px solid rgba(75,115,255,.76); color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); box-shadow: 0 10px 24px rgba(32,77,220,.22); } .search-submit svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; } .search-submit:hover { filter: brightness(1.08); } .search-action-enter-active, .search-action-leave-active { transition: opacity .15s ease, transform .15s ease; } .search-action-enter-from, .search-action-leave-to { opacity: 0; transform: translateX(-5px); } .filter-toggle { border: 1px solid rgba(149,164,203,.28); color: #cbd5eb; background: rgba(31,40,70,.72); } .filter-toggle svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; } .filter-toggle small { display: grid; min-width: 20px; height: 20px; place-items: center; border-radius: 50%; color: #fff; background: var(--brand-blue-bright); font-size: 11px; } .filter-toggle--active { border-color: rgba(91,123,255,.64); color: #fff; background: rgba(42,67,145,.42); }
 .orders-filter-row { display: flex; flex-wrap: wrap; align-items: end; gap: 18px; padding: 16px 18px; border: 1px solid rgba(144,160,204,.17); border-radius: 18px; background: rgba(14,22,48,.52); box-shadow: inset 0 1px rgba(255,255,255,.02); } .orders-filter-row__period { position: relative; display: flex; align-items: end; gap: 9px; } .orders-filter-row__period > span:first-child, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .orders-filter-row__period > span:first-child { position: absolute; top: 0; left: 0; } .orders-filter-row__period label { padding-top: 19px; } .orders-filter-row label { display: grid; gap: 7px; min-width: 150px; } .orders-filter-row .status-select { position: relative; min-width: 175px; } .orders-filter-row .status-select::after { content: ''; position: absolute; right: 17px; bottom: 22px; width: 7px; height: 7px; border-right: 2px solid #8794b2; border-bottom: 2px solid #8794b2; transform: rotate(45deg); pointer-events: none; } .orders-filter-row select { padding-right: 42px; appearance: none; -webkit-appearance: none; } .date-divider { padding-bottom: 17px; color: #71809f; } .orders-filter-row__actions { display: flex; align-items: flex-end; gap: 9px; } .filter-apply, .filter-reset { height: 52px; min-height: 52px; } .filter-reset { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 1px solid rgba(255,150,155,.34); border-radius: 14px; color: #ffaaa8; background: rgba(255,150,155,.07); font-weight: 800; transition: border-color .2s, background .2s, transform .2s; } .filter-reset svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .filter-reset:hover { border-color: rgba(255,170,168,.62); background: rgba(255,150,155,.13); transform: translateY(-1px); } .order-filters-enter-active, .order-filters-leave-active { overflow: hidden; transition: opacity .18s ease,transform .18s ease; } .order-filters-enter-from, .order-filters-leave-to { opacity: 0; transform: translateY(-6px); } .snapshot-count { margin: 3px 0 0; color: #9eabc7; font-size: 13px; font-weight: 750; }
 .snapshot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; } .snapshot-card { min-height: 152px; display: grid; gap: 15px; padding: 21px; border: 1px solid rgba(139,160,210,.25); border-radius: 22px; background: linear-gradient(145deg,rgba(27,43,81,.96),rgba(15,24,54,.98)); box-shadow: inset 0 1px rgba(255,255,255,.025); } .snapshot-card__head { display: flex; min-width: 0; align-items: center; gap: 13px; } .snapshot-card__head > div:not(.catalog-card__actions):not(.order-card__actions) { min-width: 0; flex: 1 1 auto; } .snapshot-card h2 { overflow: hidden; margin: 0; color: #f6f8ff; font-size: 17px; line-height: 1.25; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; } .snapshot-card p { overflow: hidden; margin: 5px 0 0; color: #b8c3dd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .catalog-card { cursor: pointer; transition: border-color .18s,box-shadow .18s,transform .18s,opacity .18s; } .catalog-card:hover,.catalog-card:focus-visible { border-color: rgba(91,123,255,.58); box-shadow: inset 0 1px rgba(255,255,255,.04),0 14px 34px rgba(6,16,48,.26); transform: translateY(-2px); outline: none; } .catalog-card:focus-visible { box-shadow: inset 0 1px rgba(255,255,255,.04),0 0 0 3px rgba(75,115,255,.22),0 14px 34px rgba(6,16,48,.26); } .catalog-card--archived { border-color: rgba(125,143,188,.2); background: linear-gradient(145deg,rgba(24,36,67,.88),rgba(13,20,44,.94)); } .catalog-card--archived .market-mark,.catalog-card--archived .catalog-card__instruction { opacity: .72; } .catalog-card__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; } .catalog-card__open,.catalog-card__instruction,.catalog-card__archive-action { display: grid; width: 39px; height: 39px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(126,151,217,.3); border-radius: 12px; color: #9cadd5; background: rgba(17,28,57,.72); transition: color .18s,border-color .18s,background .18s,transform .18s,box-shadow .18s; } .catalog-card__open svg,.catalog-card__instruction svg,.catalog-card__archive-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .catalog-card__instruction { color: #f4f7ff; border-color: rgba(230,236,255,.34); } .catalog-card__instruction--filled { color: #fff; border-color: rgba(83,125,255,.74); background: linear-gradient(145deg,rgba(30,77,224,.96),rgba(74,111,255,.88)); box-shadow: 0 8px 20px rgba(32,77,220,.22); } .catalog-card__archive-action { cursor: pointer; color: #98a8ce; } .catalog-card__archive-action:hover,.catalog-card__archive-action:focus-visible { color: #fff; border-color: rgba(111,139,255,.68); background: rgba(45,75,175,.48); outline: none; } .catalog-card__archive-action--restore { color: #8ca7ff; border-color: rgba(83,125,255,.42); background: rgba(40,75,188,.2); } .catalog-card__archive-action:disabled { opacity: .42; cursor: not-allowed; } .catalog-card:hover .catalog-card__open,.catalog-card:focus-visible .catalog-card__open { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); transform: translateY(-1px); } .snapshot-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px dashed rgba(164,182,224,.24); color: #bfc9df; font-size: 13px; } .snapshot-card__facts { display: flex; min-width: 0; align-items: center; gap: 18px; } .catalog-card__stock { color: #9fdccb; white-space: nowrap; } .catalog-card__stock strong { color: #58e5bd; } .snapshot-card__footer strong { color: #f2f5ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; } .snapshot-card__footer time { flex: 0 0 auto; color: #aeb9d4; font-size: 12px; } .order-card { min-height: 171px; } .order-card__body { min-width: 0; } .order-card__body > strong { display: -webkit-box; overflow: hidden; color: #eef2fc; line-height: 1.42; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; } .order-status { display: inline-flex; min-height: 36px; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 auto; max-width: 120px; padding: 0 12px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; line-height: 1; font-weight: 900; letter-spacing: .035em; text-align: center; text-transform: uppercase; white-space: nowrap; } .order-status--processing { color: #ffc75a; background: rgba(255,199,90,.08); } .order-status--in_delivery { color: #65b5ff; background: rgba(101,181,255,.08); } .order-status--delivered { color: #4ee6bd; background: rgba(78,230,189,.08); } .order-status--cancelled, .order-status--problem { color: #ff969b; background: rgba(255,150,155,.08); } .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 7px; color: #b7c2da; font-size: 14px; } .pagination button { min-height: 42px; padding: 0 14px; border: 1px solid rgba(149,164,203,.28); border-radius: 12px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 .catalog-card__open { cursor: pointer; } .catalog-card__open:focus-visible { color: #fff; border-color: rgba(91,123,255,.72); background: rgba(49,80,186,.48); outline: 3px solid rgba(75,115,255,.2); outline-offset: 2px; }
