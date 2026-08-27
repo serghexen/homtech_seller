@@ -5,6 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 import inspect
 import json
+from pathlib import Path
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -110,6 +111,12 @@ class NotifierTests(unittest.TestCase):
         self.assertIn("recipient.workspace_id=event.workspace_id", claim_source)
         self.assertIn("state=%s", failure_source)
         self.assertIn("available_at", failure_source)
+
+    def test_compose_scopes_https_proxy_to_notifier(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        compose = (project_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(compose.count("HTTPS_PROXY: ${SELLER_TELEGRAM_HTTPS_PROXY:-}"), 1)
 
 
 if __name__ == "__main__":
