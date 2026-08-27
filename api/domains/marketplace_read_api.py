@@ -7,6 +7,7 @@ import os
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_UP
 from typing import Any, Callable, Literal
+from urllib.parse import quote, urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -57,6 +58,7 @@ class MarketplaceCatalogItemOut(BaseModel):
     title: str = ""
     archived: bool = False
     primary_image: str = ""
+    marketplace_url: str = ""
     market_sku: str = ""
     price: str = ""
     currency_code: str = ""
@@ -230,6 +232,34 @@ def catalog_primary_image(provider_code: str, payload: Any) -> str:
         return first_text(pictures)
     if provider_code == "ozon":
         return first_text(payload.get("primary_image"), payload.get("images"))
+    return ""
+
+
+def catalog_marketplace_url(provider_code: str, payload: Any, *, sku: str = "") -> str:
+    # Использует готовую витринную ссылку маркетплейса и не доверяет произвольным доменам из внешнего ответа.
+    candidates: list[str] = []
+    if isinstance(payload, dict) and provider_code == "yandex_market":
+        showcase_urls = payload.get("showcaseUrls") if isinstance(payload.get("showcaseUrls"), list) else []
+        ordered_urls = sorted(
+            (item for item in showcase_urls if isinstance(item, dict)),
+            key=lambda item: str(item.get("showcaseType") or "").upper() != "B2C",
+        )
+        candidates.extend(first_text(item.get("showcaseUrl")) for item in ordered_urls)
+    elif isinstance(payload, dict) and provider_code == "ozon":
+        candidates.extend(first_text(payload.get(key)) for key in ("product_url", "marketing_url", "url"))
+
+    allowed_hosts = {
+        "yandex_market": {"market.yandex.ru"},
+        "ozon": {"ozon.ru", "www.ozon.ru"},
+    }.get(provider_code, set())
+    for candidate in candidates:
+        parsed = urlparse(candidate)
+        if parsed.scheme == "https" and str(parsed.hostname or "").lower() in allowed_hosts:
+            return candidate
+
+    normalized_sku = str(sku or "").strip()
+    if provider_code == "ozon" and normalized_sku.isdigit():
+        return f"https://www.ozon.ru/product/{quote(normalized_sku, safe='')}/"
     return ""
 
 
@@ -569,6 +599,7 @@ def mount_marketplace_read_routes(
                 offer_id=str(row[4] or ""), sku=str(row[5] or ""), title=str(row[6] or ""), synced_at=row[7],
                 archived=bool(row[26]),
                 primary_image=catalog_primary_image(provider_code, row[8]),
+                marketplace_url=catalog_marketplace_url(provider_code, row[8], sku=str(row[5] or "")),
                 stock_settings_available=has_settings,
                 sales_metrics_available=has_imported_settings,
                 manual_stock_limit=int(row[11]) if has_settings else None,

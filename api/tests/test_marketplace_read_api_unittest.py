@@ -17,6 +17,7 @@ from domains.marketplace_read_api import (
     MarketplaceCatalogStockPublishIn,
     MarketplaceCatalogSettingsIn,
     catalog_card_details,
+    catalog_marketplace_url,
     catalog_payload_with_stock,
     catalog_primary_image,
     ilike_search_condition,
@@ -80,6 +81,29 @@ class MarketplaceReadApiTests(unittest.TestCase):
             {"offer": {"pictures": ["https://avatars.mds.yandex.net/example/1", "https://avatars.mds.yandex.net/example/2"]}},
         )
         self.assertEqual(image, "https://avatars.mds.yandex.net/example/1")
+
+    def test_yandex_catalog_uses_exact_b2c_showcase_url(self) -> None:
+        url = catalog_marketplace_url(
+            "yandex_market",
+            {"showcaseUrls": [
+                {"showcaseType": "B2B", "showcaseUrl": "https://market.yandex.ru/card/business/1"},
+                {"showcaseType": "B2C", "showcaseUrl": "https://market.yandex.ru/card/product/6100345993"},
+            ]},
+        )
+        self.assertEqual(url, "https://market.yandex.ru/card/product/6100345993")
+
+    def test_catalog_marketplace_url_rejects_untrusted_host(self) -> None:
+        url = catalog_marketplace_url(
+            "yandex_market",
+            {"showcaseUrls": [{"showcaseType": "B2C", "showcaseUrl": "https://example.com/not-market"}]},
+        )
+        self.assertEqual(url, "")
+
+    def test_ozon_catalog_builds_product_url_from_numeric_sku(self) -> None:
+        self.assertEqual(
+            catalog_marketplace_url("ozon", {}, sku="5204479032"),
+            "https://www.ozon.ru/product/5204479032/",
+        )
 
     def test_yandex_catalog_card_uses_saved_market_sku_and_price(self) -> None:
         details = catalog_card_details(
