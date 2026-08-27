@@ -8,8 +8,9 @@ import HamsterLoader from './components/HamsterLoader.vue'
 import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
-import { catalogEmptyStateMessage, catalogSearchDelay } from './utils/catalog.js'
+import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
+import { liveSearchDelay } from './utils/search.js'
 import {
   isSyncJobActive,
   syncActivityAutoDismissDelay,
@@ -102,6 +103,7 @@ const connectionForm = reactive({ provider_code: 'ozon', display_name: '', clien
 let catalogRequestSequence = 0
 let catalogSearchTimer = null
 let ordersRequestSequence = 0
+let orderSearchTimer = null
 let syncMonitorSequence = 0
 let syncActivityDismissTimer = null
 let supplierQuoteSequence = 0
@@ -905,6 +907,7 @@ async function loadCatalog() {
 async function loadOrders() {
   // Загружает постраничный локальный снимок заказов с уже применёнными фильтрами.
   if (!user.value || !hasConnections.value) return
+  clearOrderSearchTimer()
   const requestId = ++ordersRequestSequence
   ordersLoading.value = true
   error.value = ''
@@ -924,6 +927,7 @@ async function loadOrders() {
 async function changeSection(section) {
   // Переключает рабочий раздел и загружает его локальный снимок только при первом открытии или возврате.
   if (section !== 'catalog') clearCatalogSearchTimer()
+  if (section !== 'orders') clearOrderSearchTimer()
   activeSection.value = section
   error.value = ''
   notice.value = ''
@@ -1050,7 +1054,7 @@ function handleCatalogSearchInput(event) {
   clearCatalogSearchTimer()
   catalogRequestSequence += 1
   catalogPage.value = 1
-  const delay = catalogSearchDelay(catalogSearch.value)
+  const delay = liveSearchDelay(catalogSearch.value)
   if (delay === 0) {
     loadCatalog()
     return
@@ -1063,21 +1067,47 @@ function handleCatalogSearchInput(event) {
 
 async function applyOrderFilters() {
   // Копирует черновик фильтров после нажатия «Применить» и только затем обновляет список заказов.
+  clearOrderSearchTimer()
   Object.assign(appliedOrderFilters, orderFilters)
   ordersPage.value = 1
   await loadOrders()
   ordersFiltersOpen.value = false
 }
 
-async function handleOrderSearchInput(event) {
-  // После очистки уже применённого запроса сразу возвращает полный список заказов.
+async function applyOrderSearch() {
+  // Поиск меняет только текстовый запрос и не применяет черновики расширенных фильтров.
+  clearOrderSearchTimer()
+  appliedOrderFilters.query = orderFilters.query
+  ordersPage.value = 1
+  await loadOrders()
+}
+
+function clearOrderSearchTimer() {
+  if (orderSearchTimer === null) return
+  window.clearTimeout(orderSearchTimer)
+  orderSearchTimer = null
+}
+
+function handleOrderSearchInput(event) {
+  // Запускает поиск по сохранённым заказам с первого символа, объединяя быстрый ввод в один запрос.
   orderFilters.query = event.target.value.trim()
-  if (orderFilters.query || !appliedOrderFilters.query) return
-  await applyOrderFilters()
+  clearOrderSearchTimer()
+  ordersRequestSequence += 1
+  ordersPage.value = 1
+  const delay = liveSearchDelay(orderFilters.query)
+  if (delay === 0) {
+    applyOrderSearch()
+    return
+  }
+  orderSearchTimer = window.setTimeout(() => {
+    orderSearchTimer = null
+    if (activeSection.value === 'orders') applyOrderSearch()
+  }, delay)
 }
 
 async function resetOrderFilters() {
   // Сбрасывает и черновик, и применённые условия, чтобы вернуть полный снимок заказов одной кнопкой.
+  clearOrderSearchTimer()
   Object.assign(orderFilters, { query: '', status: '', date_from: '', date_to: '' })
   Object.assign(appliedOrderFilters, orderFilters)
   ordersPage.value = 1
@@ -1130,6 +1160,7 @@ async function logout() {
     catalogRequestSequence += 1
     clearCatalogSearchTimer()
     ordersRequestSequence += 1
+    clearOrderSearchTimer()
     syncMonitorSequence += 1
     clearSyncActivityDismissTimer()
     syncEnqueueing.value = false
@@ -1287,6 +1318,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   clearCatalogSearchTimer()
+  clearOrderSearchTimer()
   clearSyncActivityDismissTimer()
   stopOrderFulfillmentMonitor()
   stopStockPublicationMonitor()
@@ -1405,10 +1437,10 @@ onBeforeUnmount(() => {
                   type="search"
                   placeholder="Номер заказа, товар или SKU"
                   @input="handleOrderSearchInput"
-                  @keyup.enter="applyOrderFilters"
+                  @keyup.enter="applyOrderSearch"
                 />
                 <Transition name="search-action">
-                  <button v-if="orderFilters.query.trim()" class="search-submit" type="button" @click="applyOrderFilters">
+                  <button v-if="orderFilters.query.trim()" class="search-submit" type="button" @click="applyOrderSearch">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
                     <span>Найти</span>
                   </button>

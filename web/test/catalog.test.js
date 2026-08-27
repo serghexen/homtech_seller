@@ -1,16 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {
-  CATALOG_SEARCH_DELAY_MS,
-  catalogEmptyStateMessage,
-  catalogSearchDelay,
-} from '../src/utils/catalog.js'
+import { catalogEmptyStateMessage } from '../src/utils/catalog.js'
+import { LIVE_SEARCH_DELAY_MS, liveSearchDelay } from '../src/utils/search.js'
 
-test('catalog live search starts with the first non-empty character', () => {
-  assert.equal(catalogSearchDelay('м'), CATALOG_SEARCH_DELAY_MS)
-  assert.equal(catalogSearchDelay('  м  '), CATALOG_SEARCH_DELAY_MS)
-  assert.equal(catalogSearchDelay(''), 0)
-  assert.equal(catalogSearchDelay('   '), 0)
+test('live search starts with the first non-empty character', () => {
+  assert.equal(liveSearchDelay('м'), LIVE_SEARCH_DELAY_MS)
+  assert.equal(liveSearchDelay('  м  '), LIVE_SEARCH_DELAY_MS)
+  assert.equal(liveSearchDelay(''), 0)
+  assert.equal(liveSearchDelay('   '), 0)
 })
 
 test('catalog empty state distinguishes search results from an empty catalog', () => {
