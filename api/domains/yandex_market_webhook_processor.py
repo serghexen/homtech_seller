@@ -149,7 +149,10 @@ def build_yandex_market_webhook_processor(
             # Токен живёт только в памяти worker-а и не сохраняется в событии.
             with psycopg.connect(database_url()) as connection:
                 connection_row = load_active_connection(connection, connection_id)
-            row_connection_id, provider_code, _name, _client_id, business_id, stored_campaign_id, token, _last_sync = connection_row
+            (
+                row_connection_id, provider_code, _name, _client_id, business_id,
+                stored_campaign_id, token, _last_sync, *_connection_runtime,
+            ) = connection_row
             if str(provider_code) != "yandex_market" or str(stored_campaign_id or "") != campaign_id:
                 raise ValueError("Yandex webhook не соответствует подключенному магазину")
             if not str(business_id or "").isdigit():

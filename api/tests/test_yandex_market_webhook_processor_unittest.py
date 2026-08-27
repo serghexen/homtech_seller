@@ -55,7 +55,9 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
             nullcontext(load_db_connection),
             nullcontext(save_connection),
         ]
-        load_connection.return_value = (7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None)
+        load_connection.return_value = (
+            7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None, None,
+        )
         fetch_order.return_value = {
             "orderId": 123,
             "campaignId": 149196813,
@@ -113,7 +115,9 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
         fake_psycopg.connect.side_effect = [
             nullcontext(claim_connection), nullcontext(load_db_connection), nullcontext(save_connection),
         ]
-        load_connection.return_value = (7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None)
+        load_connection.return_value = (
+            7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None, None,
+        )
         fetch_order.return_value = {"orderId": 123, "items": [{"id": 9}, {"id": 10}]}
         processor = build_yandex_market_webhook_processor(
             database_url=lambda: "postgresql://test", psycopg=fake_psycopg, processing_enabled=lambda: True,
@@ -137,7 +141,9 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
             nullcontext(load_db_connection),
             nullcontext(fail_connection),
         ]
-        load_connection.return_value = (7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None)
+        load_connection.return_value = (
+            7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None, None,
+        )
         fetch_order.side_effect = HTTPException(status_code=404, detail="order is not visible yet")
         processor = build_yandex_market_webhook_processor(
             database_url=lambda: "postgresql://test",
@@ -167,7 +173,9 @@ class YandexMarketWebhookProcessorTests(unittest.TestCase):
             nullcontext(load_db_connection),
             nullcontext(fail_connection),
         ]
-        load_connection.return_value = (7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None)
+        load_connection.return_value = (
+            7, "yandex_market", "JoyCards", "", "216926720", "149196813", "token", None, None,
+        )
         fetch_order.side_effect = RuntimeError("provider unavailable")
         processor = build_yandex_market_webhook_processor(
             database_url=lambda: "postgresql://test",
