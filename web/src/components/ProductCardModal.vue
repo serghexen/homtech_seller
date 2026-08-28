@@ -551,7 +551,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           <input v-model.number="settingsForm.manual_stock_limit" :disabled="poolManagesStock" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
                           <template v-if="poolManagesStock">
                             <strong class="stock-settings__source">Остатком управляет список ключей · свободно {{ keyPool.free_count || 0 }}</strong>
-                            <small>Сохранено: {{ settingsForm.manual_stock_limit }}. Значение снова начнёт использоваться после отключения списка ключей.</small>
                           </template>
                           <small v-else>{{ settingsDirty ? 'Сохраните значение перед публикацией' : 'Сохранено в Seller и готово к отправке' }}</small>
                         </label>
