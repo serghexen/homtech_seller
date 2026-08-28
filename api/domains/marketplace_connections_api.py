@@ -1,4 +1,4 @@
-"""Read-only подключение кабинетов маркетплейсов в изолированном Seller workspace."""
+"""Подключение кабинетов маркетплейсов в изолированном Seller workspace."""
 
 from __future__ import annotations
 
@@ -57,6 +57,13 @@ class MarketplaceConnectionOut(BaseModel):
     last_orders_poll_at: datetime | None = None
     last_orders_poll_error: str = ""
     created_at: datetime
+    launch_state: str = "setup"
+    fulfillment_started_at: datetime | None = None
+    webhook_processing_enabled: bool = False
+    fulfillment_reservation_enabled: bool = False
+    fulfillment_outbound_enabled: bool = False
+    stock_outbound_enabled: bool = False
+    supplier_fulfillment_enabled: bool = False
 
 
 class MarketplaceConnectionListOut(BaseModel):
@@ -111,6 +118,13 @@ def mount_marketplace_connection_routes(
             last_orders_poll_at=row[14],
             last_orders_poll_error=str(row[15] or ""),
             created_at=row[16],
+            launch_state=str(row[17] or "setup"),
+            fulfillment_started_at=row[18],
+            webhook_processing_enabled=bool(row[19]),
+            fulfillment_reservation_enabled=bool(row[20]),
+            fulfillment_outbound_enabled=bool(row[21]),
+            stock_outbound_enabled=bool(row[22]),
+            supplier_fulfillment_enabled=bool(row[23]),
         )
 
     def workspace_for_user(connection, user: AuthenticatedUser):
@@ -132,7 +146,10 @@ def mount_marketplace_connection_routes(
                            token_suffix, status, last_checked_at, last_error,
                            last_successful_sync_at, orders_polling_enabled,
                            orders_poll_interval_seconds, next_orders_poll_at,
-                           last_orders_poll_at, last_orders_poll_error, created_at
+                           last_orders_poll_at, last_orders_poll_error, created_at,
+                           launch_state, fulfillment_started_at, webhook_processing_enabled,
+                           fulfillment_reservation_enabled, fulfillment_outbound_enabled,
+                           stock_outbound_enabled, supplier_fulfillment_enabled
                     FROM seller.marketplace_connections
                     WHERE workspace_id=%s
                     ORDER BY created_at DESC, id DESC
@@ -169,7 +186,7 @@ def mount_marketplace_connection_routes(
         payload: MarketplaceConnectionCreateIn,
         user: AuthenticatedUser = Depends(current_user),
     ) -> MarketplaceConnectionOut:
-        # Сохраняет только успешно проверенный read-only доступ и шифрует токен до появления будущих синхронизаций.
+        # Сохраняет только успешно проверенный доступ; запуск выдачи остаётся отдельным подтверждаемым шагом.
         token = str(payload.token).strip()
         display_name = str(payload.display_name).strip()
         client_id = str(payload.client_id).strip()
@@ -236,7 +253,10 @@ def mount_marketplace_connection_routes(
                               token_suffix, status, last_checked_at, last_error,
                               last_successful_sync_at, orders_polling_enabled,
                               orders_poll_interval_seconds, next_orders_poll_at,
-                              last_orders_poll_at, last_orders_poll_error, created_at
+                              last_orders_poll_at, last_orders_poll_error, created_at,
+                              launch_state, fulfillment_started_at, webhook_processing_enabled,
+                              fulfillment_reservation_enabled, fulfillment_outbound_enabled,
+                              stock_outbound_enabled, supplier_fulfillment_enabled
                     """,
                     (
                         seller_user.workspace_id,
@@ -252,6 +272,19 @@ def mount_marketplace_connection_routes(
                     ),
                 )
                 row = cursor.fetchone()
+                connection_id = int(row[0])
+                # Первичный снимок строится долговечными заданиями. До явного
+                # запуска first_seen_at не позволит историческим заказам начать выдачу.
+                for sync_kind in ("catalog", "orders"):
+                    cursor.execute(
+                        """
+                        INSERT INTO seller.marketplace_sync_jobs(
+                          workspace_id, connection_id, sync_kind, requested_by_user_id
+                        ) VALUES (%s,%s,%s,%s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (seller_user.workspace_id, connection_id, sync_kind, seller_user.id),
+                    )
         return connection_out(row)
 
     @app.post("/marketplaces/connections/{connection_id}/disable", response_model=MarketplaceConnectionOut)
@@ -272,7 +305,10 @@ def mount_marketplace_connection_routes(
                               token_suffix, status, last_checked_at, last_error,
                               last_successful_sync_at, orders_polling_enabled,
                               orders_poll_interval_seconds, next_orders_poll_at,
-                              last_orders_poll_at, last_orders_poll_error, created_at
+                              last_orders_poll_at, last_orders_poll_error, created_at,
+                              launch_state, fulfillment_started_at, webhook_processing_enabled,
+                              fulfillment_reservation_enabled, fulfillment_outbound_enabled,
+                              stock_outbound_enabled, supplier_fulfillment_enabled
                     """,
                     (connection_id, seller_user.workspace_id),
                 )
@@ -307,7 +343,10 @@ def mount_marketplace_connection_routes(
                               token_suffix, status, last_checked_at, last_error,
                               last_successful_sync_at, orders_polling_enabled,
                               orders_poll_interval_seconds, next_orders_poll_at,
-                              last_orders_poll_at, last_orders_poll_error, created_at
+                              last_orders_poll_at, last_orders_poll_error, created_at,
+                              launch_state, fulfillment_started_at, webhook_processing_enabled,
+                              fulfillment_reservation_enabled, fulfillment_outbound_enabled,
+                              stock_outbound_enabled, supplier_fulfillment_enabled
                     """,
                     (
                         payload.enabled, payload.interval_seconds, payload.enabled, payload.enabled,
@@ -369,7 +408,10 @@ def mount_marketplace_connection_routes(
                               token_suffix, status, last_checked_at, last_error,
                               last_successful_sync_at, orders_polling_enabled,
                               orders_poll_interval_seconds, next_orders_poll_at,
-                              last_orders_poll_at, last_orders_poll_error, created_at
+                              last_orders_poll_at, last_orders_poll_error, created_at,
+                              launch_state, fulfillment_started_at, webhook_processing_enabled,
+                              fulfillment_reservation_enabled, fulfillment_outbound_enabled,
+                              stock_outbound_enabled, supplier_fulfillment_enabled
                     """,
                     (connection_id, workspace_id),
                 )

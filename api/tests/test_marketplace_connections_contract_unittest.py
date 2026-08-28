@@ -58,3 +58,10 @@ class MarketplaceConnectionsContractTests(unittest.TestCase):
         self.assertIn("identity_column", source)
         self.assertIn("existing_owner", source)
         self.assertIn("другом аккаунте Seller", source)
+
+    def test_connection_creation_enqueues_both_initial_snapshots(self) -> None:
+        source = getsource(mount_marketplace_connection_routes)
+
+        self.assertIn('for sync_kind in ("catalog", "orders")', source)
+        self.assertIn("INSERT INTO seller.marketplace_sync_jobs", source)
+        self.assertIn("ON CONFLICT DO NOTHING", source)

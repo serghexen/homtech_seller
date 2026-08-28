@@ -76,15 +76,15 @@ def retry_delay_seconds(attempt_count: int) -> int:
     return min(15 * (2 ** max(0, attempt_count - 1)), 300)
 
 
-def enqueue_due_ozon_order_jobs(connection, limit: int = 20) -> int:
-    """Ставит read-only polling Ozon в общую очередь без внешних действий."""
+def enqueue_due_marketplace_order_jobs(connection, limit: int = 20) -> int:
+    """Ставит резервную синхронизацию заказов запущенных магазинов в общую очередь."""
 
     with connection.cursor() as cursor:
         cursor.execute(
             """
             SELECT id, workspace_id, orders_poll_interval_seconds
             FROM seller.marketplace_connections
-            WHERE provider_code='ozon' AND status='active'
+            WHERE status='active' AND launch_state='running'
               AND orders_polling_enabled=true AND next_orders_poll_at <= now()
             ORDER BY next_orders_poll_at, id
             FOR UPDATE SKIP LOCKED
@@ -116,6 +116,12 @@ def enqueue_due_ozon_order_jobs(connection, limit: int = 20) -> int:
                 queued += 1
     connection.commit()
     return queued
+
+
+def enqueue_due_ozon_order_jobs(connection, limit: int = 20) -> int:
+    """Совместимый псевдоним для старых локальных вызовов и тестов."""
+
+    return enqueue_due_marketplace_order_jobs(connection, limit=limit)
 
 
 def is_transient_sync_error(exc: Exception) -> bool:
@@ -357,9 +363,9 @@ def run_worker() -> int:
             if processed_webhooks:
                 print(f"Processed Yandex webhook events: {processed_webhooks}", flush=True)
             with psycopg.connect(database_url()) as lock_connection:
-                scheduled_ozon = enqueue_due_ozon_order_jobs(lock_connection)
-                if scheduled_ozon:
-                    print(f"Scheduled Ozon order polls: {scheduled_ozon}", flush=True)
+                scheduled_orders = enqueue_due_marketplace_order_jobs(lock_connection)
+                if scheduled_orders:
+                    print(f"Scheduled marketplace order polls: {scheduled_orders}", flush=True)
                 recovered = recover_stale_jobs(lock_connection)
                 if recovered:
                     print(f"Recovered stale sync jobs: {recovered}", flush=True)

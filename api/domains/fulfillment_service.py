@@ -36,7 +36,8 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
         cursor.execute(
             """
             SELECT item.external_item_id, item.offer_id, item.quantity,
-                   item.normalized_status, item.delivery_type, market.provider_code
+                   item.normalized_status, item.delivery_type, market.provider_code,
+                   market.launch_state, market.fulfillment_started_at, item.first_seen_at
             FROM seller.order_items AS item
             JOIN seller.marketplace_connections AS market ON market.id=item.connection_id
             WHERE item.connection_id=%s AND item.external_order_id=%s
@@ -47,8 +48,14 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
         )
         order_items = cursor.fetchall()
         for order_item in order_items:
-            external_item_id, offer_id, quantity, normalized_status, delivery_type, *provider_values = order_item
-            provider_code = str(provider_values[0] or "yandex_market") if provider_values else "yandex_market"
+            external_item_id, offer_id, quantity, normalized_status, delivery_type = order_item[:5]
+            # Короткая форма сохраняет совместимость изолированных тестовых cursor-ов;
+            # рабочий SQL всегда возвращает полный launch-контекст.
+            provider_code_value = order_item[5] if len(order_item) > 5 else "yandex_market"
+            launch_state = order_item[6] if len(order_item) > 6 else "running"
+            fulfillment_started_at = order_item[7] if len(order_item) > 7 else None
+            first_seen_at = order_item[8] if len(order_item) > 8 else None
+            provider_code = str(provider_code_value or "yandex_market")
             item_id = str(external_item_id)
             product_id = str(offer_id or "").strip()
             item_quantity = max(0, int(quantity or 0))
@@ -56,7 +63,15 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
             is_digital = str(delivery_type or "").strip().upper() == "DIGITAL"
             reservation_ref = f"seller:{provider_code}:{connection_id}:{external_order_id}:{item_id}"
 
-            if market_state == "processing" and is_digital and product_id and item_quantity > 0:
+            launch_allows_new_fulfillment = len(order_item) < 9 or (
+                str(launch_state) == "running" and fulfillment_started_at is not None
+                and first_seen_at is not None and first_seen_at >= fulfillment_started_at
+            )
+
+            if (
+                market_state == "processing" and is_digital and product_id and item_quantity > 0
+                and launch_allows_new_fulfillment
+            ):
                 cursor.execute(
                     """
                     INSERT INTO seller.order_fulfillments(

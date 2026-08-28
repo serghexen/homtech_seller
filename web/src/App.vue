@@ -8,6 +8,7 @@ import HamsterLoader from './components/HamsterLoader.vue'
 import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
+import StoreLaunchModal from './components/StoreLaunchModal.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
 import { canOpenOrderFulfillment, isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
@@ -33,7 +34,11 @@ const isRestoringSession = ref(true)
 const connections = ref([])
 const connectionsLoading = ref(false)
 const connectionActionId = ref(null)
-const pollingActionId = ref(null)
+const selectedLaunchConnection = ref(null)
+const launchReadiness = ref(null)
+const launchReadinessLoading = ref(false)
+const launchActionLoading = ref(false)
+const launchError = ref('')
 const activeSection = ref('stores')
 const catalogItems = ref([])
 const catalogTotal = ref(0)
@@ -597,10 +602,92 @@ function connectionStatus(connection) {
 function connectionActivity(connection) {
   if (connection.status === 'disabled') return 'Сохранённые данные доступны для просмотра'
   if (connection.last_error) return 'Не удалось обновить данные. Проверьте ключ или повторите позже.'
-  if (connection.provider_code === 'ozon' && !connection.orders_polling_enabled) return 'Автоматическое получение заказов выключено'
+  if (connection.launch_state === 'setup') return 'Первичные данные загружаются. После проверки магазин можно запустить.'
   const checkedAt = connectionLastCheckedAt(connection)
   if (checkedAt) return `Последняя успешная проверка: ${formatDate(checkedAt)}`
   return 'Ожидает первой проверки'
+}
+
+function fulfillmentMode(connection) {
+  if (connection.status === 'disabled') return 'Магазин отключён'
+  if (connection.launch_state === 'running') return 'Выдача работает'
+  if (connection.launch_state === 'paused') return 'Выдача приостановлена'
+  return 'Подготовка к запуску'
+}
+
+async function loadLaunchReadiness() {
+  if (!selectedLaunchConnection.value) return
+  launchReadinessLoading.value = true
+  launchError.value = ''
+  try {
+    launchReadiness.value = await apiRequest(`/marketplaces/connections/${selectedLaunchConnection.value.id}/launch-readiness`)
+  } catch (requestError) {
+    launchReadiness.value = null
+    launchError.value = requestError.message || 'Не удалось проверить готовность магазина'
+  } finally {
+    launchReadinessLoading.value = false
+  }
+}
+
+async function openStoreLaunch(connection) {
+  selectedLaunchConnection.value = connection
+  launchReadiness.value = null
+  launchError.value = ''
+  await loadLaunchReadiness()
+}
+
+function closeStoreLaunch() {
+  if (launchActionLoading.value) return
+  selectedLaunchConnection.value = null
+  launchReadiness.value = null
+  launchError.value = ''
+}
+
+async function launchStore(payload) {
+  if (!selectedLaunchConnection.value) return
+  launchActionLoading.value = true
+  launchError.value = ''
+  try {
+    await apiRequest(`/marketplaces/connections/${selectedLaunchConnection.value.id}/launch`, {
+      method: 'POST', body: JSON.stringify(payload),
+    })
+    const storeName = selectedLaunchConnection.value.display_name
+    await loadConnections()
+    selectedLaunchConnection.value = null
+    launchReadiness.value = null
+    notice.value = `Магазин «${storeName}» запущен. Новые заказы обрабатываются в Seller.`
+  } catch (requestError) {
+    launchError.value = requestError.message || 'Не удалось запустить магазин'
+    await loadLaunchReadiness()
+  } finally {
+    launchActionLoading.value = false
+  }
+}
+
+async function refreshLaunchData() {
+  if (!selectedLaunchConnection.value) return
+  launchReadinessLoading.value = true
+  launchError.value = ''
+  try {
+    const body = JSON.stringify({ connection_id: selectedLaunchConnection.value.id })
+    const [catalogResult, ordersResult] = await Promise.all([
+      apiRequest('/marketplaces/catalog/sync', { method: 'POST', body }),
+      apiRequest('/marketplaces/orders/sync', { method: 'POST', body }),
+    ])
+    const jobs = [...catalogResult.items, ...ordersResult.items]
+    startSyncMonitor(jobs)
+    const jobIds = jobs.map((job) => job.id).filter(Boolean)
+    for (let attempt = 0; attempt < 40 && jobIds.length; attempt += 1) {
+      const state = await apiRequest(`/marketplaces/sync-jobs?job_ids=${jobIds.join(',')}`)
+      if (!state.items.some(isSyncJobActive)) break
+      await wait(1500)
+    }
+    await loadLaunchReadiness()
+  } catch (requestError) {
+    launchError.value = requestError.message || 'Не удалось обновить данные магазина'
+  } finally {
+    launchReadinessLoading.value = false
+  }
 }
 
 function isConnectionDisabled(connectionId) {
@@ -1287,6 +1374,7 @@ async function saveConnection() {
     })
     closeConnectionModal()
     await loadConnections()
+    await restoreActiveSyncJobs()
   } catch (requestError) {
     connectionError.value = requestError.message || 'Не удалось подключить магазин'
   } finally {
@@ -1308,25 +1396,6 @@ async function toggleConnection(connection) {
     error.value = requestError.message || (shouldEnable ? 'Не удалось подключить магазин снова' : 'Не удалось отключить магазин')
   } finally {
     connectionActionId.value = null
-  }
-}
-
-async function toggleOrdersPolling(connection) {
-  pollingActionId.value = connection.id
-  error.value = ''
-  notice.value = ''
-  const enabled = !connection.orders_polling_enabled
-  try {
-    await apiRequest(`/marketplaces/connections/${connection.id}/orders-polling`, {
-      method: 'POST',
-      body: JSON.stringify({ enabled, interval_seconds: connection.orders_poll_interval_seconds || 60 }),
-    })
-    await loadConnections()
-    notice.value = enabled ? `Получение заказов «${connection.display_name}» включено` : `Получение заказов «${connection.display_name}» выключено`
-  } catch (requestError) {
-    error.value = requestError.message || 'Не удалось изменить получение заказов Ozon'
-  } finally {
-    pollingActionId.value = null
   }
 }
 
@@ -1435,18 +1504,12 @@ onBeforeUnmount(() => {
           <dl>
             <div><dt>API-ключ</dt><dd>{{ connection.token_masked }}</dd></div>
             <div><dt>Кабинет / магазин</dt><dd>{{ connectionAccountValue(connection) }}</dd></div>
+            <div><dt>Обработка заказов</dt><dd class="connection-card__fulfillment-mode" :class="`connection-card__fulfillment-mode--${connection.launch_state}`">{{ fulfillmentMode(connection) }}</dd></div>
           </dl>
           <p class="connection-card__activity" :class="{ 'connection-card__activity--error': connection.last_error }" :title="connection.last_error || ''">{{ connectionActivity(connection) }}</p>
           <footer>
             <span>{{ connection.status === 'disabled' ? 'Архивный снимок' : connection.last_error ? 'Требует внимания' : 'Подключён к Seller' }}</span>
-            <button
-              v-if="connection.provider_code === 'ozon' && connection.status === 'active'"
-              type="button"
-              :disabled="pollingActionId === connection.id"
-              @click="toggleOrdersPolling(connection)"
-            >
-              {{ pollingActionId === connection.id ? 'Подождите…' : connection.orders_polling_enabled ? 'Остановить получение' : 'Получать заказы' }}
-            </button>
+            <button v-if="connection.status === 'active' && connection.launch_state !== 'running'" class="connection-card__launch" type="button" @click="openStoreLaunch(connection)">Настроить запуск</button>
             <button
               type="button"
               :class="{ 'connection-card__action--enable': connection.status === 'disabled' }"
@@ -1739,6 +1802,19 @@ onBeforeUnmount(() => {
       @cancel="closeCatalogArchiveConfirm"
     />
 
+    <StoreLaunchModal
+      v-if="selectedLaunchConnection"
+      :connection="selectedLaunchConnection"
+      :readiness="launchReadiness"
+      :loading="launchReadinessLoading"
+      :launching="launchActionLoading"
+      :error="launchError"
+      @retry="loadLaunchReadiness"
+      @refresh="refreshLaunchData"
+      @launch="launchStore"
+      @close="closeStoreLaunch"
+    />
+
     <div v-if="isConnectionModalOpen" class="modal-backdrop" @click.self="closeConnectionModal">
       <section class="connection-modal" role="dialog" aria-modal="true" aria-labelledby="connection-title">
         <button class="modal-close" type="button" aria-label="Закрыть" @click="closeConnectionModal">×</button>
@@ -1790,9 +1866,9 @@ onBeforeUnmount(() => {
 .sync-activity { position: relative; display: grid; grid-template-columns: 64px minmax(0,1fr) auto; align-items: center; gap: 15px; margin-top: 18px; padding: 11px 15px 11px 12px; overflow: hidden; border: 1px solid rgba(92,126,226,.34); border-radius: 20px; background: linear-gradient(115deg,rgba(21,36,77,.92),rgba(13,21,46,.92)); box-shadow: 0 18px 45px rgba(4,10,29,.2),inset 0 1px rgba(255,255,255,.025); } .sync-activity::after { content: ''; position: absolute; right: 13%; bottom: -90px; width: 210px; aspect-ratio: 1; border: 1px solid rgba(96,128,222,.12); border-radius: 50%; pointer-events: none; } .sync-activity--succeeded { border-color: rgba(80,230,193,.36); background: linear-gradient(115deg,rgba(18,53,62,.82),rgba(13,25,47,.93)); } .sync-activity--failed { border-color: rgba(255,150,155,.4); background: linear-gradient(115deg,rgba(67,31,48,.76),rgba(19,23,48,.94)); } .sync-activity__visual { position: relative; z-index: 1; display: grid; width: 64px; height: 64px; place-items: center; border-radius: 17px; background: rgba(8,15,34,.48); } .sync-activity__result { color: var(--success); border: 1px solid rgba(80,230,193,.26); background: rgba(80,230,193,.08); } .sync-activity--failed .sync-activity__result { color: #ffaaa8; border-color: rgba(255,150,155,.28); background: rgba(255,150,155,.08); } .sync-activity__result svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; } .sync-activity__copy { position: relative; z-index: 1; min-width: 0; } .sync-activity__copy > span { display: block; margin-bottom: 3px; color: #7894ff; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .sync-activity--succeeded .sync-activity__copy > span { color: #58dcb8; } .sync-activity--failed .sync-activity__copy > span { color: #ff9fa4; } .sync-activity__copy strong { display: block; color: #f2f5ff; font-size: 15px; } .sync-activity__copy p { overflow: hidden; margin: 3px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; } .sync-activity__live { position: relative; z-index: 1; padding: 7px 10px; border: 1px solid rgba(115,144,235,.24); border-radius: 999px; color: #b8c5e3; background: rgba(26,39,76,.52); font-size: 10px; font-weight: 800; white-space: nowrap; } .sync-activity__close { position: relative; z-index: 1; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid rgba(149,164,203,.27); border-radius: 11px; color: #c3cde3; background: rgba(21,31,58,.62); font-size: 23px; line-height: 1; } .sync-activity + .dashboard-heading,.sync-activity + .snapshot-view { margin-top: 28px; } .sync-activity-enter-active,.sync-activity-leave-active { transition: opacity .18s ease,transform .18s ease; } .sync-activity-enter-from,.sync-activity-leave-to { opacity: 0; transform: translateY(-6px); }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 46px 0 27px; } .dashboard-heading h1, .connection-modal h1 { margin: 8px 0 10px; font-size: clamp(35px,4vw,52px); letter-spacing: -.065em; } .dashboard-heading p:not(.kicker) { max-width: 630px; margin: 0; color: #aeb9d4; line-height: 1.55; } .kicker { margin: 0; color: #7290ff; font-size: 12px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
 .primary-button { min-height: 52px; padding: 0 20px; border: 0; border-radius: 14px; color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); font-weight: 850; box-shadow: 0 13px 32px rgba(32,77,220,.28); transition: transform .2s, filter .2s; } .primary-button:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.08); }
-.connection-grid { display: grid; grid-template-columns: repeat(3,minmax(255px,1fr)); gap: 20px; } .connection-card, .connection-add-card { min-height: 300px; padding: 26px; border: 1px solid rgba(135,157,207,.24); border-radius: 25px; background: linear-gradient(145deg,rgba(20,31,60,.95),rgba(12,18,42,.93)); } .connection-card--disabled { border-color: rgba(135,157,207,.16); background: linear-gradient(145deg,rgba(18,27,51,.82),rgba(11,16,36,.86)); } .connection-card--disabled > :not(footer) { opacity: .66; } .connection-card--error { border-color: rgba(255,150,155,.34); } .connection-card { display: grid; gap: 16px; } .connection-card__head, .connection-card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; } .connection-card h2 { margin: 0; font-size: 24px; letter-spacing: -.045em; } .connection-card p { margin: 5px 0 0; color: #aeb9d4; } .connection-card .connection-card__activity { min-height: 36px; margin: 0; color: #9eabc7; font-size: 12px; line-height: 1.45; } .connection-card .connection-card__activity--error { color: #ffaaa8; }
+.connection-grid { display: grid; grid-template-columns: repeat(3,minmax(255px,1fr)); gap: 20px; } .connection-card, .connection-add-card { min-height: 320px; padding: 26px; border: 1px solid rgba(135,157,207,.24); border-radius: 25px; background: linear-gradient(145deg,rgba(20,31,60,.95),rgba(12,18,42,.93)); } .connection-card--disabled { border-color: rgba(135,157,207,.16); background: linear-gradient(145deg,rgba(18,27,51,.82),rgba(11,16,36,.86)); } .connection-card--disabled > :not(footer) { opacity: .66; } .connection-card--error { border-color: rgba(255,150,155,.34); } .connection-card { display: grid; gap: 14px; } .connection-card__head, .connection-card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; } .connection-card h2 { margin: 0; font-size: 24px; letter-spacing: -.045em; } .connection-card p { margin: 5px 0 0; color: #aeb9d4; } .connection-card .connection-card__activity { min-height: 36px; margin: 0; color: #9eabc7; font-size: 12px; line-height: 1.45; } .connection-card .connection-card__activity--error { color: #ffaaa8; }
 .market-mark { display: inline-grid; width: 43px; height: 43px; place-items: center; flex: 0 0 auto; overflow: hidden; border: 1px solid rgba(255,255,255,.17); border-radius: 12px; background: #fff; box-shadow: 0 7px 18px rgba(0,0,0,.16); } .market-mark img { display: block; width: 100%; height: 100%; object-fit: cover; } .market-mark--ozon img { transform: scale(1.32); } .market-mark--yandex_market img { transform: scale(1.03); } .connection-status { color: var(--success); font-size: 12px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; } .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px rgba(80,230,193,.1); } .connection-status--disabled { color: #aeb9d4; } .connection-status--error { color: #ff969b; } .connection-status--error::before { box-shadow: 0 0 0 5px rgba(255,150,155,.1); }
-.connection-card dl { display: grid; margin: 0; border-top: 1px solid rgba(145,164,205,.19); } .connection-card dl div { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid rgba(145,164,205,.19); } .connection-card dt { color: #aeb9d4; } .connection-card dd { margin: 0; color: #f0f3fc; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-weight: 700; } .connection-card footer { color: #aeb9d4; font-size: 13px; } .connection-card footer button { padding: 0; border: 0; color: #ff9a9b; background: transparent; font-weight: 800; } .connection-card footer .connection-card__action--enable { color: #7894ff; }
+.connection-card dl { display: grid; margin: 0; border-top: 1px solid rgba(145,164,205,.19); } .connection-card dl div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(145,164,205,.19); } .connection-card dt { color: #aeb9d4; } .connection-card dd { margin: 0; color: #f0f3fc; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-weight: 700; text-align: right; } .connection-card dd.connection-card__fulfillment-mode { color:#aab7d3;font-family:inherit;font-size:12px;font-weight:750; } .connection-card dd.connection-card__fulfillment-mode--running { color:var(--success); } .connection-card dd.connection-card__fulfillment-mode--setup { color:#86a0ff; } .connection-card footer { color: #aeb9d4; font-size: 13px; } .connection-card footer button { padding: 0; border: 0; color: #ff9a9b; background: transparent; font-weight: 800; } .connection-card footer .connection-card__action--enable { color: #7894ff; } .connection-card footer .connection-card__launch { color:#8ca5ff; }
 .connection-add-card { display: grid; place-content: center; justify-items: center; gap: 10px; color: #b7c2da; border-style: dashed; background: rgba(18,29,56,.38); } .connection-add-card strong { color: var(--brand-blue-bright); font-size: 47px; line-height: 1; font-weight: 400; } .connection-add-card span { font-weight: 800; } .empty-state { display: grid; min-height: 230px; place-items: center; color: #b7c2da; border: 1px dashed rgba(145,164,205,.35); border-radius: 24px; }
 .section-gate { position: relative; min-height: 430px; display: grid; place-content: center; justify-items: center; overflow: hidden; padding: clamp(34px,6vw,76px); border: 1px dashed rgba(126,151,213,.32); border-radius: 28px; background: radial-gradient(circle at 50% 24%,rgba(52,92,231,.18),transparent 43%),rgba(13,22,48,.52); text-align: center; } .section-gate::after { content: ''; position: absolute; width: 330px; aspect-ratio: 1; bottom: -260px; border: 1px solid rgba(100,130,207,.16); border-radius: 50%; } .section-gate__mark { display: grid; width: 58px; height: 58px; place-items: center; margin-bottom: 18px; border: 1px solid rgba(91,123,255,.46); border-radius: 18px; color: #84a0ff; background: rgba(38,68,165,.22); font-size: 34px; font-weight: 300; line-height: 1; box-shadow: 0 16px 45px rgba(20,55,181,.18); } .section-gate h1 { max-width: 680px; margin: 12px 0 16px; font-size: clamp(31px,4vw,52px); line-height: 1.02; letter-spacing: -.06em; } .section-gate > p:not(.kicker) { max-width: 590px; margin: 0 0 28px; color: #aeb9d4; font-size: 16px; line-height: 1.6; } .section-gate .primary-button { min-width: 220px; }
 .auth-card { position: relative; z-index: 1; width: min(100%,870px); display: grid; grid-template-columns: minmax(250px,.9fr) minmax(280px,1fr); gap: clamp(30px,6vw,85px); margin: 12vh auto 0; padding: clamp(30px,5vw,66px); border: 1px solid rgba(144,160,204,.25); border-radius: 30px; background: linear-gradient(140deg,rgba(22,33,62,.97),rgba(10,15,34,.97)); box-shadow: 0 30px 90px rgba(0,0,0,.32); } .auth-card__intro h1 { margin: 12px 0 18px; white-space: pre-line; font-size: clamp(36px,4.3vw,65px); line-height: .95; letter-spacing: -.075em; } .auth-card__intro p:not(.kicker) { margin: 0; color: #aeb9d4; line-height: 1.55; }

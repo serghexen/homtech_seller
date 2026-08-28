@@ -12,11 +12,16 @@ import worker
 
 class OzonPollingTests(unittest.TestCase):
     def test_scheduler_requires_database_switch_and_due_time(self) -> None:
-        source = inspect.getsource(worker.enqueue_due_ozon_order_jobs)
-        self.assertIn("provider_code='ozon'", source)
+        source = inspect.getsource(worker.enqueue_due_marketplace_order_jobs)
+        self.assertIn("launch_state='running'", source)
         self.assertIn("orders_polling_enabled=true", source)
         self.assertIn("next_orders_poll_at <= now()", source)
         self.assertIn("ON CONFLICT DO NOTHING", source)
+
+    def test_scheduler_is_shared_without_per_store_processes(self) -> None:
+        source = inspect.getsource(worker.enqueue_due_marketplace_order_jobs)
+        self.assertNotIn("provider_code='ozon'", source)
+        self.assertIn("FOR UPDATE SKIP LOCKED", source)
 
     def test_ozon_orders_use_separate_watermark(self) -> None:
         source = inspect.getsource(marketplace_sync_service.sync_orders_connection)

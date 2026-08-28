@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from domains.fulfillment_service import (
@@ -71,6 +72,20 @@ class FulfillmentServiceTests(unittest.TestCase):
         insert_sql, insert_params = connection.scripted_cursor.executions[1]
         self.assertIn("ON CONFLICT (connection_id, external_order_id, external_item_id)", insert_sql)
         self.assertEqual(insert_params, (7, "123", "9", "SKU-1", 2, "seller:yandex_market:7:123:9"))
+
+    def test_does_not_create_fulfillment_for_historical_setup_snapshot(self) -> None:
+        first_seen = datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc)
+        started_at = datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc)
+        connection = ScriptedConnection([
+            [("9", "SKU-1", 1, "processing", "DIGITAL", "yandex_market", "running", started_at, first_seen)],
+            None,
+        ])
+
+        fulfillment_ids = observe_order_fulfillments(connection, connection_id=7, external_order_id="123")
+
+        self.assertEqual(fulfillment_ids, [])
+        all_sql = "\n".join(sql for sql, _params in connection.scripted_cursor.executions)
+        self.assertNotIn("INSERT INTO seller.order_fulfillments(", all_sql)
 
     def test_does_not_create_fulfillment_for_physical_order(self) -> None:
         connection = ScriptedConnection([

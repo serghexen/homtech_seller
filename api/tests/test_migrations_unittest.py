@@ -9,6 +9,17 @@ from scripts.run_migrations import split_sql_statements
 
 
 class MigrationFilesTests(unittest.TestCase):
+    def test_store_launch_migration_preserves_existing_runtime_and_blocks_history(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260828_01_store_launch.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("launch_state text NOT NULL DEFAULT 'setup'", joined)
+        self.assertIn("first_seen_at timestamptz NOT NULL DEFAULT now()", joined)
+        self.assertIn("marketplace_connection_launch_events", joined)
+        self.assertIn("fulfillment_started_at=COALESCE(fulfillment_started_at, clock_timestamp())", joined)
+        self.assertIn("orders_polling_enabled=true", joined)
+
     def test_catalog_presence_migration_contains_schema_and_index_steps(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260824_04_catalog_snapshot_presence.sql"

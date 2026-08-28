@@ -145,6 +145,7 @@ class SupplierFulfillmentProcessor:
                       AND fulfillment.next_resolve_at <= now()
                       AND (fulfillment.resolver_locked_until IS NULL OR fulfillment.resolver_locked_until < now())
                       AND market.status='active'
+                      AND market.launch_state='running'
                     ORDER BY fulfillment.next_resolve_at, fulfillment.updated_at, fulfillment.id
                     FOR UPDATE OF fulfillment SKIP LOCKED
                     LIMIT 1
