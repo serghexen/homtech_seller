@@ -12,6 +12,15 @@ import StoreLaunchModal from './components/StoreLaunchModal.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
 import { canOpenOrderFulfillment, isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
+import {
+  groupNewOrderEvents,
+  ORDER_ACTIVITY_HIDDEN_INTERVAL_MS,
+  ORDER_ACTIVITY_VISIBLE_INTERVAL_MS,
+  ORDER_TOAST_LIFETIME_MS,
+  readOrderPopupPreference,
+  visibleOrderToasts,
+  writeOrderPopupPreference,
+} from './utils/orderActivity.js'
 import { liveSearchDelay } from './utils/search.js'
 import {
   isSyncJobActive,
@@ -53,6 +62,9 @@ const orders = ref([])
 const ordersTotal = ref(0)
 const ordersPage = ref(1)
 const ordersLoading = ref(false)
+const orderPopupsEnabled = ref(true)
+const orderToasts = ref([])
+const unreadOrdersCount = ref(0)
 const selectedConnectionId = ref(null)
 const catalogSearch = ref('')
 const orderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
@@ -113,6 +125,11 @@ let catalogRequestSequence = 0
 let catalogSearchTimer = null
 let ordersRequestSequence = 0
 let orderSearchTimer = null
+let orderActivityCursor = null
+let orderActivityTimer = null
+let orderActivityRequestActive = false
+let orderToastSequence = 0
+const orderToastTimers = new Map()
 let syncMonitorSequence = 0
 let syncActivityDismissTimer = null
 let supplierQuoteSequence = 0
@@ -952,6 +969,125 @@ async function restoreActiveSyncJobs() {
   }
 }
 
+function clearOrderActivityTimer() {
+  if (orderActivityTimer) window.clearTimeout(orderActivityTimer)
+  orderActivityTimer = null
+}
+
+function dismissOrderToast(toastId) {
+  const timer = orderToastTimers.get(toastId)
+  if (timer) window.clearTimeout(timer)
+  orderToastTimers.delete(toastId)
+  orderToasts.value = orderToasts.value.filter((toast) => toast.id !== toastId)
+}
+
+function clearOrderToasts() {
+  for (const timer of orderToastTimers.values()) window.clearTimeout(timer)
+  orderToastTimers.clear()
+  orderToasts.value = []
+}
+
+function showOrderActivityToasts(groups) {
+  const toasts = visibleOrderToasts(groups).map((group) => ({ ...group, id: ++orderToastSequence }))
+  clearOrderToasts()
+  orderToasts.value = toasts
+  for (const toast of toasts) {
+    orderToastTimers.set(toast.id, window.setTimeout(() => dismissOrderToast(toast.id), ORDER_TOAST_LIFETIME_MS))
+  }
+}
+
+function setOrderPopupPreference(enabled) {
+  orderPopupsEnabled.value = Boolean(enabled)
+  writeOrderPopupPreference(window.localStorage, user.value, orderPopupsEnabled.value)
+  if (!orderPopupsEnabled.value) clearOrderToasts()
+}
+
+function toggleOrderPopups() {
+  setOrderPopupPreference(!orderPopupsEnabled.value)
+}
+
+function scheduleOrderActivityPoll(delay = null) {
+  clearOrderActivityTimer()
+  if (!user.value) return
+  const interval = delay ?? (document.hidden ? ORDER_ACTIVITY_HIDDEN_INTERVAL_MS : ORDER_ACTIVITY_VISIBLE_INTERVAL_MS)
+  orderActivityTimer = window.setTimeout(pollOrderActivity, interval)
+}
+
+async function refreshVisibleOrdersFromActivity() {
+  if (activeSection.value === 'orders' && hasConnections.value && !ordersLoading.value) {
+    await loadOrders({ silent: true })
+  }
+  if (selectedCatalogItem.value && !selectedProductOrdersLoading.value) {
+    await loadSelectedProductOrders()
+  }
+}
+
+async function pollOrderActivity() {
+  clearOrderActivityTimer()
+  if (!user.value || orderActivityRequestActive) {
+    scheduleOrderActivityPoll()
+    return
+  }
+  orderActivityRequestActive = true
+  try {
+    const suffix = orderActivityCursor === null ? '' : `?after_id=${orderActivityCursor}&limit=100`
+    const result = await apiRequest(`/marketplaces/orders/activity${suffix}`)
+    orderActivityCursor = Number(result.next_cursor || 0)
+    const events = Array.isArray(result.items) ? result.items : []
+    if (events.length) {
+      await refreshVisibleOrdersFromActivity()
+      const newOrders = groupNewOrderEvents(events)
+      if (newOrders.length) {
+        if (activeSection.value !== 'orders') unreadOrdersCount.value += newOrders.length
+        if (orderPopupsEnabled.value) showOrderActivityToasts(newOrders)
+      }
+    }
+    scheduleOrderActivityPoll(events.length >= 100 ? 0 : null)
+  } catch {
+    // Сбой фонового чтения не перекрывает интерфейс и не запускает запрос к маркетплейсу.
+    scheduleOrderActivityPoll()
+  } finally {
+    orderActivityRequestActive = false
+  }
+}
+
+function startOrderActivityMonitor() {
+  clearOrderActivityTimer()
+  clearOrderToasts()
+  orderActivityCursor = null
+  unreadOrdersCount.value = 0
+  orderPopupsEnabled.value = readOrderPopupPreference(window.localStorage, user.value)
+  scheduleOrderActivityPoll(0)
+}
+
+function stopOrderActivityMonitor() {
+  clearOrderActivityTimer()
+  clearOrderToasts()
+  orderActivityCursor = null
+  orderActivityRequestActive = false
+  unreadOrdersCount.value = 0
+}
+
+function handleOrderActivityVisibility() {
+  if (!document.hidden) scheduleOrderActivityPoll(0)
+  else scheduleOrderActivityPoll()
+}
+
+async function openOrderActivityToast(toast) {
+  dismissOrderToast(toast.id)
+  unreadOrdersCount.value = 0
+  activeSection.value = 'orders'
+  error.value = ''
+  notice.value = ''
+  if (!toast.is_summary) {
+    selectedConnectionId.value = toast.connection_id
+    Object.assign(orderFilters, { query: toast.external_order_id, status: '', date_from: '', date_to: '' })
+    Object.assign(appliedOrderFilters, orderFilters)
+    ordersPage.value = 1
+  }
+  if (hasConnections.value) await loadOrders()
+}
+
 async function loadConnections() {
   // Загружает только магазины рабочей области текущей сессии, а не общий список системы.
   if (!user.value) return
@@ -998,13 +1134,15 @@ async function loadCatalog() {
   }
 }
 
-async function loadOrders() {
+async function loadOrders({ silent = false } = {}) {
   // Загружает постраничный локальный снимок заказов с уже применёнными фильтрами.
   if (!user.value || !hasConnections.value) return
   clearOrderSearchTimer()
   const requestId = ++ordersRequestSequence
-  ordersLoading.value = true
-  error.value = ''
+  if (!silent) {
+    ordersLoading.value = true
+    error.value = ''
+  }
   try {
     const query = queryString({ connection_id: selectedConnectionId.value, ...appliedOrderFilters, page: ordersPage.value, page_size: pageSize })
     const result = await apiRequest(`/marketplaces/orders?${query}`)
@@ -1012,9 +1150,9 @@ async function loadOrders() {
     orders.value = result.items
     ordersTotal.value = result.total
   } catch (requestError) {
-    if (requestId === ordersRequestSequence) error.value = requestError.message || 'Не удалось загрузить заказы'
+    if (!silent && requestId === ordersRequestSequence) error.value = requestError.message || 'Не удалось загрузить заказы'
   } finally {
-    if (requestId === ordersRequestSequence) ordersLoading.value = false
+    if (!silent && requestId === ordersRequestSequence) ordersLoading.value = false
   }
 }
 
@@ -1027,7 +1165,10 @@ async function changeSection(section) {
   notice.value = ''
   if (!hasConnections.value) return
   if (section === 'catalog') await loadCatalog()
-  if (section === 'orders') await loadOrders()
+  if (section === 'orders') {
+    unreadOrdersCount.value = 0
+    await loadOrders()
+  }
 }
 
 async function selectConnection(connectionId) {
@@ -1236,6 +1377,7 @@ async function submit() {
     form.password = ''
     await loadConnections()
     await restoreActiveSyncJobs()
+    startOrderActivityMonitor()
   } catch (requestError) {
     error.value = requestError.message || 'Не удалось войти'
   } finally {
@@ -1263,6 +1405,7 @@ async function logout() {
     syncJobs.value = []
     syncMonitorError.value = ''
     syncActivityVisible.value = false
+    stopOrderActivityMonitor()
     selectedConnectionId.value = null
     activeSection.value = 'stores'
     form.password = ''
@@ -1401,12 +1544,14 @@ async function toggleConnection(connection) {
 
 onMounted(async () => {
   // Восстанавливает сессию после обновления страницы, не читая HttpOnly cookie из JavaScript.
+  document.addEventListener('visibilitychange', handleOrderActivityVisibility)
   try {
     const result = await apiRequest('/auth/me')
     user.value = result.user
     workspaceAccess.value = result.access
     await loadConnections()
     await restoreActiveSyncJobs()
+    startOrderActivityMonitor()
   } catch {
     user.value = null
     workspaceAccess.value = null
@@ -1416,11 +1561,13 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', handleOrderActivityVisibility)
   clearCatalogSearchTimer()
   clearOrderSearchTimer()
   clearSyncActivityDismissTimer()
   stopOrderFulfillmentMonitor()
   stopStockPublicationMonitor()
+  stopOrderActivityMonitor()
 })
 </script>
 
@@ -1443,6 +1590,18 @@ onBeforeUnmount(() => {
           <span class="plan-badge__signal" aria-hidden="true"></span>
           <span class="plan-badge__copy"><small>ТАРИФ</small><strong>{{ workspaceAccess.plan_name }}</strong></span>
         </div>
+        <button
+          class="order-popup-toggle"
+          :class="{ 'order-popup-toggle--enabled': orderPopupsEnabled }"
+          type="button"
+          :aria-pressed="orderPopupsEnabled"
+          :aria-label="orderPopupsEnabled ? 'Выключить всплывающие уведомления о заказах' : 'Включить всплывающие уведомления о заказах'"
+          :title="orderPopupsEnabled ? 'Всплывающие уведомления о заказах включены' : 'Всплывающие уведомления о заказах выключены'"
+          @click="toggleOrderPopups"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" /><path d="M10 21h4" /><path v-if="!orderPopupsEnabled" d="m4 4 16 16" /></svg>
+          <span v-if="unreadOrdersCount" class="order-popup-toggle__badge">{{ unreadOrdersCount > 99 ? '99+' : unreadOrdersCount }}</span>
+        </button>
         <button class="profile-button" type="button" @click="logout">
           <span class="profile-button__name">{{ user.display_name || user.email }}</span><span class="profile-button__divider" aria-hidden="true"></span><span>Выйти</span>
         </button>
@@ -1457,8 +1616,26 @@ onBeforeUnmount(() => {
       <nav class="seller-nav" aria-label="Разделы Seller">
         <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'stores' }" type="button" @click="changeSection('stores')">Магазины</button>
         <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'catalog' }" type="button" @click="changeSection('catalog')">Каталог</button>
-        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'orders' }" type="button" @click="changeSection('orders')">Заказы</button>
+        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'orders' }" type="button" @click="changeSection('orders')">
+          <span>Заказы</span><small v-if="unreadOrdersCount" class="seller-nav__badge">{{ unreadOrdersCount > 99 ? '99+' : unreadOrdersCount }}</small>
+        </button>
       </nav>
+
+      <TransitionGroup name="order-toast" tag="aside" class="order-toast-stack" aria-live="polite" aria-label="Новые заказы">
+        <article v-for="toast in orderToasts" :key="toast.id" class="order-toast" role="status" @click="openOrderActivityToast(toast)">
+          <div class="order-toast__mark" aria-hidden="true">
+            <span v-if="toast.is_summary">+{{ toast.hidden_count }}</span>
+            <img v-else :src="providerLogo(toast.provider_code)" alt="" />
+          </div>
+          <div class="order-toast__copy">
+            <span>{{ toast.is_summary ? 'ЕЩЁ НОВЫЕ ЗАКАЗЫ' : 'НОВЫЙ ЗАКАЗ' }}</span>
+            <strong>{{ toast.is_summary ? `${toast.hidden_count} заказов в Seller` : `Заказ №${toast.external_order_id}` }}</strong>
+            <p v-if="!toast.is_summary">{{ toast.store_name }}<template v-if="toast.title"> · {{ toast.title }}</template></p>
+            <p v-else>Откройте раздел, чтобы увидеть весь список</p>
+          </div>
+          <button type="button" aria-label="Закрыть уведомление" @click.stop="dismissOrderToast(toast.id)">×</button>
+        </article>
+      </TransitionGroup>
 
       <Transition name="sync-activity">
         <aside
@@ -1634,7 +1811,7 @@ onBeforeUnmount(() => {
           <div v-else-if="activeSection === 'catalog' && !catalogItems.length" class="empty-state">
             {{ catalogEmptyMessage }}
           </div>
-          <div v-else-if="activeSection === 'orders' && !orders.length" class="empty-state">Заказов пока нет в снимке. Нажмите «Обновить», чтобы прочитать свежие заказы.</div>
+          <div v-else-if="activeSection === 'orders' && !orders.length" class="empty-state">Заказов по выбранным условиям пока нет. Seller обновит список автоматически.</div>
 
           <div v-else-if="activeSection === 'catalog'" class="snapshot-grid">
             <article
@@ -1851,6 +2028,7 @@ onBeforeUnmount(() => {
 .app-header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; min-height: 92px; padding: 18px 25px; border: 1px solid rgba(144,160,204,.25); border-radius: 25px; background: rgba(13,20,43,.88); }
 .app-brand { display: flex; align-items: center; gap: 14px; } .app-brand img { width: clamp(160px,17vw,235px); max-height: 45px; object-fit: contain; } .app-brand span { padding-left: 14px; border-left: 1px solid rgba(144,160,204,.32); color: #b9c4dc; font-weight: 750; }
 .app-account { display: flex; align-items: stretch; gap: 5px; padding: 5px; border: 1px solid rgba(145,161,204,.2); border-radius: 20px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(2,7,22,.14); }
+.order-popup-toggle { position: relative; display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #8290ae; background: rgba(31,40,70,.72); transition: color .18s,border-color .18s,background .18s,transform .18s; } .order-popup-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .order-popup-toggle:hover { color: #eef3ff; border-color: rgba(112,140,222,.5); transform: translateY(-1px); } .order-popup-toggle--enabled { color: #74ebcc; border-color: rgba(80,230,193,.34); background: linear-gradient(145deg,rgba(18,65,72,.62),rgba(17,34,61,.82)); } .order-popup-toggle__badge { position: absolute; top: -5px; right: -5px; display: grid; min-width: 18px; height: 18px; place-items: center; padding: 0 4px; border: 2px solid #0b1229; border-radius: 999px; color: #08142a; background: #56e4bd; font-size: 9px; font-weight: 900; }
 .plan-badge { position: relative; display: flex; min-width: 105px; height: 46px; align-items: center; gap: 10px; padding: 6px 14px 6px 11px; overflow: hidden; border: 1px solid rgba(112,143,238,.34); border-radius: 14px; color: #d8e2ff; background: linear-gradient(135deg,rgba(30,51,112,.66),rgba(18,28,58,.82)); box-shadow: inset 0 1px rgba(255,255,255,.035); }
 .plan-badge::after { content: ''; position: absolute; right: -19px; bottom: -29px; width: 58px; aspect-ratio: 1; border: 1px solid rgba(128,153,229,.12); border-radius: 50%; pointer-events: none; }
 .plan-badge--pro { color: #8df1d6; border-color: rgba(80,230,193,.34); background: linear-gradient(135deg,rgba(19,69,73,.68),rgba(14,31,54,.86)); }
@@ -1863,6 +2041,8 @@ onBeforeUnmount(() => {
 .profile-button, .seller-nav__item, .secondary-button { border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .profile-button { display: inline-flex; height: 46px; align-items: center; gap: 12px; padding: 0 16px; font-size: 13px; transition: border-color .18s,background .18s,transform .18s; } .profile-button__name { color: #eef2ff; font-weight: 750; } .profile-button__divider { width: 1px; height: 18px; flex: 0 0 auto; background: rgba(151,167,207,.3); } .profile-button > span:last-child { color: #aab5cf; font-weight: 600; transition: color .18s; } .profile-button:hover { border-color: rgba(112,140,222,.5); background: rgba(38,50,86,.88); transform: translateY(-1px); } .profile-button:hover > span:last-child { color: #e4eaff; }
 .session-loader { position: relative; z-index: 1; display: grid; width: max-content; max-width: 100%; place-items: center; margin: 18vh auto 0; padding: 22px 28px 20px; border: 1px solid rgba(144,160,204,.25); border-radius: 22px; background: linear-gradient(140deg,rgba(22,33,62,.96),rgba(10,15,34,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
 .seller-dashboard { position: relative; z-index: 1; width: min(100%,1760px); margin: 42px auto 0; } .seller-nav { display: flex; width: max-content; max-width: 100%; gap: 9px; padding: 7px; border: 1px solid rgba(149,164,203,.27); border-radius: 19px; background: rgba(10,17,37,.74); } .seller-nav__item { min-height: 46px; padding: 0 20px; font-size: 15px; } .seller-nav__item--active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .seller-nav small { margin-left: 5px; color: #efb44b; }
+.seller-nav__badge { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 6px; border-radius: 999px; color: #072136 !important; background: #58e5bd; font-size: 10px; font-weight: 900; }
+.order-toast-stack { position: fixed; z-index: 80; top: 118px; right: clamp(18px,3vw,48px); display: grid; width: min(390px,calc(100vw - 32px)); gap: 10px; pointer-events: none; } .order-toast { position: relative; display: grid; grid-template-columns: 48px minmax(0,1fr) 28px; align-items: center; gap: 12px; padding: 14px; overflow: hidden; border: 1px solid rgba(77,225,190,.46); border-radius: 18px; color: #eef6ff; background: linear-gradient(145deg,rgba(15,42,62,.98),rgba(10,19,42,.99)); box-shadow: 0 18px 55px rgba(2,9,27,.48),inset 0 1px rgba(255,255,255,.04); cursor: pointer; pointer-events: auto; } .order-toast::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: #54e3bd; box-shadow: 0 0 20px rgba(84,227,189,.6); } .order-toast__mark { display: grid; width: 48px; height: 48px; place-items: center; overflow: hidden; border: 1px solid rgba(111,145,232,.34); border-radius: 14px; color: #67ecc8; background: rgba(22,43,83,.84); font-size: 13px; font-weight: 900; } .order-toast__mark img { width: 34px; height: 34px; object-fit: contain; } .order-toast__copy { min-width: 0; } .order-toast__copy > span { color: #63dfbf; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .order-toast__copy strong { display: block; overflow: hidden; margin-top: 3px; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; } .order-toast__copy p { overflow: hidden; margin: 4px 0 0; color: #aebbd5; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; } .order-toast > button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 9px; color: #8997b5; background: rgba(105,124,172,.1); font-size: 19px; } .order-toast > button:hover { color: #fff; background: rgba(105,124,172,.22); } .order-toast-enter-active,.order-toast-leave-active { transition: opacity .22s ease,transform .22s ease; } .order-toast-enter-from,.order-toast-leave-to { opacity: 0; transform: translateX(22px) scale(.98); } .order-toast-move { transition: transform .22s ease; }
 .sync-activity { position: relative; display: grid; grid-template-columns: 64px minmax(0,1fr) auto; align-items: center; gap: 15px; margin-top: 18px; padding: 11px 15px 11px 12px; overflow: hidden; border: 1px solid rgba(92,126,226,.34); border-radius: 20px; background: linear-gradient(115deg,rgba(21,36,77,.92),rgba(13,21,46,.92)); box-shadow: 0 18px 45px rgba(4,10,29,.2),inset 0 1px rgba(255,255,255,.025); } .sync-activity::after { content: ''; position: absolute; right: 13%; bottom: -90px; width: 210px; aspect-ratio: 1; border: 1px solid rgba(96,128,222,.12); border-radius: 50%; pointer-events: none; } .sync-activity--succeeded { border-color: rgba(80,230,193,.36); background: linear-gradient(115deg,rgba(18,53,62,.82),rgba(13,25,47,.93)); } .sync-activity--failed { border-color: rgba(255,150,155,.4); background: linear-gradient(115deg,rgba(67,31,48,.76),rgba(19,23,48,.94)); } .sync-activity__visual { position: relative; z-index: 1; display: grid; width: 64px; height: 64px; place-items: center; border-radius: 17px; background: rgba(8,15,34,.48); } .sync-activity__result { color: var(--success); border: 1px solid rgba(80,230,193,.26); background: rgba(80,230,193,.08); } .sync-activity--failed .sync-activity__result { color: #ffaaa8; border-color: rgba(255,150,155,.28); background: rgba(255,150,155,.08); } .sync-activity__result svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; } .sync-activity__copy { position: relative; z-index: 1; min-width: 0; } .sync-activity__copy > span { display: block; margin-bottom: 3px; color: #7894ff; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .sync-activity--succeeded .sync-activity__copy > span { color: #58dcb8; } .sync-activity--failed .sync-activity__copy > span { color: #ff9fa4; } .sync-activity__copy strong { display: block; color: #f2f5ff; font-size: 15px; } .sync-activity__copy p { overflow: hidden; margin: 3px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; } .sync-activity__live { position: relative; z-index: 1; padding: 7px 10px; border: 1px solid rgba(115,144,235,.24); border-radius: 999px; color: #b8c5e3; background: rgba(26,39,76,.52); font-size: 10px; font-weight: 800; white-space: nowrap; } .sync-activity__close { position: relative; z-index: 1; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid rgba(149,164,203,.27); border-radius: 11px; color: #c3cde3; background: rgba(21,31,58,.62); font-size: 23px; line-height: 1; } .sync-activity + .dashboard-heading,.sync-activity + .snapshot-view { margin-top: 28px; } .sync-activity-enter-active,.sync-activity-leave-active { transition: opacity .18s ease,transform .18s ease; } .sync-activity-enter-from,.sync-activity-leave-to { opacity: 0; transform: translateY(-6px); }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 46px 0 27px; } .dashboard-heading h1, .connection-modal h1 { margin: 8px 0 10px; font-size: clamp(35px,4vw,52px); letter-spacing: -.065em; } .dashboard-heading p:not(.kicker) { max-width: 630px; margin: 0; color: #aeb9d4; line-height: 1.55; } .kicker { margin: 0; color: #7290ff; font-size: 12px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
 .primary-button { min-height: 52px; padding: 0 20px; border: 0; border-radius: 14px; color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); font-weight: 850; box-shadow: 0 13px 32px rgba(32,77,220,.28); transition: transform .2s, filter .2s; } .primary-button:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.08); }
@@ -1886,4 +2066,5 @@ onBeforeUnmount(() => {
 @media (max-width:900px) { .connection-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .plan-badge { min-width: 0; height: 42px; gap: 7px; padding: 6px 10px; } .plan-badge__copy small { display: none; } .plan-badge__copy strong { font-size: 12px; } .profile-button { height: 42px; gap: 0; padding: 0 12px; white-space: nowrap; } .profile-button__name,.profile-button__divider { display: none; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 26px; } .seller-nav { width: 100%; gap: 4px; } .seller-nav__item { flex: 1; padding: 0 9px; font-size: 13px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .connection-grid, .snapshot-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
+@media (max-width:660px) { .order-popup-toggle { width: 42px; height: 42px; } .seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }
 </style>

@@ -206,6 +206,27 @@ class MarketplaceOrderListOut(BaseModel):
     page_size: int
 
 
+class MarketplaceOrderActivityItemOut(BaseModel):
+    id: int
+    event_type: Literal["new_order", "status_changed"]
+    connection_id: int
+    provider_code: str
+    store_name: str
+    external_order_id: str
+    external_item_id: str
+    sku: str = ""
+    title: str = ""
+    quantity: int = 0
+    status: str = ""
+    previous_status: str = ""
+    occurred_at: datetime
+
+
+class MarketplaceOrderActivityOut(BaseModel):
+    items: list[MarketplaceOrderActivityItemOut]
+    next_cursor: int
+
+
 def marketplace_order_from_row(row: tuple[Any, ...]) -> MarketplaceOrderItemOut:
     return MarketplaceOrderItemOut(
         connection_id=int(row[0]), provider_code=str(row[1]), store_name=str(row[2]),
@@ -1175,6 +1196,65 @@ def mount_marketplace_read_routes(
         return MarketplaceOrderListOut(
             items=[marketplace_order_from_row(row) for row in rows],
             total=total, page=page, page_size=page_size,
+        )
+
+    @app.get("/marketplaces/orders/activity", response_model=MarketplaceOrderActivityOut)
+    def list_order_activity(
+        after_id: int | None = Query(default=None, ge=0),
+        limit: int = Query(default=100, ge=1, le=200),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceOrderActivityOut:
+        """Отдаёт workspace-scoped курсор изменений локального снимка заказов.
+
+        Первый запрос без курсора только ставит точку отсчёта: накопленная история
+        не превращается во всплывающие «новые заказы» после входа пользователя.
+        """
+        with psycopg.connect(database_url()) as connection:
+            seller_user = workspace_for_user(connection, user)
+            with connection.cursor() as cursor:
+                if after_id is None:
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(id), 0) FROM seller.order_activity_events WHERE workspace_id=%s",
+                        (seller_user.workspace_id,),
+                    )
+                    return MarketplaceOrderActivityOut(items=[], next_cursor=int(cursor.fetchone()[0]))
+
+                cursor.execute(
+                    """
+                    SELECT event.id, event.event_type, event.connection_id,
+                           connection.provider_code, connection.display_name,
+                           event.external_order_id, event.external_item_id,
+                           COALESCE(item.sku, ''), COALESCE(item.title, ''), COALESCE(item.quantity, 0),
+                           event.order_status, event.previous_status, event.created_at
+                    FROM seller.order_activity_events AS event
+                    JOIN seller.marketplace_connections AS connection
+                      ON connection.id=event.connection_id
+                     AND connection.workspace_id=event.workspace_id
+                    LEFT JOIN seller.order_items AS item
+                      ON item.connection_id=event.connection_id
+                     AND item.external_order_id=event.external_order_id
+                     AND item.external_item_id=event.external_item_id
+                    WHERE event.workspace_id=%s AND event.id>%s
+                    ORDER BY event.id ASC
+                    LIMIT %s
+                    """,
+                    (seller_user.workspace_id, after_id, limit),
+                )
+                rows = cursor.fetchall()
+
+        items = [
+            MarketplaceOrderActivityItemOut(
+                id=int(row[0]), event_type=str(row[1]), connection_id=int(row[2]),
+                provider_code=str(row[3]), store_name=str(row[4]), external_order_id=str(row[5]),
+                external_item_id=str(row[6]), sku=str(row[7]), title=str(row[8]),
+                quantity=int(row[9]), status=str(row[10]), previous_status=str(row[11]),
+                occurred_at=row[12],
+            )
+            for row in rows
+        ]
+        return MarketplaceOrderActivityOut(
+            items=items,
+            next_cursor=items[-1].id if items else after_id,
         )
 
     @app.get("/marketplaces/orders", response_model=MarketplaceOrderListOut)

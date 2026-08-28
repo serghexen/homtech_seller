@@ -9,6 +9,18 @@ from scripts.run_migrations import split_sql_statements
 
 
 class MigrationFilesTests(unittest.TestCase):
+    def test_order_activity_events_are_workspace_scoped_and_do_not_backfill_history(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260828_02_order_activity_events.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.order_activity_events", joined)
+        self.assertIn("workspace_id bigint NOT NULL", joined)
+        self.assertIn("connection_id bigint NOT NULL", joined)
+        self.assertIn("AFTER INSERT ON seller.order_items", joined)
+        self.assertIn("AFTER UPDATE OF normalized_status ON seller.order_items", joined)
+        self.assertNotIn("INSERT INTO seller.order_activity_events SELECT", joined)
+
     def test_store_launch_migration_preserves_existing_runtime_and_blocks_history(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260828_01_store_launch.sql"
