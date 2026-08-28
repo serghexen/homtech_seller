@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { canOpenOrderFulfillment, isOrderFulfillmentViewOnly } from '../src/utils/orderFulfillment.js'
+import {
+  canOpenOrderFulfillment,
+  isOrderFulfillmentViewOnly,
+  orderFulfillmentAction,
+} from '../src/utils/orderFulfillment.js'
 
 test('only processing orders open the manual fulfillment workflow', () => {
   assert.equal(isOrderFulfillmentViewOnly({ status: 'processing' }), false)
@@ -48,4 +52,28 @@ test('processing digital orders open before keys are prepared', () => {
     delivery_type: 'DIGITAL',
     has_fulfillment_keys: true,
   }), false)
+})
+
+test('server ownership keeps automatic fulfillment non-clickable', () => {
+  const order = {
+    provider_code: 'yandex_market',
+    status: 'processing',
+    delivery_type: 'DIGITAL',
+    fulfillment_action: 'automatic',
+  }
+  assert.equal(orderFulfillmentAction(order), 'automatic')
+  assert.equal(canOpenOrderFulfillment(order), false)
+})
+
+test('operator, view and attention actions open their matching fulfillment state', () => {
+  for (const fulfillmentAction of ['operator', 'view', 'attention']) {
+    const order = {
+      provider_code: 'ozon',
+      status: 'processing',
+      delivery_type: 'DIGITAL',
+      fulfillment_action: fulfillmentAction,
+    }
+    assert.equal(orderFulfillmentAction(order), fulfillmentAction)
+    assert.equal(canOpenOrderFulfillment(order), true)
+  }
 })

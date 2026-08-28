@@ -16,10 +16,14 @@ from domains.fulfillment_service import (
     release_pool_keys,
     reserve_pool_keys,
 )
+from domains.fulfillment_ownership import (
+    automatic_fulfillment_resolver_enabled,
+    automation_controls_fulfillment,
+    manual_preparation_stage_ready,
+)
 from domains.local_auth import AuthenticatedUser
 from domains.ozon_outbound import ozon_outbound_enabled
 from domains.ozon_stock_queue import enqueue_ozon_stock_publication
-from domains.supplier_fulfillment import automatic_fulfillment_resolver_enabled
 from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enabled
 from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
 
@@ -74,47 +78,6 @@ class OrderFulfillmentOut(BaseModel):
     can_reveal_keys: bool = False
     can_reveal_support_message: bool = False
     automation_in_progress: bool = False
-
-
-def automation_controls_fulfillment(
-    *,
-    fulfillment_status: str,
-    handling_mode: str,
-    outbound_state: str,
-    resolver_enabled: bool,
-    resolver_active: bool,
-    supplier_attempt_active: bool,
-) -> bool:
-    return bool(
-        resolver_active
-        or supplier_attempt_active
-        or (
-            handling_mode == "automatic"
-            and (
-                fulfillment_status in {"pending", "supplier_required", "sending", "submitted"}
-                or (fulfillment_status == "reserved" and outbound_state in {"", "queued", "preparing"})
-            )
-        )
-        or (
-            resolver_enabled
-            and handling_mode == "unassigned"
-            and fulfillment_status in {"not_prepared", "pending", "supplier_required"}
-        )
-    )
-
-
-def manual_preparation_stage_ready(
-    *, fulfillment_status: str, handling_mode: str, resolver_enabled: bool, automation_in_progress: bool,
-) -> bool:
-    if automation_in_progress:
-        return False
-    if fulfillment_status == "manual_required" and handling_mode != "automatic":
-        return True
-    return bool(
-        not resolver_enabled
-        and handling_mode != "automatic"
-        and fulfillment_status in {"not_prepared", "pending", "supplier_required"}
-    )
 
 
 def mount_marketplace_fulfillment_routes(

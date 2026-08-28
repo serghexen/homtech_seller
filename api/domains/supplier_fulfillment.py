@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from domains.buyer_text import normalize_buyer_text
 from domains.fulfillment_service import prepare_support_message, reserve_pool_keys
+from domains.fulfillment_ownership import automatic_fulfillment_resolver_enabled
 from domains.supplier_hub_client import (
     SupplierHubClient,
     SupplierHubError,
@@ -24,14 +25,6 @@ from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enab
 
 HUB_BLOCKING_STATES = {"created", "checked", "payment_started", "processing", "requires_attention"}
 HUB_TERMINAL_STATES = {"succeeded", "failed"}
-
-
-def automatic_fulfillment_resolver_enabled() -> bool:
-    # Главный аварийный выключатель всей автоматической цепочки. Его включение
-    # не отменяет отдельные флаги Supplier Hub, пула, магазина и outbound.
-    return str(os.getenv("SELLER_FULFILLMENT_RESOLVER_ENABLED", "false")).strip().lower() in {
-        "1", "true", "yes",
-    }
 
 
 def automatic_pool_enabled() -> bool:

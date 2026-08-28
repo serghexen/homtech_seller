@@ -25,6 +25,7 @@ from domains.marketplace_read_api import (
     mount_marketplace_read_routes,
     normalize_catalog_item,
     normalize_order_items,
+    order_fulfillment_action,
     supplier_price_guard,
 )
 
@@ -50,6 +51,36 @@ class MarketplaceReadApiTests(unittest.TestCase):
 
         self.assertFalse(result.has_fulfillment_keys)
         self.assertTrue(result.has_fulfillment_result)
+
+    def test_order_list_marks_automatic_fulfillment_as_non_operator_action(self) -> None:
+        result = marketplace_order_from_row((
+            7, "yandex_market", "MIC DIGITAL SHOP", "60976906051", "60976906051", "MRKT-9E6P74A1",
+            "MRKT-9E6P74A1", "Crash Bandicoot", 1, "processing", "PROCESSING", "DIGITAL", None, None,
+            datetime(2026, 8, 28, tzinfo=timezone.utc), False, True,
+            "sending", "automatic", "sending", True, False,
+        ))
+
+        self.assertEqual(result.fulfillment_status, "sending")
+        self.assertEqual(result.fulfillment_handling_mode, "automatic")
+        self.assertEqual(result.fulfillment_action, "automatic")
+
+    def test_fulfillment_action_distinguishes_operator_view_and_attention(self) -> None:
+        base = {
+            "provider_code": "yandex_market",
+            "order_status": "processing",
+            "delivery_type": "DIGITAL",
+            "has_result": False,
+        }
+        self.assertEqual(order_fulfillment_action(
+            **base, fulfillment_status="manual_required", handling_mode="manual", resolver_enabled=True,
+        ), "operator")
+        self.assertEqual(order_fulfillment_action(
+            **base, fulfillment_status="unknown", handling_mode="automatic", resolver_enabled=True,
+        ), "attention")
+        self.assertEqual(order_fulfillment_action(
+            **{**base, "order_status": "in_delivery", "has_result": True},
+            fulfillment_status="submitted", handling_mode="automatic", resolver_enabled=True,
+        ), "view")
 
     def test_supplier_price_guard_is_internal_five_percent_ceiling(self) -> None:
         self.assertEqual(supplier_price_guard(Decimal("464.53")), Decimal("487.76"))

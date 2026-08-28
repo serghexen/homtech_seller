@@ -1,8 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
+import OrderFulfillmentAction from './OrderFulfillmentAction.vue'
 import { addMonthsToDate, keyCountLabel, keyOrderLabel, parseKeyLines } from '../utils/keyPool.js'
-import { canOpenOrderFulfillment } from '../utils/orderFulfillment.js'
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
 import { supportsStockPublication } from '../utils/stockPublication.js'
 import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
@@ -882,9 +882,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                             <strong>Заказ №{{ order.external_order_id }}</strong>
                             <div class="product-order__actions">
                               <span class="product-order__status" :class="`product-order__status--${order.status}`">{{ orderStatusLabel(order.status) }}</span>
-                              <button v-if="canOpenOrderFulfillment(order, item.provider_code)" type="button" :title="order.status === 'processing' ? 'Открыть выдачу' : 'Посмотреть выдачу'" :aria-label="`Открыть выдачу заказа ${order.external_order_id}`" @click="emit('open-order-fulfillment', order)">
-                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v5h5M10 12h5M10 16h5" /></svg>
-                              </button>
+                              <OrderFulfillmentAction
+                                :order="order"
+                                :fallback-provider-code="item.provider_code"
+                                compact
+                                @open="emit('open-order-fulfillment', order)"
+                              />
                             </div>
                           </div>
                           <div class="product-order__meta">
@@ -1408,36 +1411,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-}
-
-.product-order__actions > button {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  place-items: center;
-  padding: 0;
-  border: 1px solid rgba(90, 132, 255, .34);
-  border-radius: 9px;
-  color: #80a0ff;
-  background: rgba(43, 75, 163, .22);
-  cursor: pointer;
-}
-
-.product-order__actions > button:hover {
-  border-color: rgba(102, 143, 255, .72);
-  color: #b9c8ff;
-  background: rgba(49, 88, 203, .34);
-}
-
-.product-order__actions svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .product-order__status {

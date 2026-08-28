@@ -13,6 +13,11 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from domains.buyer_text import normalize_buyer_text
+from domains.fulfillment_ownership import (
+    automatic_fulfillment_resolver_enabled,
+    automation_controls_fulfillment,
+    manual_preparation_stage_ready,
+)
 from domains.local_auth import AuthenticatedUser
 from domains.marketplace_catalog_service import fetch_marketplace_stocks, ozon_stock_snapshot
 from domains.marketplace_orders_service import normalize_marketplace_order_status
@@ -194,6 +199,10 @@ class MarketplaceOrderItemOut(BaseModel):
     delivery_type: str = ""
     has_fulfillment_keys: bool = False
     has_fulfillment_result: bool = False
+    fulfillment_status: str = "not_prepared"
+    fulfillment_handling_mode: str = "unassigned"
+    fulfillment_outbound_state: str = ""
+    fulfillment_action: Literal["none", "automatic", "operator", "view", "attention"] = "none"
     created_at: datetime | None = None
     updated_at: datetime | None = None
     synced_at: datetime
@@ -227,14 +236,74 @@ class MarketplaceOrderActivityOut(BaseModel):
     next_cursor: int
 
 
+def order_fulfillment_action(
+    *,
+    provider_code: str,
+    order_status: str,
+    delivery_type: str,
+    has_result: bool,
+    fulfillment_status: str = "not_prepared",
+    handling_mode: str = "unassigned",
+    outbound_state: str = "",
+    resolver_enabled: bool = False,
+    resolver_active: bool = False,
+    supplier_attempt_active: bool = False,
+) -> Literal["none", "automatic", "operator", "view", "attention"]:
+    """Возвращает одно серверное состояние действия, не позволяя UI угадывать владельца выдачи."""
+
+    if provider_code not in {"yandex_market", "ozon"}:
+        return "none"
+    is_processing_digital = order_status == "processing" and delivery_type.strip().upper() == "DIGITAL"
+    has_stored_result = has_result or fulfillment_status in {"submitted", "delivered"}
+    if not is_processing_digital:
+        return "view" if has_stored_result else "none"
+    if fulfillment_status in {"failed", "unknown"} or outbound_state in {"failed", "unknown"}:
+        return "attention"
+    automation_in_progress = automation_controls_fulfillment(
+        fulfillment_status=fulfillment_status,
+        handling_mode=handling_mode,
+        outbound_state=outbound_state,
+        resolver_enabled=resolver_enabled,
+        resolver_active=resolver_active,
+        supplier_attempt_active=supplier_attempt_active,
+    )
+    if automation_in_progress:
+        return "automatic"
+    if handling_mode == "manual" or manual_preparation_stage_ready(
+        fulfillment_status=fulfillment_status,
+        handling_mode=handling_mode,
+        resolver_enabled=resolver_enabled,
+        automation_in_progress=False,
+    ):
+        return "operator"
+    if has_stored_result:
+        return "view"
+    return "operator"
+
+
 def marketplace_order_from_row(row: tuple[Any, ...]) -> MarketplaceOrderItemOut:
+    has_keys = bool(row[15]) if len(row) > 15 else False
+    has_result = bool(row[16]) if len(row) > 16 else has_keys
+    fulfillment_status = str(row[17] or "not_prepared") if len(row) > 17 else "not_prepared"
+    handling_mode = str(row[18] or "unassigned") if len(row) > 18 else "unassigned"
+    outbound_state = str(row[19] or "") if len(row) > 19 else ""
+    resolver_active = bool(row[20]) if len(row) > 20 else False
+    supplier_attempt_active = bool(row[21]) if len(row) > 21 else False
+    action = order_fulfillment_action(
+        provider_code=str(row[1]), order_status=str(row[9]), delivery_type=str(row[11] or ""),
+        has_result=has_result, fulfillment_status=fulfillment_status, handling_mode=handling_mode,
+        outbound_state=outbound_state, resolver_enabled=automatic_fulfillment_resolver_enabled(),
+        resolver_active=resolver_active, supplier_attempt_active=supplier_attempt_active,
+    )
     return MarketplaceOrderItemOut(
         connection_id=int(row[0]), provider_code=str(row[1]), store_name=str(row[2]),
         external_order_id=str(row[3]), external_item_id=str(row[4]), offer_id=str(row[5] or ""),
         sku=str(row[6] or ""), title=str(row[7] or ""), quantity=int(row[8] or 0), status=str(row[9]),
         provider_status=str(row[10] or ""), delivery_type=str(row[11] or ""), created_at=row[12],
-        updated_at=row[13], synced_at=row[14], has_fulfillment_keys=bool(row[15]) if len(row) > 15 else False,
-        has_fulfillment_result=bool(row[16]) if len(row) > 16 else bool(row[15]) if len(row) > 15 else False,
+        updated_at=row[13], synced_at=row[14], has_fulfillment_keys=has_keys,
+        has_fulfillment_result=has_result, fulfillment_status=fulfillment_status,
+        fulfillment_handling_mode=handling_mode, fulfillment_outbound_state=outbound_state,
+        fulfillment_action=action,
     )
 
 
@@ -1169,21 +1238,45 @@ def mount_marketplace_read_routes(
                            ) AS has_fulfillment_keys,
                            EXISTS (
                              SELECT 1
-                             FROM seller.order_fulfillments AS fulfillment
-                             WHERE fulfillment.connection_id=item.connection_id
-                               AND fulfillment.external_order_id=item.external_order_id
-                               AND fulfillment.external_item_id=item.external_item_id
+                             FROM seller.order_fulfillments AS stored_fulfillment
+                             WHERE stored_fulfillment.connection_id=item.connection_id
+                               AND stored_fulfillment.external_order_id=item.external_order_id
+                               AND stored_fulfillment.external_item_id=item.external_item_id
                                AND (
-                                 btrim(COALESCE(fulfillment.support_message_snapshot, ''))<>''
+                                 btrim(COALESCE(stored_fulfillment.support_message_snapshot, ''))<>''
                                  OR EXISTS (
                                    SELECT 1 FROM seller.fulfillment_key_reservations AS reservation
-                                   WHERE reservation.fulfillment_id=fulfillment.id
+                                   WHERE reservation.fulfillment_id=stored_fulfillment.id
                                      AND reservation.state IN ('reserved','consumed')
                                  )
                                )
-                           ) AS has_fulfillment_result
+                           ) AS has_fulfillment_result,
+                           COALESCE(fulfillment.status, 'not_prepared') AS fulfillment_status,
+                           COALESCE(fulfillment.handling_mode, 'unassigned') AS fulfillment_handling_mode,
+                           COALESCE(fulfillment_outbound.state, '') AS fulfillment_outbound_state,
+                           COALESCE(
+                             fulfillment.resolver_lock_token IS NOT NULL
+                             AND fulfillment.resolver_locked_until >= now(),
+                             false
+                           ) AS resolver_active,
+                           EXISTS (
+                             SELECT 1
+                             FROM seller.supplier_purchase_attempts AS attempt
+                             WHERE attempt.fulfillment_id=fulfillment.id
+                               AND attempt.result_key_id IS NULL
+                               AND (
+                                 attempt.state IN ('queued','created','checked','payment_started','processing','requires_attention')
+                                 OR attempt.blocks_fallback=true
+                               )
+                           ) AS supplier_attempt_active
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    LEFT JOIN seller.order_fulfillments AS fulfillment
+                      ON fulfillment.connection_id=item.connection_id
+                     AND fulfillment.external_order_id=item.external_order_id
+                     AND fulfillment.external_item_id=item.external_item_id
+                    LEFT JOIN seller.fulfillment_outbound_jobs AS fulfillment_outbound
+                      ON fulfillment_outbound.fulfillment_id=fulfillment.id
                     WHERE connection.workspace_id=%s AND item.connection_id=%s
                       AND ({identity_where})
                     ORDER BY COALESCE(item.updated_at, item.created_at, item.synced_at) DESC,
@@ -1321,21 +1414,45 @@ def mount_marketplace_read_routes(
                            ) AS has_fulfillment_keys,
                            EXISTS (
                              SELECT 1
-                             FROM seller.order_fulfillments AS fulfillment
-                             WHERE fulfillment.connection_id=item.connection_id
-                               AND fulfillment.external_order_id=item.external_order_id
-                               AND fulfillment.external_item_id=item.external_item_id
+                             FROM seller.order_fulfillments AS stored_fulfillment
+                             WHERE stored_fulfillment.connection_id=item.connection_id
+                               AND stored_fulfillment.external_order_id=item.external_order_id
+                               AND stored_fulfillment.external_item_id=item.external_item_id
                                AND (
-                                 btrim(COALESCE(fulfillment.support_message_snapshot, ''))<>''
+                                 btrim(COALESCE(stored_fulfillment.support_message_snapshot, ''))<>''
                                  OR EXISTS (
                                    SELECT 1 FROM seller.fulfillment_key_reservations AS reservation
-                                   WHERE reservation.fulfillment_id=fulfillment.id
+                                   WHERE reservation.fulfillment_id=stored_fulfillment.id
                                      AND reservation.state IN ('reserved','consumed')
                                  )
                                )
-                           ) AS has_fulfillment_result
+                           ) AS has_fulfillment_result,
+                           COALESCE(fulfillment.status, 'not_prepared') AS fulfillment_status,
+                           COALESCE(fulfillment.handling_mode, 'unassigned') AS fulfillment_handling_mode,
+                           COALESCE(fulfillment_outbound.state, '') AS fulfillment_outbound_state,
+                           COALESCE(
+                             fulfillment.resolver_lock_token IS NOT NULL
+                             AND fulfillment.resolver_locked_until >= now(),
+                             false
+                           ) AS resolver_active,
+                           EXISTS (
+                             SELECT 1
+                             FROM seller.supplier_purchase_attempts AS attempt
+                             WHERE attempt.fulfillment_id=fulfillment.id
+                               AND attempt.result_key_id IS NULL
+                               AND (
+                                 attempt.state IN ('queued','created','checked','payment_started','processing','requires_attention')
+                                 OR attempt.blocks_fallback=true
+                               )
+                           ) AS supplier_attempt_active
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
+                    LEFT JOIN seller.order_fulfillments AS fulfillment
+                      ON fulfillment.connection_id=item.connection_id
+                     AND fulfillment.external_order_id=item.external_order_id
+                     AND fulfillment.external_item_id=item.external_item_id
+                    LEFT JOIN seller.fulfillment_outbound_jobs AS fulfillment_outbound
+                      ON fulfillment_outbound.fulfillment_id=fulfillment.id
                     WHERE {where}
                     ORDER BY COALESCE(item.updated_at, item.created_at, item.synced_at) DESC,
                              item.external_order_id DESC, item.external_item_id ASC
