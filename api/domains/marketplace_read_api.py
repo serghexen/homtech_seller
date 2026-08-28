@@ -22,6 +22,7 @@ from domains.local_auth import AuthenticatedUser
 from domains.marketplace_catalog_service import fetch_marketplace_stocks, ozon_stock_snapshot
 from domains.marketplace_orders_service import normalize_marketplace_order_status
 from domains.supplier_hub_client import SupplierHubClient, SupplierHubError, load_supplier_hub_settings
+from domains.stock_target_policy import stock_target_base, stock_target_source
 from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
 
 
@@ -986,13 +987,29 @@ def mount_marketplace_read_routes(
                     """
                     SELECT marketplace_connection.provider_code, marketplace_connection.status,
                            marketplace_connection.stock_outbound_enabled, item.is_archived,
-                           local_settings.manual_stock_limit
+                           local_settings.manual_stock_limit,
+                           COALESCE(policy.supplier_issue_enabled, false),
+                           COALESCE(policy.pool_issue_enabled, local_settings.pool_issue_enabled, false),
+                           COALESCE(pool_stock.free_count, 0)
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS marketplace_connection
                       ON marketplace_connection.id=item.connection_id
                     LEFT JOIN seller.product_card_settings AS local_settings
                       ON local_settings.connection_id=item.connection_id
                      AND local_settings.external_product_id=item.external_product_id
+                    LEFT JOIN seller.product_fulfillment_policies AS policy
+                      ON policy.connection_id=item.connection_id
+                     AND policy.external_product_id=item.external_product_id
+                    LEFT JOIN LATERAL (
+                      SELECT COUNT(*) FILTER (
+                        WHERE key.key_origin='pool' AND key.status='free'
+                          AND (key.expires_at IS NULL OR key.expires_at >= current_date)
+                      ) AS free_count
+                      FROM seller.marketplace_key_pools AS pool
+                      LEFT JOIN seller.marketplace_keys AS key ON key.pool_id=pool.id
+                      WHERE pool.connection_id=item.connection_id
+                        AND pool.external_product_id=item.external_product_id
+                    ) AS pool_stock ON true
                     WHERE item.connection_id=%s AND item.external_product_id=%s
                       AND item.is_present=true AND marketplace_connection.workspace_id=%s
                     LIMIT 1
@@ -1014,7 +1031,19 @@ def mount_marketplace_read_routes(
                     raise HTTPException(status_code=409, detail="Синхронизация остатков магазина выключена")
                 if bool(card[3]):
                     raise HTTPException(status_code=409, detail="Нельзя публиковать остаток архивной карточки")
-                if card[4] is None or int(card[4]) != payload.target_stock:
+                publication_target = stock_target_base(
+                    manual_stock=int(card[4]) if card[4] is not None else None,
+                    supplier_issue_enabled=bool(card[5]),
+                    pool_issue_enabled=bool(card[6]),
+                    pool_free_count=int(card[7] or 0),
+                )
+                publication_source = stock_target_source(
+                    supplier_issue_enabled=bool(card[5]),
+                    pool_issue_enabled=bool(card[6]),
+                )
+                if publication_target is None:
+                    raise HTTPException(status_code=409, detail="Сначала сохраните заданный остаток в Seller")
+                if publication_source == "manual" and publication_target != payload.target_stock:
                     raise HTTPException(
                         status_code=409,
                         detail="Сначала сохраните заданный остаток в Seller",
@@ -1037,7 +1066,7 @@ def mount_marketplace_read_routes(
                               target_stock, state, last_error, created_at, updated_at,
                               succeeded_at, failed_at
                     """,
-                    (payload.connection_id, product_id, payload.target_stock, seller_user.id),
+                    (payload.connection_id, product_id, publication_target, seller_user.id),
                 )
                 row = cursor.fetchone()
                 if not row:

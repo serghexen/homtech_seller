@@ -11,6 +11,7 @@ from uuid import UUID
 
 from domains.marketplace_connection_verification import OZON_SELLER_BASE_URL, _ssl_context
 from domains.marketplace_sync_service import credentials_secret
+from domains.stock_target_policy import stock_target_base
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,10 @@ class OzonStockOutboundProcessor:
                            COALESCE(job.external_product_id,fulfillment.offer_id),job.job_kind,
                            fulfillment.status,market.client_id,market.status,market.stock_outbound_enabled,
                            pgp_sym_decrypt(market.token_ciphertext,%s),job.requested_stock,
-                           settings.manual_stock_limit,item.offer_id,item.is_archived
+                           settings.manual_stock_limit,item.offer_id,item.is_archived,
+                           COALESCE(policy.supplier_issue_enabled, false),
+                           COALESCE(policy.pool_issue_enabled, settings.pool_issue_enabled, false),
+                           COALESCE(pool_stock.free_count, 0)
                     FROM seller.ozon_stock_outbound_jobs AS job
                     LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
                     JOIN seller.marketplace_connections AS market
@@ -146,9 +150,22 @@ class OzonStockOutboundProcessor:
                     LEFT JOIN seller.product_card_settings AS settings
                       ON settings.connection_id=COALESCE(job.connection_id,fulfillment.connection_id)
                      AND settings.external_product_id=COALESCE(job.external_product_id,fulfillment.offer_id)
+                    LEFT JOIN seller.product_fulfillment_policies AS policy
+                      ON policy.connection_id=COALESCE(job.connection_id,fulfillment.connection_id)
+                     AND policy.external_product_id=COALESCE(job.external_product_id,fulfillment.offer_id)
                     JOIN seller.catalog_items AS item
                       ON item.connection_id=COALESCE(job.connection_id,fulfillment.connection_id)
                      AND item.external_product_id=COALESCE(job.external_product_id,fulfillment.offer_id)
+                    LEFT JOIN LATERAL (
+                      SELECT COUNT(*) FILTER (
+                        WHERE key.key_origin='pool' AND key.status='free'
+                          AND (key.expires_at IS NULL OR key.expires_at >= current_date)
+                      ) AS free_count
+                      FROM seller.marketplace_key_pools AS pool
+                      LEFT JOIN seller.marketplace_keys AS key ON key.pool_id=pool.id
+                      WHERE pool.connection_id=COALESCE(job.connection_id,fulfillment.connection_id)
+                        AND pool.external_product_id=COALESCE(job.external_product_id,fulfillment.offer_id)
+                    ) AS pool_stock ON true
                     WHERE job.id=%s AND job.state='preparing' AND job.lock_token=%s
                     FOR UPDATE OF job
                     """,
@@ -157,7 +174,13 @@ class OzonStockOutboundProcessor:
                 row = cursor.fetchone()
                 if not row:
                     return None
-                target = row[8] if str(row[2]) == "manual" else row[9]
+                configured_manual_stock = row[8] if str(row[2]) == "manual" else row[9]
+                target = stock_target_base(
+                    manual_stock=int(configured_manual_stock) if configured_manual_stock is not None else None,
+                    supplier_issue_enabled=bool(row[12]),
+                    pool_issue_enabled=bool(row[13]),
+                    pool_free_count=int(row[14] or 0),
+                )
                 error = ""
                 if not ozon_stock_outbound_enabled() or str(row[5]) != "active" or not bool(row[6]):
                     error = "Публикация остатков Ozon выключена"
@@ -212,4 +235,3 @@ class OzonStockOutboundProcessor:
 
 def build_ozon_stock_outbound_processor(*, database_url, psycopg) -> OzonStockOutboundProcessor:
     return OzonStockOutboundProcessor(database_url=database_url, psycopg=psycopg)
-

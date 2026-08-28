@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import OrderFulfillmentAction from './OrderFulfillmentAction.vue'
 import { addMonthsToDate, keyCountLabel, keyOrderLabel, parseKeyLines } from '../utils/keyPool.js'
 import { normalizeEscapedLineBreaks } from '../utils/text.js'
-import { supportsStockPublication } from '../utils/stockPublication.js'
+import { poolControlsStock, stockPublicationTarget, supportsStockPublication } from '../utils/stockPublication.js'
 import { normalizeProductSettings, productSettingsEqual, validateProductSettings } from '../utils/productSettings.js'
 
 const props = defineProps({
@@ -112,12 +112,24 @@ const savedSettings = computed(() => normalizeProductSettings({
   supplier_max_amount: props.item.supplier_max_amount || '',
 }))
 const settingsDirty = computed(() => !productSettingsEqual(normalizedSettings.value, savedSettings.value))
-const stockTarget = computed(() => Math.trunc(Number(settingsForm.manual_stock_limit)))
+const poolManagesStock = computed(() => poolControlsStock(settingsForm))
+const stockTarget = computed(() => stockPublicationTarget(settingsForm, props.keyPool))
 const stockTargetValid = computed(() => Number.isInteger(stockTarget.value) && stockTarget.value >= 0 && stockTarget.value <= 1_000_000)
 const stockPublicationActive = computed(() => ['queued', 'preparing', 'sending'].includes(props.stockPublication?.state))
 const canPublishStock = computed(() => supportsStockPublication(props.item.provider_code)
   && props.stockPublicationEnabled && stockTargetValid.value && !settingsDirty.value
+  && (!poolManagesStock.value || !props.keyPoolLoading)
   && !props.stockPublicationLoading && !stockPublicationActive.value)
+const stockTargetButtonLabel = computed(() => {
+  if (stockPublicationActive.value) return 'Отправляем…'
+  if (poolManagesStock.value) return `Опубликовать ${stockTarget.value} из пула`
+  return `Опубликовать ${stockTargetValid.value ? stockTarget.value : ''}`.trim()
+})
+const stockTargetButtonTitle = computed(() => {
+  if (settingsDirty.value) return 'Сначала сохраните изменения в Seller'
+  if (poolManagesStock.value) return `Отправить в ${props.providerName} актуальное число свободных ключей`
+  return `Принудительно отправить заданный остаток в ${props.providerName}`
+})
 const stockPublicationTitle = computed(() => ({
   queued: 'Публикация поставлена в очередь',
   preparing: 'Готовим остаток к отправке',
@@ -130,6 +142,9 @@ const stockPublicationDetail = computed(() => {
   if (props.stockPublication.state === 'failed') return props.stockPublication.last_error || 'Повторите отправку после проверки подключения'
   if (props.stockPublication.state === 'succeeded'
     && Number(props.stockPublication.target_stock) !== Number(props.stockPublication.requested_stock)) {
+    if (poolManagesStock.value) {
+      return `При постановке в очередь было ${props.stockPublication.requested_stock}, перед отправкой Seller пересчитал и опубликовал ${props.stockPublication.target_stock}`
+    }
     return `Задано ${props.stockPublication.requested_stock}, дневной лимит разрешил опубликовать ${props.stockPublication.target_stock}`
   }
   if (props.stockPublication.state === 'succeeded') return `${props.providerName} подтвердил приём значения`
@@ -380,7 +395,7 @@ function saveSettings() {
 
 function requestStockPublication() {
   settingsFormError.value = ''
-  if (!stockTargetValid.value) {
+  if (!poolManagesStock.value && !stockTargetValid.value) {
     settingsFormError.value = 'Заданный остаток должен быть целым числом от 0 до 1 000 000'
     return
   }
@@ -529,20 +544,27 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
                       <section class="stock-readonly__field stock-settings__field stock-settings__target">
                         <label>
-                          <span>Заданный остаток</span>
-                          <input v-model.number="settingsForm.manual_stock_limit" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
-                          <small>{{ settingsDirty ? 'Сохраните значение перед публикацией' : 'Сохранено в Seller и готово к отправке' }}</small>
+                          <span class="stock-settings__target-heading">
+                            <span>Заданный остаток</span>
+                            <em v-if="poolManagesStock">Сейчас не используется</em>
+                          </span>
+                          <input v-model.number="settingsForm.manual_stock_limit" :disabled="poolManagesStock" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
+                          <template v-if="poolManagesStock">
+                            <strong class="stock-settings__source">Остатком управляет список ключей · свободно {{ keyPool.free_count || 0 }}</strong>
+                            <small>Сохранено: {{ settingsForm.manual_stock_limit }}. Значение снова начнёт использоваться после отключения списка ключей.</small>
+                          </template>
+                          <small v-else>{{ settingsDirty ? 'Сохраните значение перед публикацией' : 'Сохранено в Seller и готово к отправке' }}</small>
                         </label>
                         <button
                           v-if="['yandex_market', 'ozon'].includes(item.provider_code)"
                           class="stock-publish__button"
                           type="button"
                           :disabled="!canPublishStock"
-                          :title="settingsDirty ? 'Сначала сохраните изменения в Seller' : `Принудительно отправить заданный остаток в ${providerName}`"
+                          :title="stockTargetButtonTitle"
                           @click="requestStockPublication"
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
-                          <span>{{ stockPublicationActive ? 'Отправляем…' : `Опубликовать ${stockTargetValid ? stockTarget : ''}`.trim() }}</span>
+                          <span>{{ stockTargetButtonLabel }}</span>
                         </button>
                       </section>
 
@@ -564,7 +586,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                       </span>
                       <div>
                         <strong id="stock-publish-title">Отправить остаток {{ stockTarget }} в {{ providerName }}?</strong>
-                        <p>Значение уйдёт через защищённую очередь.<template v-if="item.provider_code === 'yandex_market'"> Если задан дневной лимит, Seller может опубликовать меньше.</template></p>
+                        <p><template v-if="poolManagesStock">Перед отправкой Seller ещё раз пересчитает свободные ключи. </template>Значение уйдёт через защищённую очередь.<template v-if="item.provider_code === 'yandex_market'"> Если задан дневной лимит, Seller может опубликовать меньше.</template></p>
                       </div>
                       <div class="stock-publish__confirm-actions">
                         <button type="button" @click="stockPublishConfirmation = false">Отмена</button>
@@ -1601,12 +1623,45 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   gap: 8px;
 }
 
-.stock-settings__target > label > span {
+.stock-settings__target-heading,
+.stock-settings__target-heading > span {
   color: #96a4c2;
   font-size: 10px;
   font-weight: 850;
   letter-spacing: .07em;
   text-transform: uppercase;
+}
+
+.stock-settings__target-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stock-settings__target-heading em {
+  padding: 4px 6px;
+  border: 1px solid rgba(83, 226, 191, .3);
+  border-radius: 999px;
+  color: #76e6cb;
+  background: rgba(40, 174, 144, .1);
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.stock-settings__target input:disabled {
+  color: #7584a4;
+  border-color: rgba(126, 151, 217, .14);
+  background: rgba(5, 11, 26, .3);
+  cursor: not-allowed;
+}
+
+.stock-settings__source {
+  color: #76e6cb;
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .stock-settings__target > label > small {

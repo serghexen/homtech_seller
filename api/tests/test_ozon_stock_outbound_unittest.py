@@ -41,7 +41,12 @@ class OzonStockOutboundTests(unittest.TestCase):
         self.assertIn("market.stock_outbound_enabled=true", source)
         self.assertIn('{"submitted", "delivered"}', source)
 
+    def test_processor_recounts_free_pool_keys_before_send(self) -> None:
+        source = inspect.getsource(OzonStockOutboundProcessor._claim_and_prepare)
+        self.assertIn("key.key_origin='pool'", source)
+        self.assertIn("key.status='free'", source)
+        self.assertIn("stock_target_base", source)
+
 
 if __name__ == "__main__":
     unittest.main()
-

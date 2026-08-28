@@ -70,6 +70,12 @@ class YandexStockOutboundTests(unittest.TestCase):
         self.assertIn('job_kind == "manual"', source)
         self.assertIn("job.requested_stock", source)
 
+    def test_processor_recounts_free_pool_keys_before_send(self) -> None:
+        source = inspect.getsource(YandexStockOutboundProcessor._claim_and_prepare)
+        self.assertIn("key.key_origin='pool'", source)
+        self.assertIn("key.status='free'", source)
+        self.assertIn("stock_target_base", source)
+
     @patch.dict("os.environ", {"YANDEX_MARKET_STOCK_REPUBLISH_DELAY_SECONDS": "3"})
     def test_republish_delay_matches_crm_safety_window(self) -> None:
         self.assertEqual(stock_republish_delay_seconds(), 3)

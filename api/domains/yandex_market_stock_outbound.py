@@ -12,6 +12,7 @@ from uuid import UUID
 
 from domains.marketplace_connection_verification import YANDEX_MARKET_BASE_URL, _ssl_context
 from domains.marketplace_sync_service import credentials_secret
+from domains.stock_target_policy import stock_target_base
 
 
 @dataclass(frozen=True)
@@ -204,7 +205,10 @@ class YandexStockOutboundProcessor:
                              THEN imported.sales_limit_reserved ELSE 0 END,
                            CASE WHEN imported.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
                              THEN imported.imported_at
-                             ELSE ((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow') END
+                             ELSE ((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow') END,
+                           COALESCE(policy.supplier_issue_enabled, false),
+                           COALESCE(policy.pool_issue_enabled, local_settings.pool_issue_enabled, false),
+                           COALESCE(pool_stock.free_count, 0)
                     FROM seller.yandex_stock_outbound_jobs AS job
                     LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
                     JOIN seller.marketplace_connections AS market
@@ -215,6 +219,19 @@ class YandexStockOutboundProcessor:
                     LEFT JOIN seller.yandex_product_settings_snapshot AS imported
                       ON imported.connection_id=COALESCE(job.connection_id, fulfillment.connection_id)
                      AND imported.external_product_id=COALESCE(job.external_product_id, fulfillment.offer_id)
+                    LEFT JOIN seller.product_fulfillment_policies AS policy
+                      ON policy.connection_id=COALESCE(job.connection_id, fulfillment.connection_id)
+                     AND policy.external_product_id=COALESCE(job.external_product_id, fulfillment.offer_id)
+                    LEFT JOIN LATERAL (
+                      SELECT COUNT(*) FILTER (
+                        WHERE key.key_origin='pool' AND key.status='free'
+                          AND (key.expires_at IS NULL OR key.expires_at >= current_date)
+                      ) AS free_count
+                      FROM seller.marketplace_key_pools AS pool
+                      LEFT JOIN seller.marketplace_keys AS key ON key.pool_id=pool.id
+                      WHERE pool.connection_id=COALESCE(job.connection_id, fulfillment.connection_id)
+                        AND pool.external_product_id=COALESCE(job.external_product_id, fulfillment.offer_id)
+                    ) AS pool_stock ON true
                     WHERE job.id=%s AND job.state='preparing' AND job.lock_token=%s
                     FOR UPDATE OF job
                     """,
@@ -225,7 +242,13 @@ class YandexStockOutboundProcessor:
                     return None
                 connection_id, product_id = int(row[0]), str(row[1] or "").strip()
                 job_kind = str(row[2] or "fulfillment")
-                configured_stock = row[8] if job_kind == "manual" else row[10]
+                configured_manual_stock = row[8] if job_kind == "manual" else row[10]
+                configured_stock = stock_target_base(
+                    manual_stock=int(configured_manual_stock) if configured_manual_stock is not None else None,
+                    supplier_issue_enabled=bool(row[16]),
+                    pool_issue_enabled=bool(row[17]),
+                    pool_free_count=int(row[18] or 0),
+                )
                 validation_error = ""
                 if not yandex_stock_outbound_enabled() or str(row[5]) != "active" or not bool(row[6]):
                     validation_error = "Публикация остатков выключена"
