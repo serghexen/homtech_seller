@@ -22,6 +22,7 @@ from domains.fulfillment_ownership import (
     manual_preparation_stage_ready,
 )
 from domains.local_auth import AuthenticatedUser
+from domains.marketplace_order_eligibility import marketplace_order_allows_fulfillment
 from domains.ozon_outbound import ozon_outbound_enabled
 from domains.ozon_stock_queue import enqueue_ozon_stock_publication
 from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enabled
@@ -51,6 +52,9 @@ class OrderFulfillmentOut(BaseModel):
     store_name: str
     connection_status: str
     order_status: str
+    provider_status: str = ""
+    digital_goods_type: str = ""
+    order_ready_for_fulfillment: bool = False
     delivery_type: str = ""
     title: str
     offer_id: str
@@ -153,7 +157,9 @@ def mount_marketplace_fulfillment_routes(
                          attempt.state IN ('queued','created','checked','payment_started','processing','requires_attention')
                          OR attempt.blocks_fallback=true
                        )
-                   )
+                   ),
+                   item.provider_status,
+                   item.raw_payload #>> '{delivery,digitalGoods,type}'
             FROM seller.order_items AS item
             JOIN seller.marketplace_connections AS marketplace_connection
               ON marketplace_connection.id=item.connection_id
@@ -191,6 +197,15 @@ def mount_marketplace_fulfillment_routes(
         handling_mode = str(row[26] or "unassigned") if len(row) > 26 else "unassigned"
         resolver_active = bool(row[27]) if len(row) > 27 else False
         supplier_attempt_active = bool(row[28]) if len(row) > 28 else False
+        provider_status = str(row[29] or "") if len(row) > 29 else ""
+        digital_goods_type = str(row[30] or "") if len(row) > 30 else ""
+        order_ready_for_fulfillment = marketplace_order_allows_fulfillment(
+            provider_code=provider_code,
+            normalized_status=str(row[6] or ""),
+            provider_status=provider_status,
+            delivery_type=str(row[7] or ""),
+            digital_goods_type=digital_goods_type,
+        )
         automation_in_progress = automation_controls_fulfillment(
             fulfillment_status=fulfillment_status,
             handling_mode=handling_mode,
@@ -210,8 +225,7 @@ def mount_marketplace_fulfillment_routes(
             and can_manage
             and provider_code in {"yandex_market", "ozon"}
             and str(row[5]) == "active"
-            and str(row[6]) == "processing"
-            and str(row[7] or "").strip().upper() == "DIGITAL"
+            and order_ready_for_fulfillment
             and not automation_in_progress
             and preparation_stage_ready
         )
@@ -225,7 +239,10 @@ def mount_marketplace_fulfillment_routes(
         return OrderFulfillmentOut(
             connection_id=int(row[0]), external_order_id=str(row[1]), external_item_id=str(row[2]),
             provider_code=str(row[3]), store_name=str(row[4]), connection_status=str(row[5]),
-            order_status=str(row[6]), delivery_type=str(row[7] or ""), title=str(row[8] or ""),
+            order_status=str(row[6]), provider_status=provider_status,
+            digital_goods_type=digital_goods_type,
+            order_ready_for_fulfillment=order_ready_for_fulfillment,
+            delivery_type=str(row[7] or ""), title=str(row[8] or ""),
             offer_id=str(row[9] or ""), quantity=int(row[10] or 0),
             fulfillment_id=int(row[11]) if row[11] is not None else None,
             fulfillment_status=fulfillment_status, delivery_source=str(row[13] or "unassigned"),
@@ -244,7 +261,7 @@ def mount_marketplace_fulfillment_routes(
             can_send=bool(
                 actions_enabled and outbound_available and can_manage
                 and provider_code in {"yandex_market", "ozon"} and str(row[5]) == "active"
-                and str(row[6]) == "processing" and str(row[7] or "").strip().upper() == "DIGITAL"
+                and order_ready_for_fulfillment
                 and fulfillment_status == "reserved" and prepared_material_complete
                 and (provider_code == "ozon" or bool(str(row[19] or "").strip()))
                 and outbound_state in {"", "failed", "cancelled"}
@@ -278,10 +295,10 @@ def mount_marketplace_fulfillment_routes(
             raise HTTPException(status_code=409, detail="Маркетплейс пока не поддерживает локальную выдачу")
         if detail.connection_status != "active":
             raise HTTPException(status_code=409, detail="Магазин отключён")
-        if detail.delivery_type.strip().upper() != "DIGITAL":
-            raise HTTPException(status_code=409, detail="Подготовка ключей доступна только для цифрового заказа")
-        if detail.order_status != "processing":
-            raise HTTPException(status_code=409, detail="Подготовить ключи можно только для заказа в процессе")
+        if not detail.order_ready_for_fulfillment:
+            if detail.provider_code == "yandex_market" and detail.provider_status.upper() != "PROCESSING":
+                raise HTTPException(status_code=409, detail="Дождитесь оплаты и статуса PROCESSING от Яндекс Маркета")
+            raise HTTPException(status_code=409, detail="Маркетплейс ещё не разрешил выдачу этого цифрового заказа")
         if not detail.can_prepare_manual:
             if detail.automation_in_progress:
                 raise HTTPException(
@@ -672,7 +689,7 @@ def mount_marketplace_fulfillment_routes(
                         enqueue_yandex_stock_publication(cursor, fulfillment_id=detail.fulfillment_id)
                     event_type, target_status = "outbound_unknown_resolved_accepted", "submitted"
                 else:
-                    if detail.order_status != "processing":
+                    if not detail.order_ready_for_fulfillment:
                         raise HTTPException(
                             status_code=409,
                             detail="Повтор можно разрешить только пока заказ остаётся в обработке",

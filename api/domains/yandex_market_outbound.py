@@ -12,6 +12,7 @@ from uuid import UUID
 
 from domains.buyer_text import normalize_buyer_text
 from domains.marketplace_connection_verification import YANDEX_MARKET_BASE_URL, _ssl_context
+from domains.marketplace_order_eligibility import marketplace_order_allows_fulfillment
 from domains.marketplace_sync_service import credentials_secret
 from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
 
@@ -197,7 +198,8 @@ class YandexOutboundProcessor:
                            CASE WHEN settings.connection_id IS NOT NULL
                              THEN settings.activation_instruction
                              ELSE COALESCE(imported_settings.activation_instruction, '') END,
-                           item.normalized_status, item.delivery_type
+                           item.normalized_status, item.delivery_type, item.provider_status,
+                           item.raw_payload #>> '{delivery,digitalGoods,type}'
                     FROM seller.fulfillment_outbound_jobs AS job
                     JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
                     JOIN seller.marketplace_connections AS market ON market.id=fulfillment.connection_id
@@ -234,8 +236,14 @@ class YandexOutboundProcessor:
                     validation_error = "Внешняя отправка выключена"
                 elif str(row[4]) != "reserved":
                     validation_error = f"Статус {row[4]} не допускает отправку"
-                elif str(row[13]) != "processing" or str(row[14] or "").strip().upper() != "DIGITAL":
-                    validation_error = "Заказ уже не является обрабатываемым цифровым заказом"
+                elif not marketplace_order_allows_fulfillment(
+                    provider_code="yandex_market",
+                    normalized_status=str(row[13] or ""),
+                    provider_status=str(row[15] or ""),
+                    delivery_type=str(row[14] or ""),
+                    digital_goods_type=str(row[16] or ""),
+                ):
+                    validation_error = "Яндекс Маркет ещё не разрешил отправку цифрового товара"
                 elif not instruction:
                     validation_error = "Не заполнена инструкция покупателю"
                 if validation_error:

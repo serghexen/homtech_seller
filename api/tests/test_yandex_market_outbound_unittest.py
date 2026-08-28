@@ -56,6 +56,12 @@ class YandexOutboundTests(unittest.TestCase):
         source = inspect.getsource(YandexOutboundProcessor._finish)
         self.assertIn("enqueue_yandex_stock_publication", source)
 
+    def test_worker_rechecks_exact_provider_status_and_digital_subtype(self) -> None:
+        source = inspect.getsource(YandexOutboundProcessor._claim_and_prepare)
+        self.assertIn("item.provider_status", source)
+        self.assertIn("digitalGoods,type", source)
+        self.assertIn("marketplace_order_allows_fulfillment", source)
+
     def test_legacy_instruction_uses_real_line_breaks(self) -> None:
         self.assertEqual(
             normalize_buyer_text("Шаг 1\\nШаг 2\\r\\nШаг 3"),

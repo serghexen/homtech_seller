@@ -22,6 +22,7 @@ def context(**overrides) -> FulfillmentContext:
         support_issue_enabled=True, support_message="Напишите в поддержку", mapping_id=11,
         service_id=11125, nominal_id="250", params={}, max_amount=Decimal("500"),
         workspace_id=4, supplier_access_enabled=True,
+        provider_status="PROCESSING", digital_goods_type="EMAIL",
     )
     values.update(overrides)
     return FulfillmentContext(**values)

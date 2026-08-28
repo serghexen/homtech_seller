@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 from domains.buyer_text import normalize_buyer_text
 from domains.fulfillment_service import prepare_support_message, reserve_pool_keys
 from domains.fulfillment_ownership import automatic_fulfillment_resolver_enabled
+from domains.marketplace_order_eligibility import marketplace_order_allows_fulfillment
 from domains.supplier_hub_client import (
     SupplierHubClient,
     SupplierHubError,
@@ -75,6 +76,8 @@ class FulfillmentContext:
     workspace_id: int
     supplier_access_enabled: bool
     store_outbound_enabled: bool = True
+    provider_status: str = ""
+    digital_goods_type: str = ""
 
 
 class SupplierFulfillmentProcessor:
@@ -183,6 +186,8 @@ class SupplierFulfillmentProcessor:
                            fulfillment.external_item_id, fulfillment.offer_id, fulfillment.requested_quantity,
                            fulfillment.status, fulfillment.reservation_ref,
                            order_item.normalized_status, order_item.delivery_type,
+                           order_item.provider_status,
+                           order_item.raw_payload #>> '{delivery,digitalGoods,type}',
                            market.fulfillment_reservation_enabled, market.supplier_fulfillment_enabled,
                            COALESCE(policy.supplier_issue_enabled, false),
                            COALESCE(policy.pool_issue_enabled, local_settings.pool_issue_enabled, false),
@@ -234,25 +239,26 @@ class SupplierFulfillmentProcessor:
                 )
                 row = cursor.fetchone()
                 supplier_access_enabled = bool(row) and workspace_allows(
-                    cursor, int(row[23]), FULFILLMENT_SUPPLIER,
+                    cursor, int(row[25]), FULFILLMENT_SUPPLIER,
                 )
         if not row:
             return None
-        params = row[19] if isinstance(row[19], dict) else {}
+        params = row[21] if isinstance(row[21], dict) else {}
         return FulfillmentContext(
             fulfillment_id=int(row[0]), connection_id=int(row[1]),
             external_order_id=str(row[2]), external_item_id=str(row[3]), offer_id=str(row[4]),
             quantity=int(row[5]), status=str(row[6]), reservation_ref=str(row[7]),
             order_status=str(row[8]), delivery_type=str(row[9] or ""),
-            provider_code=str(row[21] or ""), activation_instruction=str(row[22] or ""),
-            store_local_enabled=bool(row[10]), store_supplier_enabled=bool(row[11]),
-            supplier_issue_enabled=bool(row[12]), pool_issue_enabled=bool(row[13]),
-            support_issue_enabled=bool(row[14]), support_message=str(row[15] or "").strip(),
-            mapping_id=int(row[16]) if row[16] is not None else None,
-            service_id=int(row[17]) if row[17] is not None else None,
-            nominal_id=str(row[18] or ""), params=dict(params), max_amount=_decimal(row[20]),
-            workspace_id=int(row[23]), supplier_access_enabled=supplier_access_enabled,
-            store_outbound_enabled=bool(row[24]),
+            provider_code=str(row[23] or ""), activation_instruction=str(row[24] or ""),
+            store_local_enabled=bool(row[12]), store_supplier_enabled=bool(row[13]),
+            supplier_issue_enabled=bool(row[14]), pool_issue_enabled=bool(row[15]),
+            support_issue_enabled=bool(row[16]), support_message=str(row[17] or "").strip(),
+            mapping_id=int(row[18]) if row[18] is not None else None,
+            service_id=int(row[19]) if row[19] is not None else None,
+            nominal_id=str(row[20] or ""), params=dict(params), max_amount=_decimal(row[22]),
+            workspace_id=int(row[25]), supplier_access_enabled=supplier_access_enabled,
+            store_outbound_enabled=bool(row[26]), provider_status=str(row[10] or ""),
+            digital_goods_type=str(row[11] or ""),
         )
 
     def _supplier_access_enabled(self, workspace_id: int) -> bool:
@@ -264,7 +270,13 @@ class SupplierFulfillmentProcessor:
         context = self._context(fulfillment_id)
         if not context or context.status not in {"pending", "manual_required", "supplier_required"}:
             return
-        if context.order_status != "processing" or context.delivery_type.strip().upper() != "DIGITAL":
+        if not marketplace_order_allows_fulfillment(
+            provider_code=context.provider_code,
+            normalized_status=context.order_status,
+            provider_status=context.provider_status,
+            delivery_type=context.delivery_type,
+            digital_goods_type=context.digital_goods_type,
+        ):
             return
 
         provider_outbound_enabled = (

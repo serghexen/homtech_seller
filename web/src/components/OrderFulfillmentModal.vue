@@ -25,6 +25,11 @@ const copiedKeyId = ref(0)
 const supportMessageCopied = ref(false)
 const marketplaceName = computed(() => props.detail?.provider_code === 'ozon' ? 'Ozon' : 'Яндекс Маркет')
 const automationInProgress = computed(() => Boolean(props.detail?.automation_in_progress))
+const waitingForYandexProcessing = computed(() => (
+  props.detail?.provider_code === 'yandex_market'
+  && !props.detail?.order_ready_for_fulfillment
+  && ['PLACING', 'RESERVED', 'UNPAID', 'PENDING'].includes(String(props.detail?.provider_status || '').toUpperCase())
+))
 
 function formatDeadline(value) {
   if (!value) return ''
@@ -48,6 +53,11 @@ watch(() => props.detail?.fulfillment_status, (status) => {
 
 const statusPresentation = computed(() => {
   const status = props.detail?.fulfillment_status || 'not_prepared'
+  if (waitingForYandexProcessing.value) {
+    return String(props.detail?.provider_status || '').toUpperCase() === 'UNPAID'
+      ? { label: 'Ожидаем оплату', tone: 'active', copy: 'Seller начнёт подготовку только после статуса PROCESSING от Яндекс Маркета.' }
+      : { label: 'Ожидаем Яндекс Маркет', tone: 'active', copy: 'Выдача начнётся только после перехода заказа в статус PROCESSING.' }
+  }
   return {
     not_prepared: { label: 'Не подготовлена', tone: 'idle', copy: 'Ключи к заказу ещё не закреплены.' },
     pending: automationInProgress.value

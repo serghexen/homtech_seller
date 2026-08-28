@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import os
 
+from domains.marketplace_order_eligibility import marketplace_order_allows_fulfillment
 from domains.yandex_market_stock_queue import enqueue_yandex_stock_publication
 from domains.ozon_stock_queue import enqueue_ozon_stock_publication
 
@@ -37,7 +38,9 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
             """
             SELECT item.external_item_id, item.offer_id, item.quantity,
                    item.normalized_status, item.delivery_type, market.provider_code,
-                   market.launch_state, market.fulfillment_started_at, item.first_seen_at
+                   market.launch_state, market.fulfillment_started_at, item.first_seen_at,
+                   item.provider_status,
+                   item.raw_payload #>> '{delivery,digitalGoods,type}'
             FROM seller.order_items AS item
             JOIN seller.marketplace_connections AS market ON market.id=item.connection_id
             WHERE item.connection_id=%s AND item.external_order_id=%s
@@ -56,6 +59,14 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
             fulfillment_started_at = order_item[7] if len(order_item) > 7 else None
             first_seen_at = order_item[8] if len(order_item) > 8 else None
             provider_code = str(provider_code_value or "yandex_market")
+            provider_status = (
+                str(order_item[9] or "") if len(order_item) > 9
+                else ("PROCESSING" if provider_code == "yandex_market" and str(normalized_status) == "processing" else "")
+            )
+            digital_goods_type = (
+                str(order_item[10] or "") if len(order_item) > 10
+                else ("EMAIL" if provider_code == "yandex_market" and str(delivery_type).upper() == "DIGITAL" else "")
+            )
             item_id = str(external_item_id)
             product_id = str(offer_id or "").strip()
             item_quantity = max(0, int(quantity or 0))
@@ -68,10 +79,14 @@ def observe_order_fulfillments(connection, *, connection_id: int, external_order
                 and first_seen_at is not None and first_seen_at >= fulfillment_started_at
             )
 
-            if (
-                market_state == "processing" and is_digital and product_id and item_quantity > 0
-                and launch_allows_new_fulfillment
-            ):
+            order_allows_fulfillment = marketplace_order_allows_fulfillment(
+                provider_code=provider_code,
+                normalized_status=market_state,
+                provider_status=provider_status,
+                delivery_type=str(delivery_type or ""),
+                digital_goods_type=digital_goods_type,
+            )
+            if order_allows_fulfillment and product_id and item_quantity > 0 and launch_allows_new_fulfillment:
                 cursor.execute(
                     """
                     INSERT INTO seller.order_fulfillments(

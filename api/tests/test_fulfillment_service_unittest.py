@@ -73,6 +73,28 @@ class FulfillmentServiceTests(unittest.TestCase):
         self.assertIn("ON CONFLICT (connection_id, external_order_id, external_item_id)", insert_sql)
         self.assertEqual(insert_params, (7, "123", "9", "SKU-1", 2, "seller:yandex_market:7:123:9"))
 
+    def test_does_not_create_yandex_fulfillment_before_exact_processing(self) -> None:
+        connection = ScriptedConnection([
+            [("9", "SKU-1", 1, "processing", "DIGITAL", "yandex_market", "running", None, None, "UNPAID", "EMAIL")],
+            None,
+        ])
+
+        fulfillment_ids = observe_order_fulfillments(connection, connection_id=7, external_order_id="123")
+
+        self.assertEqual(fulfillment_ids, [])
+        all_sql = "\n".join(sql for sql, _params in connection.scripted_cursor.executions)
+        self.assertNotIn("INSERT INTO seller.order_fulfillments(", all_sql)
+
+    def test_does_not_create_yandex_fulfillment_for_chat_delivery(self) -> None:
+        connection = ScriptedConnection([
+            [("9", "SKU-1", 1, "processing", "DIGITAL", "yandex_market", "running", None, None, "PROCESSING", "CHAT")],
+            None,
+        ])
+
+        fulfillment_ids = observe_order_fulfillments(connection, connection_id=7, external_order_id="123")
+
+        self.assertEqual(fulfillment_ids, [])
+
     def test_does_not_create_fulfillment_for_historical_setup_snapshot(self) -> None:
         first_seen = datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc)
         started_at = datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc)

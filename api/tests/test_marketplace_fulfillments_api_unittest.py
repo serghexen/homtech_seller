@@ -125,8 +125,8 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
     def test_manual_preparation_requires_digital_delivery(self) -> None:
         source = inspect.getsource(mount_marketplace_fulfillment_routes)
         self.assertIn("item.delivery_type", source)
-        self.assertIn("upper() != \"DIGITAL\"", source)
-        self.assertIn("только для цифрового заказа", source)
+        self.assertIn("marketplace_order_allows_fulfillment", source)
+        self.assertIn("Маркетплейс ещё не разрешил выдачу этого цифрового заказа", source)
 
     def test_manual_preparation_waits_for_explicit_automatic_handoff(self) -> None:
         route_source = inspect.getsource(mount_marketplace_fulfillment_routes)
