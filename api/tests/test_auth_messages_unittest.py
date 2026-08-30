@@ -6,7 +6,7 @@ import unittest
 
 from fastapi import HTTPException, Response
 
-from app import LoginIn, RegisterIn, login
+from app import AuthOut, LoginIn, RegisterIn, login
 
 
 class AuthMessageTests(unittest.TestCase):
@@ -15,6 +15,9 @@ class AuthMessageTests(unittest.TestCase):
 
         self.assertEqual(payload.workspace_name, "")
         self.assertEqual(payload.password, "1")
+
+    def test_auth_contract_does_not_expose_workspace_wide_tariff(self) -> None:
+        self.assertNotIn("access", AuthOut.model_fields)
 
     def test_invalid_login_email_has_russian_message(self) -> None:
         with self.assertRaises(HTTPException) as raised:

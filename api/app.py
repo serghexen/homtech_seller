@@ -21,11 +21,10 @@ from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_reviews_api import mount_marketplace_review_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 from domains.supplier_hub_api import mount_supplier_hub_routes
-from domains.workspace_entitlements import WorkspaceAccess, read_workspace_access
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.83")
+app = FastAPI(title="HomTech Seller API", version="0.0.84")
 
 
 def cors_origins() -> list[str]:
@@ -66,17 +65,8 @@ class SellerUserOut(BaseModel):
     role_code: str
 
 
-class WorkspaceAccessOut(BaseModel):
-    plan_code: str
-    plan_name: str
-    subscription_status: str
-    capabilities: list[str]
-    revision: int
-
-
 class AuthOut(BaseModel):
     user: SellerUserOut
-    access: WorkspaceAccessOut
 
 
 def check_database() -> None:
@@ -144,22 +134,7 @@ def user_with_workspace(connection, user_id: int) -> SellerUserOut | None:
     )
 
 
-def access_out(access: WorkspaceAccess) -> WorkspaceAccessOut:
-    return WorkspaceAccessOut(
-        plan_code=access.plan_code,
-        plan_name=access.plan_name,
-        subscription_status=access.subscription_status,
-        capabilities=sorted(access.capabilities),
-        revision=access.revision,
-    )
-
-
-def workspace_access(connection, workspace_id: int) -> WorkspaceAccessOut:
-    with connection.cursor() as cursor:
-        return access_out(read_workspace_access(cursor, workspace_id))
-
-
-def issue_session(response: Response, user: SellerUserOut, access: WorkspaceAccessOut) -> AuthOut:
+def issue_session(response: Response, user: SellerUserOut) -> AuthOut:
     # Создаёт short-lived сессию в HttpOnly cookie, чтобы JavaScript не хранил токен в localStorage.
     token = create_access_token(
         user_id=user.id,
@@ -176,7 +151,7 @@ def issue_session(response: Response, user: SellerUserOut, access: WorkspaceAcce
         samesite="lax",
         path="/",
     )
-    return AuthOut(user=user, access=access)
+    return AuthOut(user=user)
 
 
 def current_user(
@@ -237,21 +212,10 @@ def register(payload: RegisterIn, response: Response) -> AuthOut:
                 "INSERT INTO seller.workspace_members(workspace_id, user_id, role_code) VALUES (%s, %s, 'owner')",
                 (workspace_id, user_id),
             )
-            cursor.execute(
-                """
-                INSERT INTO seller.workspace_subscriptions(
-                  workspace_id, plan_id, status, change_source, change_reason, updated_by_user_id
-                )
-                SELECT %s, id, 'active', 'registration', 'Тариф нового кабинета', %s
-                FROM seller.plans WHERE code='basic' AND is_active=true
-                """,
-                (workspace_id, user_id),
-            )
         user = user_with_workspace(connection, user_id)
-        access = workspace_access(connection, workspace_id)
     if not user:
         raise HTTPException(status_code=500, detail="Workspace was not created")
-    return issue_session(response, user, access)
+    return issue_session(response, user)
 
 
 @app.post("/auth/login", response_model=AuthOut)
@@ -268,10 +232,9 @@ def login(payload: LoginIn, response: Response) -> AuthOut:
         if not row or not verify_password(payload.password, str(row[1] or "")):
             raise HTTPException(status_code=401, detail="Неверный email или пароль")
         user = user_with_workspace(connection, int(row[0]))
-        access = workspace_access(connection, user.workspace_id) if user else None
     if not user:
         raise HTTPException(status_code=403, detail="Workspace access is unavailable")
-    return issue_session(response, user, access)
+    return issue_session(response, user)
 
 
 @app.get("/auth/me", response_model=AuthOut)
@@ -279,10 +242,9 @@ def me(user: AuthenticatedUser = Depends(current_user)) -> AuthOut:
     # Возвращает актуальную организацию, чтобы после будущего SSO права всегда проверялись в Seller.
     with psycopg.connect(database_url()) as connection:
         seller_user = user_with_workspace(connection, user.user_id)
-        access = workspace_access(connection, seller_user.workspace_id) if seller_user else None
     if not seller_user:
         raise HTTPException(status_code=401, detail="Account is inactive")
-    return AuthOut(user=seller_user, access=access)
+    return AuthOut(user=seller_user)
 
 
 @app.post("/auth/logout", status_code=204)

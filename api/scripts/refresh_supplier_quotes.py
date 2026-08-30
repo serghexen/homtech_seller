@@ -21,7 +21,7 @@ import psycopg
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from domains.supplier_hub_client import SupplierHubClient, load_supplier_hub_settings
-from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
+from domains.connection_entitlements import SUPPLIER_MAPPING_MANAGE, connection_allows
 
 
 def price_limit(amount: Decimal, percent: Decimal) -> Decimal:
@@ -60,7 +60,9 @@ def main() -> int:
             connection_id = int(rows[0][0])
             if any(bool(value) for value in rows[0][1:4]):
                 raise RuntimeError("Store fulfillment gates must stay disabled while quotes are prepared")
-            if not workspace_allows(cursor, int(rows[0][4]), SUPPLIER_MAPPING_MANAGE):
+            if not connection_allows(
+                cursor, int(rows[0][4]), connection_id, SUPPLIER_MAPPING_MANAGE,
+            ):
                 raise RuntimeError("Supplier Hub mappings require the Pro plan")
             cursor.execute(
                 """

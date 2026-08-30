@@ -41,7 +41,6 @@ const loading = ref(false)
 const error = ref('')
 const notice = ref('')
 const user = ref(null)
-const workspaceAccess = ref(null)
 const isRestoringSession = ref(true)
 const connections = ref([])
 const connectionsLoading = ref(false)
@@ -173,7 +172,7 @@ const catalogEmptyMessage = computed(() => catalogEmptyStateMessage({
 }))
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
 const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
-const canManageSupplier = computed(() => workspaceAccess.value?.capabilities?.includes('supplier_mapping.manage') === true)
+const canManageSupplier = computed(() => selectedCatalogItem.value?.supplier_mapping_allowed === true)
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
   mode.value = nextMode
@@ -206,6 +205,10 @@ function dashboardMoney(item, value) {
 }
 
 function subscriptionDaysLabel(item) {
+  if (item.subscription_status === 'inactive') return 'Не назначена'
+  if (item.subscription_status === 'suspended') return 'Приостановлена'
+  if (item.subscription_status === 'cancelled') return 'Отменена'
+  if (item.subscription_status === 'past_due') return 'Ожидает оплаты'
   if (item.subscription_unlimited) return 'Без срока'
   const days = item.subscription_days_remaining
   if (days === null || days === undefined) return '—'
@@ -214,6 +217,17 @@ function subscriptionDaysLabel(item) {
   const mod10 = days % 10
   const word = mod100 >= 11 && mod100 <= 14 ? 'дней' : mod10 === 1 ? 'день' : mod10 >= 2 && mod10 <= 4 ? 'дня' : 'дней'
   return `${days} ${word}`
+}
+
+function connectionPlanLabel(connection) {
+  const suffix = {
+    inactive: 'не назначен',
+    suspended: 'приостановлен',
+    cancelled: 'отменён',
+    past_due: 'ожидает оплаты',
+    trialing: 'пробный период',
+  }[connection.subscription_status]
+  return suffix ? `${connection.plan_name} · ${suffix}` : connection.plan_name
 }
 
 function openStoreReviews(item) {
@@ -314,7 +328,9 @@ async function loadSupplierServices() {
   supplierServicesLoading.value = true
   supplierServicesError.value = ''
   try {
-    const result = await apiRequest('/integrations/supplier-hub/services')
+    const connectionId = Number(selectedCatalogItem.value?.connection_id)
+    if (!Number.isInteger(connectionId) || connectionId <= 0) return
+    const result = await apiRequest(`/integrations/supplier-hub/services?connection_id=${connectionId}`)
     supplierServices.value = Array.isArray(result.items) ? result.items : []
   } catch (requestError) {
     supplierServicesError.value = requestError.message || 'Не удалось загрузить каталог поставщика'
@@ -336,7 +352,12 @@ async function quoteSelectedSupplier(payload) {
   try {
     const result = await apiRequest('/integrations/supplier-hub/quote', {
       method: 'POST',
-      body: JSON.stringify({ service_id: serviceId, nominal_id: nominalId, params: {} }),
+      body: JSON.stringify({
+        connection_id: item.connection_id,
+        service_id: serviceId,
+        nominal_id: nominalId,
+        params: {},
+      }),
     })
     if (requestSequence !== supplierQuoteSequence || !selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
     selectedSupplierQuote.value = {
@@ -1471,7 +1492,6 @@ async function submit() {
       : { email: form.email, password: form.password }
     const result = await apiRequest(path, { method: 'POST', body: JSON.stringify(body) })
     user.value = result.user
-    workspaceAccess.value = result.access
     form.password = ''
     await loadConnections()
     await loadDashboard()
@@ -1491,7 +1511,6 @@ async function logout() {
   try {
     await apiRequest('/auth/logout', { method: 'POST' })
     user.value = null
-    workspaceAccess.value = null
     connections.value = []
     dashboardItems.value = []
     dashboardError.value = ''
@@ -1656,7 +1675,6 @@ onMounted(async () => {
   try {
     const result = await apiRequest('/auth/me')
     user.value = result.user
-    workspaceAccess.value = result.access
     await loadConnections()
     await loadDashboard()
     scheduleDashboardRefresh()
@@ -1664,7 +1682,6 @@ onMounted(async () => {
     startOrderActivityMonitor()
   } catch {
     user.value = null
-    workspaceAccess.value = null
   } finally {
     isRestoringSession.value = false
   }
@@ -1729,16 +1746,6 @@ onBeforeUnmount(() => {
         </button>
       </nav>
       <div v-if="user" class="app-account">
-        <div
-          v-if="workspaceAccess"
-          class="plan-badge"
-          :class="`plan-badge--${workspaceAccess.plan_code}`"
-          :aria-label="`Текущий тариф ${workspaceAccess.plan_name}`"
-          :title="`Текущий тариф: ${workspaceAccess.plan_name}`"
-        >
-          <span class="plan-badge__signal" aria-hidden="true"></span>
-          <span class="plan-badge__copy"><small>ТАРИФ</small><strong>{{ workspaceAccess.plan_name }}</strong></span>
-        </div>
         <button
           class="order-popup-toggle"
           :class="{ 'order-popup-toggle--enabled': orderPopupsEnabled }"
@@ -1862,7 +1869,7 @@ onBeforeUnmount(() => {
               <strong class="store-dashboard-card__attention-value">{{ item.pending_chats ?? '—' }}</strong>
             </div>
             <div>
-              <span class="store-dashboard-card__attention-label"><span class="metric-dot metric-dot--subscription" aria-hidden="true"></span>До окончания подписки</span>
+              <span class="store-dashboard-card__attention-label"><span class="metric-dot metric-dot--subscription" aria-hidden="true"></span>Подписка · {{ item.plan_name }}</span>
               <strong class="store-dashboard-card__attention-value">{{ subscriptionDaysLabel(item) }}</strong>
             </div>
           </div>
@@ -1893,6 +1900,7 @@ onBeforeUnmount(() => {
           <dl>
             <div><dt>API-ключ</dt><dd>{{ connection.token_masked }}</dd></div>
             <div><dt>Кабинет / магазин</dt><dd>{{ connectionAccountValue(connection) }}</dd></div>
+            <div><dt>Тариф магазина</dt><dd>{{ connectionPlanLabel(connection) }}</dd></div>
             <div><dt>Обработка заказов</dt><dd class="connection-card__fulfillment-mode" :class="`connection-card__fulfillment-mode--${connection.launch_state}`">{{ fulfillmentMode(connection) }}</dd></div>
           </dl>
           <p class="connection-card__activity" :class="{ 'connection-card__activity--error': connection.last_error }" :title="connection.last_error || ''">{{ connectionActivity(connection) }}</p>
@@ -2260,15 +2268,6 @@ onBeforeUnmount(() => {
 .app-brand { display: flex; align-items: center; gap: 14px; } .app-brand img { width: clamp(160px,17vw,235px); max-height: 45px; object-fit: contain; } .app-brand span { padding-left: 14px; border-left: 1px solid rgba(144,160,204,.32); color: #b9c4dc; font-weight: 750; }
 .app-account { display: flex; align-items: stretch; gap: 5px; margin-left: auto; padding: 5px; border: 1px solid rgba(145,161,204,.2); border-radius: 20px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(2,7,22,.14); }
 .order-popup-toggle { position: relative; display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #8290ae; background: rgba(31,40,70,.72); transition: color .18s,border-color .18s,background .18s,transform .18s; } .order-popup-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .order-popup-toggle:hover { color: #eef3ff; border-color: rgba(112,140,222,.5); transform: translateY(-1px); } .order-popup-toggle--enabled { color: #74ebcc; border-color: rgba(80,230,193,.34); background: linear-gradient(145deg,rgba(18,65,72,.62),rgba(17,34,61,.82)); } .order-popup-toggle__badge { position: absolute; top: -5px; right: -5px; display: grid; min-width: 18px; height: 18px; place-items: center; padding: 0 4px; border: 2px solid #0b1229; border-radius: 999px; color: #08142a; background: #56e4bd; font-size: 9px; font-weight: 900; }
-.plan-badge { position: relative; display: flex; min-width: 105px; height: 46px; align-items: center; gap: 10px; padding: 6px 14px 6px 11px; overflow: hidden; border: 1px solid rgba(112,143,238,.34); border-radius: 14px; color: #d8e2ff; background: linear-gradient(135deg,rgba(30,51,112,.66),rgba(18,28,58,.82)); box-shadow: inset 0 1px rgba(255,255,255,.035); }
-.plan-badge::after { content: ''; position: absolute; right: -19px; bottom: -29px; width: 58px; aspect-ratio: 1; border: 1px solid rgba(128,153,229,.12); border-radius: 50%; pointer-events: none; }
-.plan-badge--pro { color: #8df1d6; border-color: rgba(80,230,193,.34); background: linear-gradient(135deg,rgba(19,69,73,.68),rgba(14,31,54,.86)); }
-.plan-badge__signal { position: relative; z-index: 1; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #7894ff; box-shadow: 0 0 0 5px rgba(120,148,255,.11); }
-.plan-badge--pro .plan-badge__signal { background: var(--success); box-shadow: 0 0 0 5px rgba(80,230,193,.1),0 0 18px rgba(80,230,193,.3); }
-.plan-badge__copy { position: relative; z-index: 1; display: grid; gap: 1px; line-height: 1; }
-.plan-badge__copy small { color: #8f9dbc; font-size: 8px; font-weight: 850; letter-spacing: .13em; }
-.plan-badge--pro .plan-badge__copy small { color: #73cdb7; }
-.plan-badge__copy strong { color: currentColor; font-size: 14px; font-weight: 750; letter-spacing: -.01em; }
 .profile-button, .logout-button, .seller-nav__item, .secondary-button { border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; }
 .profile-button { display: inline-flex; height: 46px; min-width: 0; align-items: center; gap: 9px; padding: 0 14px 0 10px; font-size: 13px; }
 .profile-button:disabled { cursor: default; opacity: 1; }
@@ -2331,7 +2330,7 @@ onBeforeUnmount(() => {
 .order-card-live-move { transition: transform .42s cubic-bezier(.22,.78,.24,1); } .order-card-live-enter-active { position: relative; overflow: hidden; animation: order-card-arrive .52s cubic-bezier(.18,.82,.28,1) both; } .order-card-live-enter-active::after { content: ''; position: absolute; inset: 0; border: 1px solid rgba(82,229,190,.64); border-radius: inherit; background: linear-gradient(105deg,transparent 18%,rgba(86,229,191,.11) 48%,transparent 76%); pointer-events: none; animation: order-card-signal .82s ease-out both; } .order-card-live-leave-active { transition: opacity .18s ease,transform .18s ease; } .order-card-live-leave-to { opacity: 0; transform: scale(.985); } @keyframes order-card-arrive { 0% { opacity: 0; transform: translateY(-14px) scale(.985); filter: saturate(.75); } 58% { opacity: 1; transform: translateY(2px) scale(1.002); } 100% { opacity: 1; transform: none; filter: none; } } @keyframes order-card-signal { 0% { opacity: 0; transform: translateX(-24%); } 30% { opacity: 1; } 100% { opacity: 0; transform: translateX(24%); } }
 .catalog-state-switch { display: inline-flex; width: fit-content; gap: 5px; margin: 1px 0 3px; padding: 5px; border: 1px solid rgba(139,158,208,.25); border-radius: 16px; background: rgba(11,19,44,.58); } .catalog-state-switch button { display: flex; min-height: 45px; align-items: center; gap: 9px; padding: 0 18px; border: 1px solid transparent; border-radius: 12px; color: #aeb9d3; background: transparent; font: inherit; font-size: 14px; font-weight: 850; } .catalog-state-switch button:hover { color: #eef3ff; background: rgba(45,62,104,.38); } .catalog-state-switch button.active { color: #fff; border-color: rgba(98,130,255,.72); background: linear-gradient(135deg,#2255e8,#4a72ff); box-shadow: 0 9px 22px rgba(28,70,210,.22); } .catalog-state-switch small { min-width: 26px; padding: 3px 7px; border-radius: 999px; color: #aebbd9; background: rgba(123,143,194,.13); font-size: 11px; text-align: center; } .catalog-state-switch button.active small { color: #fff; background: rgba(7,21,71,.2); } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 7px; border: 1px solid rgba(116,141,207,.28); border-radius: 999px; color: #9cadcf; font-size: 9px; font-weight: 850; letter-spacing: .03em; text-transform: uppercase; vertical-align: 1px; }
 @media (max-width:1180px) { .app-header { flex-wrap: wrap; } .app-header .seller-nav { order: 3; width: 100%; } .app-header .seller-nav__item { flex: 1; } }
-@media (max-width:900px) { .connection-grid,.store-dashboard-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .dashboard-heading .dashboard-heading__note { max-width: 560px; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { gap: 10px; min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .plan-badge { min-width: 0; height: 42px; gap: 7px; padding: 6px 10px; } .plan-badge__copy small { display: none; } .plan-badge__copy strong { font-size: 12px; } .profile-button,.logout-button { height: 42px; } .profile-button { width: 42px; padding: 0; justify-content: center; } .profile-button__name { display: none; } .logout-button { padding: 0 11px; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 0; } .seller-nav { width: 100%; gap: 3px; } .seller-nav__item { flex: 1; min-width: 0; padding: 0 6px; font-size: 11px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .dashboard-heading .dashboard-heading__note { padding-left: 13px; } .connection-grid, .snapshot-grid,.store-dashboard-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .store-dashboard-card { min-height: 370px; padding: 20px; } .store-dashboard-card__sales strong { font-size: 19px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
+@media (max-width:900px) { .connection-grid,.store-dashboard-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .dashboard-heading .dashboard-heading__note { max-width: 560px; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { gap: 10px; min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .profile-button,.logout-button { height: 42px; } .profile-button { width: 42px; padding: 0; justify-content: center; } .profile-button__name { display: none; } .logout-button { padding: 0 11px; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 0; } .seller-nav { width: 100%; gap: 3px; } .seller-nav__item { flex: 1; min-width: 0; padding: 0 6px; font-size: 11px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .dashboard-heading .dashboard-heading__note { padding-left: 13px; } .connection-grid, .snapshot-grid,.store-dashboard-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .store-dashboard-card { min-height: 370px; padding: 20px; } .store-dashboard-card__sales strong { font-size: 19px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
 @media (max-width:660px) { .order-popup-toggle { width: 42px; height: 42px; } .seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }

@@ -11,7 +11,12 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from domains.local_auth import AuthenticatedUser
-from domains.workspace_entitlements import FULFILLMENT_SUPPLIER, read_workspace_access
+from domains.connection_entitlements import (
+    FULFILLMENT_MANUAL,
+    FULFILLMENT_POOL,
+    FULFILLMENT_SUPPLIER,
+    read_connection_access,
+)
 
 
 LaunchCheckState = Literal["ready", "warning", "blocked"]
@@ -100,7 +105,7 @@ def mount_marketplace_launch_routes(
 
         provider_code = str(connection_row[1])
         launch_state = str(connection_row[4])
-        access = read_workspace_access(cursor, workspace_id)
+        access = read_connection_access(cursor, workspace_id, connection_id)
 
         cursor.execute(
             """
@@ -195,6 +200,13 @@ def mount_marketplace_launch_routes(
             "platform", "Контур Seller",
             "ready" if platform_ready else "blocked", platform_detail,
         ))
+        base_plan_ready = access.allows(FULFILLMENT_MANUAL) and access.allows(FULFILLMENT_POOL)
+        checks.append(_check(
+            "subscription", "Подписка магазина",
+            "ready" if base_plan_ready else "blocked",
+            f"Тариф {access.plan_name} активен" if base_plan_ready
+            else "Тариф магазина не разрешает запуск выдачи",
+        ))
         checks.append(_check(
             "sources", "Способы выдачи",
             "ready" if int(configured_count) > 0 else "warning",
@@ -214,7 +226,10 @@ def mount_marketplace_launch_routes(
             ))
 
         chain = ["Поставщик"] if access.allows(FULFILLMENT_SUPPLIER) else []
-        chain.extend(["Пул ключей", "Поддержка", "Ручной ввод"])
+        if access.allows(FULFILLMENT_POOL):
+            chain.append("Пул ключей")
+        if access.allows(FULFILLMENT_MANUAL):
+            chain.extend(["Поддержка", "Ручной ввод"])
         can_launch = launch_state == "running" or not any(item.state == "blocked" for item in checks)
         return MarketplaceLaunchReadinessOut(
             connection_id=int(connection_row[0]), provider_code=provider_code,

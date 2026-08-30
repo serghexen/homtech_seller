@@ -230,6 +230,25 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("WHERE plan.code='pro'", joined)
         self.assertIn("Сохранение текущих возможностей Seller", joined)
 
+    def test_connection_subscriptions_preserve_existing_plans_and_default_new_stores_to_basic(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260830_04_connection_subscriptions.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.marketplace_connection_subscriptions", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.marketplace_connection_entitlement_overrides", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.marketplace_connection_subscription_events", joined)
+        self.assertIn("FOREIGN KEY (connection_id, workspace_id)", joined)
+        self.assertIn("LEFT JOIN seller.workspace_subscriptions", joined)
+        self.assertIn("JOIN seller.workspace_entitlement_overrides", joined)
+        self.assertIn("LOCK TABLE seller.workspace_subscriptions IN SHARE MODE", joined)
+        self.assertIn("LOCK TABLE seller.workspace_entitlement_overrides IN SHARE MODE", joined)
+        self.assertIn("workspace_migration", joined)
+        self.assertIn("Active Basic plan is required for connection subscription migration", joined)
+        self.assertIn("Connection subscription backfill is incomplete", joined)
+        self.assertIn("ensure_marketplace_connection_subscription", joined)
+        self.assertIn("plan.code='basic'", joined)
+
     def test_fulfillment_handling_mode_separates_automation_from_operator(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260827_03_fulfillment_handling_mode.sql"

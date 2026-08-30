@@ -10,6 +10,7 @@ from typing import Callable
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from domains.connection_entitlements import KEY_POOL_MANAGE, connection_allows
 from domains.local_auth import AuthenticatedUser
 
 
@@ -241,13 +242,20 @@ def mount_marketplace_key_pool_routes(
         if not prepared:
             raise HTTPException(status_code=400, detail="Добавьте хотя бы один непустой ключ")
 
-        secret = key_pool_secret()
         added = 0
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             if seller_user.role_code not in {"owner", "operator"}:
                 raise HTTPException(status_code=403, detail="Недостаточно прав для добавления ключей")
             with connection.cursor() as cursor:
+                if not connection_allows(
+                    cursor, seller_user.workspace_id, connection_id, KEY_POOL_MANAGE,
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Управление пулом недоступно на текущем тарифе магазина",
+                    )
+                secret = key_pool_secret()
                 pool_id = ensure_pool(cursor, connection_id, product_id, seller_user.workspace_id)
                 for code in prepared:
                     cursor.execute(

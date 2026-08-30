@@ -9,6 +9,11 @@ from typing import Callable, Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from domains.connection_entitlements import (
+    ConnectionAccess,
+    read_connection_access,
+    read_connection_accesses,
+)
 from domains.local_auth import AuthenticatedUser
 from domains.marketplace_connection_verification import discover_yandex_market_stores, verify_ozon_connection
 
@@ -64,6 +69,10 @@ class MarketplaceConnectionOut(BaseModel):
     fulfillment_outbound_enabled: bool = False
     stock_outbound_enabled: bool = False
     supplier_fulfillment_enabled: bool = False
+    plan_code: str = "basic"
+    plan_name: str = "Basic"
+    subscription_status: str = "inactive"
+    subscription_revision: int = 0
 
 
 class MarketplaceConnectionListOut(BaseModel):
@@ -98,7 +107,7 @@ def mount_marketplace_connection_routes(
         suffix = str(token_suffix or "").strip()[-4:]
         return f"••••{suffix}" if suffix else "••••"
 
-    def connection_out(row) -> MarketplaceConnectionOut:
+    def connection_out(row, access: ConnectionAccess) -> MarketplaceConnectionOut:
         # Собирает контракт карточки магазина из безопасных полей, исключая ciphertext из ответа API.
         return MarketplaceConnectionOut(
             id=int(row[0]),
@@ -125,6 +134,10 @@ def mount_marketplace_connection_routes(
             fulfillment_outbound_enabled=bool(row[21]),
             stock_outbound_enabled=bool(row[22]),
             supplier_fulfillment_enabled=bool(row[23]),
+            plan_code=access.plan_code,
+            plan_name=access.plan_name,
+            subscription_status=access.subscription_status,
+            subscription_revision=access.revision,
         )
 
     def workspace_for_user(connection, user: AuthenticatedUser):
@@ -157,9 +170,12 @@ def mount_marketplace_connection_routes(
                     (seller_user.workspace_id,),
                 )
                 rows = cursor.fetchall()
+                access_by_connection = read_connection_accesses(
+                    cursor, seller_user.workspace_id, [int(row[0]) for row in rows],
+                )
         return MarketplaceConnectionListOut(
             workspace_name=seller_user.workspace_name,
-            items=[connection_out(row) for row in rows],
+            items=[connection_out(row, access_by_connection[int(row[0])]) for row in rows],
         )
 
     @app.post("/marketplaces/connections/discover", response_model=MarketplaceConnectionDiscoverOut)
@@ -285,7 +301,8 @@ def mount_marketplace_connection_routes(
                         """,
                         (seller_user.workspace_id, connection_id, sync_kind, seller_user.id),
                     )
-        return connection_out(row)
+                access = read_connection_access(cursor, seller_user.workspace_id, connection_id)
+        return connection_out(row, access)
 
     @app.post("/marketplaces/connections/{connection_id}/disable", response_model=MarketplaceConnectionOut)
     def disable_connection(
@@ -313,9 +330,10 @@ def mount_marketplace_connection_routes(
                     (connection_id, seller_user.workspace_id),
                 )
                 row = cursor.fetchone()
+                access = read_connection_access(cursor, seller_user.workspace_id, connection_id) if row else None
         if not row:
             raise HTTPException(status_code=404, detail="Подключенный магазин не найден")
-        return connection_out(row)
+        return connection_out(row, access)
 
     @app.post(
         "/marketplaces/connections/{connection_id}/orders-polling",
@@ -354,9 +372,10 @@ def mount_marketplace_connection_routes(
                     ),
                 )
                 row = cursor.fetchone()
+                access = read_connection_access(cursor, seller_user.workspace_id, connection_id) if row else None
         if not row:
             raise HTTPException(status_code=404, detail="Подключенный магазин Ozon не найден")
-        return connection_out(row)
+        return connection_out(row, access)
 
     @app.post("/marketplaces/connections/{connection_id}/enable", response_model=MarketplaceConnectionOut)
     def enable_connection(
@@ -416,6 +435,7 @@ def mount_marketplace_connection_routes(
                     (connection_id, workspace_id),
                 )
                 row = cursor.fetchone()
+                access = read_connection_access(cursor, workspace_id, connection_id) if row else None
         if not row:
             raise HTTPException(status_code=404, detail="Подключенный магазин не найден")
-        return connection_out(row)
+        return connection_out(row, access)

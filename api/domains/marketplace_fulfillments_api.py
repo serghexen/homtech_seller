@@ -8,6 +8,11 @@ from typing import Callable, Literal
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from domains.connection_entitlements import (
+    FULFILLMENT_MANUAL,
+    FULFILLMENT_POOL,
+    read_connection_access,
+)
 from domains.fulfillment_service import (
     manual_fulfillment_enabled,
     observe_order_fulfillments,
@@ -70,6 +75,8 @@ class OrderFulfillmentOut(BaseModel):
     can_prepare: bool = False
     can_release: bool = False
     manual_actions_enabled: bool = False
+    manual_access_enabled: bool = False
+    pool_access_enabled: bool = False
     outbound_enabled: bool = False
     outbound_state: str = ""
     outbound_last_error: str = ""
@@ -183,6 +190,9 @@ def mount_marketplace_fulfillment_routes(
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Позиция заказа не найдена")
+        access = read_connection_access(cursor, workspace_id, connection_id)
+        manual_access_enabled = access.allows(FULFILLMENT_MANUAL)
+        pool_access_enabled = access.allows(FULFILLMENT_POOL)
         fulfillment_status = str(row[12] or "not_prepared")
         actions_enabled = manual_fulfillment_enabled()
         provider_code = str(row[3])
@@ -220,7 +230,7 @@ def mount_marketplace_fulfillment_routes(
             resolver_enabled=resolver_enabled,
             automation_in_progress=automation_in_progress,
         )
-        can_prepare_any = bool(
+        preparation_stage_available = bool(
             actions_enabled
             and can_manage
             and provider_code in {"yandex_market", "ozon"}
@@ -229,7 +239,8 @@ def mount_marketplace_fulfillment_routes(
             and not automation_in_progress
             and preparation_stage_ready
         )
-        can_prepare = can_prepare_any
+        can_prepare_manual = bool(preparation_stage_available and manual_access_enabled)
+        can_prepare = bool(can_prepare_manual and pool_access_enabled)
         support_message_configured = bool(str(row[23] or "").strip()) and bool(row[24])
         prepared_material_complete = (
             bool(str(row[22] or "").strip())
@@ -255,11 +266,13 @@ def mount_marketplace_fulfillment_routes(
                 and not outbound_active and not automation_in_progress
             ),
             manual_actions_enabled=actions_enabled,
+            manual_access_enabled=manual_access_enabled,
+            pool_access_enabled=pool_access_enabled,
             outbound_enabled=outbound_available,
             outbound_state=outbound_state,
             outbound_last_error=str(row[21] or ""),
             can_send=bool(
-                actions_enabled and outbound_available and can_manage
+                actions_enabled and manual_access_enabled and outbound_available and can_manage
                 and provider_code in {"yandex_market", "ozon"} and str(row[5]) == "active"
                 and order_ready_for_fulfillment
                 and fulfillment_status == "reserved" and prepared_material_complete
@@ -274,8 +287,10 @@ def mount_marketplace_fulfillment_routes(
                 actions_enabled and can_manage and provider_code in {"yandex_market", "ozon"}
                 and fulfillment_status == "unknown" and outbound_state == "unknown"
             ),
-            can_prepare_manual=can_prepare_any,
-            can_prepare_support=bool(can_prepare_any and provider_code == "yandex_market" and support_message_configured),
+            can_prepare_manual=can_prepare_manual,
+            can_prepare_support=bool(
+                can_prepare_manual and provider_code == "yandex_market" and support_message_configured
+            ),
             support_message_configured=support_message_configured,
             can_reveal_keys=bool(can_manage and int(row[16] or 0) > 0),
             can_reveal_support_message=bool(
@@ -290,7 +305,7 @@ def mount_marketplace_fulfillment_routes(
         if not manual_fulfillment_enabled():
             raise HTTPException(status_code=503, detail="Ручная подготовка выдачи временно отключена")
 
-    def require_manual_action_allowed(detail: OrderFulfillmentOut) -> None:
+    def require_manual_action_allowed(detail: OrderFulfillmentOut, *, requires_pool: bool = False) -> None:
         if detail.provider_code not in {"yandex_market", "ozon"}:
             raise HTTPException(status_code=409, detail="Маркетплейс пока не поддерживает локальную выдачу")
         if detail.connection_status != "active":
@@ -299,7 +314,13 @@ def mount_marketplace_fulfillment_routes(
             if detail.provider_code == "yandex_market" and detail.provider_status.upper() != "PROCESSING":
                 raise HTTPException(status_code=409, detail="Дождитесь оплаты и статуса PROCESSING от Яндекс Маркета")
             raise HTTPException(status_code=409, detail="Маркетплейс ещё не разрешил выдачу этого цифрового заказа")
-        if not detail.can_prepare_manual:
+        if not detail.manual_access_enabled or (requires_pool and not detail.pool_access_enabled):
+            raise HTTPException(
+                status_code=403,
+                detail="Текущий тариф магазина не разрешает эту подготовку выдачи",
+            )
+        allowed = detail.can_prepare if requires_pool else detail.can_prepare_manual
+        if not allowed:
             if detail.automation_in_progress:
                 raise HTTPException(
                     status_code=409,
@@ -402,7 +423,7 @@ def mount_marketplace_fulfillment_routes(
                 detail = read_fulfillment(
                     cursor, identity=identity, workspace_id=seller_user.workspace_id, role_code=seller_user.role_code,
                 )
-            require_manual_action_allowed(detail)
+            require_manual_action_allowed(detail, requires_pool=True)
             fulfillment_id = fulfillment_id_after_observe(connection, identity)
             lock_manual_preparation(connection, fulfillment_id)
             result = reserve_pool_keys(

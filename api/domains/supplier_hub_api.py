@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from domains.supplier_hub_client import (
@@ -13,7 +13,7 @@ from domains.supplier_hub_client import (
     load_supplier_hub_settings,
     supplier_hub_status,
 )
-from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
+from domains.connection_entitlements import SUPPLIER_MAPPING_MANAGE, connection_allows
 
 
 class SupplierHubStatusOut(BaseModel):
@@ -31,6 +31,7 @@ class SupplierHubServicesOut(BaseModel):
 
 
 class SupplierHubQuoteIn(BaseModel):
+    connection_id: int = Field(gt=0)
     service_id: int = Field(gt=0)
     nominal_id: str = Field(default="", max_length=128)
     params: dict[str, Any] = Field(default_factory=dict)
@@ -52,13 +53,15 @@ def mount_supplier_hub_routes(
     current_user: Callable[..., Any],
     user_with_workspace: Callable,
 ) -> None:
-    def require_supplier_mapping_access(user: Any) -> None:
+    def require_supplier_mapping_access(user: Any, connection_id: int) -> None:
         with psycopg.connect(database_url()) as connection:
             seller_user = user_with_workspace(connection, user.user_id)
             if not seller_user:
                 raise HTTPException(status_code=401, detail="Рабочая область недоступна")
             with connection.cursor() as cursor:
-                allowed = workspace_allows(cursor, seller_user.workspace_id, SUPPLIER_MAPPING_MANAGE)
+                allowed = connection_allows(
+                    cursor, seller_user.workspace_id, connection_id, SUPPLIER_MAPPING_MANAGE,
+                )
         if not allowed:
             raise HTTPException(status_code=403, detail="Настройка Supplier Hub доступна на тарифе Pro")
 
@@ -68,8 +71,11 @@ def mount_supplier_hub_routes(
         return SupplierHubStatusOut(**supplier_hub_status())
 
     @app.get("/integrations/supplier-hub/services", response_model=SupplierHubServicesOut)
-    def read_supplier_hub_services(user: Any = Depends(current_user)) -> SupplierHubServicesOut:
-        require_supplier_mapping_access(user)
+    def read_supplier_hub_services(
+        connection_id: int = Query(gt=0),
+        user: Any = Depends(current_user),
+    ) -> SupplierHubServicesOut:
+        require_supplier_mapping_access(user, connection_id)
         try:
             items = SupplierHubClient(load_supplier_hub_settings()).services()
         except SupplierHubError as exc:
@@ -82,7 +88,7 @@ def mount_supplier_hub_routes(
         user: Any = Depends(current_user),
     ) -> SupplierHubQuoteOut:
         # calculate/quote не создаёт покупку и доступен при выключенном purchase-флаге Hub.
-        require_supplier_mapping_access(user)
+        require_supplier_mapping_access(user, payload.connection_id)
         try:
             result = SupplierHubClient(load_supplier_hub_settings()).quote(
                 service_id=payload.service_id,

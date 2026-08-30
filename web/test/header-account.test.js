@@ -13,3 +13,9 @@ test('profile and logout are separate header controls', () => {
   assert.match(logoutButton, /@click="logout"/)
   assert.match(logoutButton, />Выйти</)
 })
+
+test('header does not present a workspace-wide tariff', () => {
+  assert.doesNotMatch(appSource, /class="plan-badge"/)
+  assert.match(appSource, /Подписка · \{\{ item\.plan_name \}\}/)
+  assert.match(appSource, /Тариф магазина/)
+})

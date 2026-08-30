@@ -128,6 +128,16 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         self.assertIn("marketplace_order_allows_fulfillment", source)
         self.assertIn("Маркетплейс ещё не разрешил выдачу этого цифрового заказа", source)
 
+    def test_new_manual_actions_require_store_plan_but_safety_actions_remain_available(self) -> None:
+        source = inspect.getsource(mount_marketplace_fulfillment_routes)
+
+        self.assertIn("read_connection_access(cursor, workspace_id, connection_id)", source)
+        self.assertIn("manual_access_enabled", source)
+        self.assertIn("pool_access_enabled", source)
+        self.assertIn("requires_pool=True", source)
+        self.assertIn("can_release=bool", source)
+        self.assertIn("can_resolve_unknown=bool", source)
+
     def test_manual_preparation_waits_for_explicit_automatic_handoff(self) -> None:
         route_source = inspect.getsource(mount_marketplace_fulfillment_routes)
         state_source = inspect.getsource(manual_preparation_stage_ready)

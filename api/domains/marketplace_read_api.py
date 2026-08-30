@@ -23,7 +23,13 @@ from domains.marketplace_catalog_service import fetch_marketplace_stocks, ozon_s
 from domains.marketplace_orders_service import normalize_marketplace_order_status
 from domains.supplier_hub_client import SupplierHubClient, SupplierHubError, load_supplier_hub_settings
 from domains.stock_target_policy import stock_target_base, stock_target_source
-from domains.workspace_entitlements import SUPPLIER_MAPPING_MANAGE, workspace_allows
+from domains.connection_entitlements import (
+    FULFILLMENT_MANUAL,
+    FULFILLMENT_POOL,
+    SUPPLIER_MAPPING_MANAGE,
+    read_connection_access,
+    read_connection_accesses,
+)
 
 
 CATALOG_SEARCH_EXPRESSIONS = (
@@ -86,6 +92,7 @@ class MarketplaceCatalogItemOut(BaseModel):
     support_message_delivery_enabled: bool = False
     pool_issue_enabled: bool = False
     supplier_issue_enabled: bool = False
+    supplier_mapping_allowed: bool = False
     supplier_mapping_enabled: bool = False
     supplier_service_id: int | None = None
     supplier_nominal_id: str = ""
@@ -783,6 +790,13 @@ def mount_marketplace_read_routes(
                     [*base_params, page_size, (page - 1) * page_size],
                 )
                 rows = cursor.fetchall()
+                connection_access = read_connection_accesses(
+                    cursor, seller_user.workspace_id, [int(row[0]) for row in rows],
+                )
+                supplier_access_by_connection = {
+                    connection_id: access.allows(SUPPLIER_MAPPING_MANAGE)
+                    for connection_id, access in connection_access.items()
+                }
         items: list[MarketplaceCatalogItemOut] = []
         for row in rows:
             provider_code = str(row[1])
@@ -816,7 +830,9 @@ def mount_marketplace_read_routes(
                 support_message=str(row[27] or "") if has_settings else "",
                 support_message_delivery_enabled=bool(row[28]) if has_settings else False,
                 pool_issue_enabled=bool(row[29]),
-                supplier_issue_enabled=bool(row[30]), supplier_mapping_enabled=bool(row[31]),
+                supplier_issue_enabled=bool(row[30]),
+                supplier_mapping_allowed=supplier_access_by_connection[int(row[0])],
+                supplier_mapping_enabled=bool(row[31]),
                 supplier_service_id=int(row[32]) if row[32] is not None else None,
                 supplier_nominal_id=str(row[33] or ""), supplier_max_amount=row[34],
                 supplier_quoted_amount=row[35], supplier_quoted_at=row[36],
@@ -848,7 +864,15 @@ def mount_marketplace_read_routes(
                     """
                     SELECT mapping.service_id, mapping.nominal_id, mapping.max_amount,
                            mapping.quoted_amount, mapping.quoted_at,
-                           COALESCE(policy.supplier_issue_enabled, false)
+                           COALESCE(policy.supplier_issue_enabled, false),
+                           COALESCE(policy.pool_issue_enabled, local_settings.pool_issue_enabled, false),
+                           COALESCE(
+                             policy.support_message_delivery_enabled,
+                             CASE WHEN COALESCE(local_settings.support_message_overridden, false)
+                               THEN local_settings.support_message_delivery_enabled
+                               ELSE imported_settings.support_message_delivery_enabled END,
+                             false
+                           )
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS marketplace_connection
                       ON marketplace_connection.id=item.connection_id
@@ -859,6 +883,12 @@ def mount_marketplace_read_routes(
                     LEFT JOIN seller.product_fulfillment_policies AS policy
                       ON policy.connection_id=item.connection_id
                      AND policy.external_product_id=item.external_product_id
+                    LEFT JOIN seller.product_card_settings AS local_settings
+                      ON local_settings.connection_id=item.connection_id
+                     AND local_settings.external_product_id=item.external_product_id
+                    LEFT JOIN seller.yandex_product_settings_snapshot AS imported_settings
+                      ON imported_settings.connection_id=item.connection_id
+                     AND imported_settings.external_product_id=item.external_product_id
                     WHERE item.connection_id=%s AND item.external_product_id=%s
                       AND item.is_present=true AND marketplace_connection.workspace_id=%s
                     LIMIT 1
@@ -868,9 +898,10 @@ def mount_marketplace_read_routes(
                 existing_mapping = cursor.fetchone()
                 if not existing_mapping:
                     raise HTTPException(status_code=404, detail="Карточка товара не найдена")
-                supplier_mapping_allowed = workspace_allows(
-                    cursor, seller_user.workspace_id, SUPPLIER_MAPPING_MANAGE,
+                access = read_connection_access(
+                    cursor, seller_user.workspace_id, payload.connection_id,
                 )
+                supplier_mapping_allowed = access.allows(SUPPLIER_MAPPING_MANAGE)
 
         existing_service_id = int(existing_mapping[0]) if existing_mapping[0] is not None else None
         supplier_fields_changed = (
@@ -878,8 +909,16 @@ def mount_marketplace_read_routes(
             or payload.supplier_service_id != existing_service_id
             or nominal_id != str(existing_mapping[1] or "")
         )
+        pool_being_enabled = bool(payload.pool_issue_enabled) and not bool(existing_mapping[6])
+        support_being_enabled = (
+            bool(payload.support_message_delivery_enabled) and not bool(existing_mapping[7])
+        )
         if supplier_fields_changed and not supplier_mapping_allowed:
             raise HTTPException(status_code=403, detail="Настройка Supplier Hub доступна на тарифе Pro")
+        if pool_being_enabled and not access.allows(FULFILLMENT_POOL):
+            raise HTTPException(status_code=403, detail="Выдача из пула недоступна на тарифе магазина")
+        if support_being_enabled and not access.allows(FULFILLMENT_MANUAL):
+            raise HTTPException(status_code=403, detail="Выдача через поддержку недоступна на тарифе магазина")
         if supplier_mapping_allowed and payload.supplier_issue_enabled and payload.supplier_service_id is None:
             raise HTTPException(
                 status_code=400,
@@ -926,11 +965,19 @@ def mount_marketplace_read_routes(
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
-                supplier_mapping_allowed_current = workspace_allows(
-                    cursor, seller_user.workspace_id, SUPPLIER_MAPPING_MANAGE,
+                current_access = read_connection_access(
+                    cursor, seller_user.workspace_id, payload.connection_id,
                 )
+                supplier_mapping_allowed_current = current_access.allows(SUPPLIER_MAPPING_MANAGE)
                 if supplier_fields_changed and not supplier_mapping_allowed_current:
                     raise HTTPException(status_code=403, detail="Настройка Supplier Hub доступна на тарифе Pro")
+                if pool_being_enabled and not current_access.allows(FULFILLMENT_POOL):
+                    raise HTTPException(status_code=403, detail="Выдача из пула недоступна на тарифе магазина")
+                if support_being_enabled and not current_access.allows(FULFILLMENT_MANUAL):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Выдача через поддержку недоступна на тарифе магазина",
+                    )
                 cursor.execute(
                     """
                     SELECT 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -326,6 +327,14 @@ class MarketplaceReadApiTests(unittest.TestCase):
         )
         route = next(route for route in app.routes if route.path == "/marketplaces/catalog/settings")
         self.assertEqual(route.methods, {"POST"})
+
+    def test_catalog_source_enablement_uses_store_scoped_capabilities(self) -> None:
+        source = inspect.getsource(mount_marketplace_read_routes)
+
+        self.assertIn("pool_being_enabled", source)
+        self.assertIn("support_being_enabled", source)
+        self.assertIn("current_access.allows(FULFILLMENT_POOL)", source)
+        self.assertIn("current_access.allows(FULFILLMENT_MANUAL)", source)
 
     def test_catalog_settings_validate_local_limits(self) -> None:
         valid = MarketplaceCatalogSettingsIn(

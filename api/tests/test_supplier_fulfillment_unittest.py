@@ -22,6 +22,7 @@ def context(**overrides) -> FulfillmentContext:
         support_issue_enabled=True, support_message="Напишите в поддержку", mapping_id=11,
         service_id=11125, nominal_id="250", params={}, max_amount=Decimal("500"),
         workspace_id=4, supplier_access_enabled=True,
+        pool_access_enabled=True, manual_access_enabled=True,
         provider_status="PROCESSING", digital_goods_type="EMAIL",
     )
     values.update(overrides)
@@ -105,6 +106,7 @@ class SupplierFulfillmentTests(unittest.TestCase):
         self.assertEqual(result, "failed")
         client.create_purchase.assert_not_called()
         processor._mark_attempt_failed.assert_called_once()
+        processor._supplier_access_enabled.assert_called_once_with(4, 7)
 
     def test_yandex_instruction_is_required_before_supplier_purchase(self) -> None:
         processor = Processor(result="reserved", activation_instruction="")
@@ -127,6 +129,20 @@ class SupplierFulfillmentTests(unittest.TestCase):
         processor._resolve(81)
 
         processor._resolve_supplier.assert_not_called()
+        self.assertEqual(processor.manual, [(81, "Автоматические способы не подготовили полный комплект")])
+
+    def test_suspended_store_does_not_reserve_pool_or_prepare_support(self) -> None:
+        processor = Processor(
+            supplier_access_enabled=False,
+            pool_access_enabled=False,
+            manual_access_enabled=False,
+        )
+        processor._resolve_supplier = Mock(return_value="reserved")
+
+        processor._resolve(81)
+
+        processor._resolve_supplier.assert_not_called()
+        self.assertEqual(processor.queued, [])
         self.assertEqual(processor.manual, [(81, "Автоматические способы не подготовили полный комплект")])
 
     @patch("domains.supplier_fulfillment.load_supplier_hub_settings")

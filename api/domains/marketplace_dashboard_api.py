@@ -29,6 +29,10 @@ class MarketplaceDashboardItemOut(BaseModel):
     insights_last_successful_sync_at: datetime | None = None
     insights_next_refresh_at: datetime | None = None
     insights_error: str = ""
+    plan_code: str = "basic"
+    plan_name: str = "Basic"
+    subscription_status: str = "inactive"
+    subscription_revision: int = 0
     subscription_days_remaining: int | None = None
     subscription_unlimited: bool = False
 
@@ -78,22 +82,15 @@ def mount_marketplace_dashboard_routes(
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT valid_until
-                    FROM seller.workspace_subscriptions
-                    WHERE workspace_id=%s
-                    """,
-                    (seller_user.workspace_id,),
-                )
-                subscription_row = cursor.fetchone()
-                valid_until = subscription_row[0] if subscription_row else None
-                cursor.execute(
-                    """
                     SELECT marketplace.id, marketplace.provider_code, marketplace.display_name,
                            marketplace.status,
                            sales.sales_today, sales.sales_month, COALESCE(sales.currency_code, ''),
                            snapshot.pending_reviews_count, snapshot.pending_chats_count,
                            snapshot.last_successful_sync_at, snapshot.next_refresh_at,
-                           COALESCE(snapshot.last_error, '')
+                           COALESCE(snapshot.last_error, ''),
+                           COALESCE(plan.code, 'basic'), COALESCE(plan.display_name, 'Basic'),
+                           COALESCE(subscription.status, 'inactive'), subscription.valid_until,
+                           COALESCE(subscription.revision, 0), subscription.connection_id IS NOT NULL
                     FROM seller.marketplace_connections AS marketplace
                     LEFT JOIN LATERAL (
                         SELECT
@@ -114,6 +111,10 @@ def mount_marketplace_dashboard_routes(
                     LEFT JOIN seller.marketplace_dashboard_snapshots AS snapshot
                       ON snapshot.connection_id=marketplace.id
                      AND snapshot.workspace_id=marketplace.workspace_id
+                    LEFT JOIN seller.marketplace_connection_subscriptions AS subscription
+                      ON subscription.connection_id=marketplace.id
+                     AND subscription.workspace_id=marketplace.workspace_id
+                    LEFT JOIN seller.plans AS plan ON plan.id=subscription.plan_id
                     WHERE marketplace.workspace_id=%s
                     ORDER BY marketplace.created_at, marketplace.id
                     """,
@@ -121,10 +122,10 @@ def mount_marketplace_dashboard_routes(
                 )
                 rows = cursor.fetchall()
 
-        remaining_days = subscription_days(valid_until)
         items: list[MarketplaceDashboardItemOut] = []
         for row in rows:
             insights_ready = row[9] is not None
+            remaining_days = subscription_days(row[15])
             items.append(
                 MarketplaceDashboardItemOut(
                     connection_id=int(row[0]),
@@ -139,8 +140,12 @@ def mount_marketplace_dashboard_routes(
                     insights_last_successful_sync_at=row[9],
                     insights_next_refresh_at=row[10],
                     insights_error=str(row[11] or ""),
+                    plan_code=str(row[12]),
+                    plan_name=str(row[13]),
+                    subscription_status=str(row[14]),
+                    subscription_revision=int(row[16]),
                     subscription_days_remaining=remaining_days,
-                    subscription_unlimited=valid_until is None,
+                    subscription_unlimited=bool(row[17]) and row[15] is None,
                 )
             )
         return MarketplaceDashboardListOut(items=items)

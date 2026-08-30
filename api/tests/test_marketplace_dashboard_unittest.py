@@ -213,6 +213,8 @@ class MarketplaceDashboardTests(unittest.TestCase):
         source = inspect.getsource(mount_marketplace_dashboard_routes)
         self.assertIn("WHERE marketplace.workspace_id=%s", source)
         self.assertIn("snapshot.workspace_id=marketplace.workspace_id", source)
+        self.assertIn("subscription.connection_id=marketplace.id", source)
+        self.assertIn("subscription.workspace_id=marketplace.workspace_id", source)
         self.assertIn("order_row.created_at >= %s", source)
         self.assertNotIn("fetch_yandex", source)
 

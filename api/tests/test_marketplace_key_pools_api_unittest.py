@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from inspect import getsource
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -61,6 +62,13 @@ class MarketplaceKeyPoolsApiTests(unittest.TestCase):
         self.assertEqual(methods["/marketplaces/catalog/key-pool"], {"GET"})
         self.assertEqual(methods["/marketplaces/catalog/key-pool/keys"], {"POST"})
         self.assertEqual(len(methods), 2)
+
+    def test_key_mutation_checks_store_scoped_plan(self) -> None:
+        source = getsource(mount_marketplace_key_pool_routes)
+
+        self.assertIn("KEY_POOL_MANAGE", source)
+        self.assertIn("seller_user.workspace_id, connection_id", source)
+        self.assertIn("connection_allows", source)
 
     def test_pool_read_excludes_order_keys_and_returns_clean_order_identity(self) -> None:
         now = datetime(2026, 8, 27, tzinfo=timezone.utc)

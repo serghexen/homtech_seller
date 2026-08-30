@@ -20,7 +20,13 @@ from domains.supplier_hub_client import (
     load_supplier_hub_settings,
 )
 from domains.ozon_outbound import ozon_outbound_enabled
-from domains.workspace_entitlements import FULFILLMENT_SUPPLIER, workspace_allows
+from domains.connection_entitlements import (
+    FULFILLMENT_MANUAL,
+    FULFILLMENT_POOL,
+    FULFILLMENT_SUPPLIER,
+    connection_allows,
+    read_connection_access,
+)
 from domains.yandex_market_outbound import key_pool_secret, yandex_outbound_enabled
 
 
@@ -75,6 +81,8 @@ class FulfillmentContext:
     max_amount: Decimal | None
     workspace_id: int
     supplier_access_enabled: bool
+    pool_access_enabled: bool
+    manual_access_enabled: bool
     store_outbound_enabled: bool = True
     provider_status: str = ""
     digital_goods_type: str = ""
@@ -238,9 +246,7 @@ class SupplierFulfillmentProcessor:
                     (fulfillment_id,),
                 )
                 row = cursor.fetchone()
-                supplier_access_enabled = bool(row) and workspace_allows(
-                    cursor, int(row[25]), FULFILLMENT_SUPPLIER,
-                )
+                access = read_connection_access(cursor, int(row[25]), int(row[1])) if row else None
         if not row:
             return None
         params = row[21] if isinstance(row[21], dict) else {}
@@ -256,15 +262,20 @@ class SupplierFulfillmentProcessor:
             mapping_id=int(row[18]) if row[18] is not None else None,
             service_id=int(row[19]) if row[19] is not None else None,
             nominal_id=str(row[20] or ""), params=dict(params), max_amount=_decimal(row[22]),
-            workspace_id=int(row[25]), supplier_access_enabled=supplier_access_enabled,
+            workspace_id=int(row[25]),
+            supplier_access_enabled=bool(access and access.allows(FULFILLMENT_SUPPLIER)),
+            pool_access_enabled=bool(access and access.allows(FULFILLMENT_POOL)),
+            manual_access_enabled=bool(access and access.allows(FULFILLMENT_MANUAL)),
             store_outbound_enabled=bool(row[26]), provider_status=str(row[10] or ""),
             digital_goods_type=str(row[11] or ""),
         )
 
-    def _supplier_access_enabled(self, workspace_id: int) -> bool:
+    def _supplier_access_enabled(self, workspace_id: int, connection_id: int) -> bool:
         with self._psycopg.connect(self._database_url()) as connection:
             with connection.cursor() as cursor:
-                return workspace_allows(cursor, workspace_id, FULFILLMENT_SUPPLIER)
+                return connection_allows(
+                    cursor, workspace_id, connection_id, FULFILLMENT_SUPPLIER,
+                )
 
     def _resolve(self, fulfillment_id: int) -> None:
         context = self._context(fulfillment_id)
@@ -327,7 +338,12 @@ class SupplierFulfillmentProcessor:
             if supplier_result == "blocked":
                 return
 
-        if context.pool_issue_enabled and context.store_local_enabled and automatic_pool_enabled():
+        if (
+            context.pool_issue_enabled
+            and context.pool_access_enabled
+            and context.store_local_enabled
+            and automatic_pool_enabled()
+        ):
             self._reset_for_fallback(context.fulfillment_id)
             with self._psycopg.connect(self._database_url()) as connection:
                 result = reserve_pool_keys(connection, fulfillment_id=context.fulfillment_id)
@@ -336,7 +352,12 @@ class SupplierFulfillmentProcessor:
                 self._queue_outbound(context.fulfillment_id)
                 return
 
-        if context.support_issue_enabled and context.store_local_enabled and context.support_message:
+        if (
+            context.support_issue_enabled
+            and context.manual_access_enabled
+            and context.store_local_enabled
+            and context.support_message
+        ):
             self._reset_for_fallback(context.fulfillment_id)
             with self._psycopg.connect(self._database_url()) as connection:
                 result = prepare_support_message(
@@ -404,7 +425,7 @@ class SupplierFulfillmentProcessor:
                 if not purchase_id:
                     # Тариф перечитывается непосредственно перед необратимой покупкой.
                     # Уже созданные покупки после downgrade продолжаем только сверять.
-                    if not self._supplier_access_enabled(context.workspace_id):
+                    if not self._supplier_access_enabled(context.workspace_id, context.connection_id):
                         self._mark_attempt_failed(attempt_id, "Автовыдача Supplier Hub недоступна на текущем тарифе")
                         continue
                     request_id = request_id or f"seller-{uuid4()}"
