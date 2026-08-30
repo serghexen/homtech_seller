@@ -47,6 +47,7 @@ const connectionsLoading = ref(false)
 const dashboardItems = ref([])
 const dashboardLoading = ref(false)
 const dashboardError = ref('')
+const selectedReviewsConnection = ref(null)
 const connectionActionId = ref(null)
 const selectedLaunchConnection = ref(null)
 const launchReadiness = ref(null)
@@ -171,11 +172,6 @@ const catalogEmptyMessage = computed(() => catalogEmptyStateMessage({
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
 const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
 const canManageSupplier = computed(() => workspaceAccess.value?.capabilities?.includes('supplier_mapping.manage') === true)
-const pendingReviewsCount = computed(() => dashboardItems.value.reduce(
-  (total, item) => total + (item.provider_code === 'yandex_market' ? Number(item.pending_reviews || 0) : 0),
-  0,
-))
-
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
   mode.value = nextMode
@@ -216,6 +212,27 @@ function subscriptionDaysLabel(item) {
   const mod10 = days % 10
   const word = mod100 >= 11 && mod100 <= 14 ? 'дней' : mod10 === 1 ? 'день' : mod10 >= 2 && mod10 <= 4 ? 'дня' : 'дней'
   return `${days} ${word}`
+}
+
+function openStoreReviews(item) {
+  // Отзывы открываются из контекста карточки и всегда ограничены одним подключением.
+  if (item.provider_code !== 'yandex_market') return
+  selectedReviewsConnection.value = {
+    id: Number(item.connection_id),
+    display_name: item.store_name,
+  }
+}
+
+function closeStoreReviews() {
+  selectedReviewsConnection.value = null
+}
+
+function updateSelectedStorePendingReviews(count) {
+  const connectionId = selectedReviewsConnection.value?.id
+  if (!connectionId) return
+  dashboardItems.value = dashboardItems.value.map((item) => (
+    Number(item.connection_id) === connectionId ? { ...item, pending_reviews: Number(count || 0) } : item
+  ))
 }
 
 function hasProductInstruction(item) {
@@ -1470,6 +1487,7 @@ async function logout() {
     connections.value = []
     dashboardItems.value = []
     dashboardError.value = ''
+    closeStoreReviews()
     clearDashboardRefreshTimer()
     catalogItems.value = []
     orders.value = []
@@ -1701,15 +1719,6 @@ onBeforeUnmount(() => {
         >
           <span>Заказы</span><small v-if="unreadOrdersCount" class="seller-nav__badge">{{ unreadOrdersCount > 99 ? '99+' : unreadOrdersCount }}</small>
         </button>
-        <button
-          class="seller-nav__item"
-          :class="{ 'seller-nav__item--active': activeSection === 'reviews' }"
-          type="button"
-          :aria-current="activeSection === 'reviews' ? 'page' : undefined"
-          @click="changeSection('reviews')"
-        >
-          <span>Отзывы</span><small v-if="pendingReviewsCount" class="seller-nav__badge seller-nav__badge--review">{{ pendingReviewsCount > 99 ? '99+' : pendingReviewsCount }}</small>
-        </button>
       </nav>
       <div v-if="user" class="app-account">
         <div
@@ -1814,20 +1823,28 @@ onBeforeUnmount(() => {
             <div><span>Продаж за день</span><strong>{{ dashboardMoney(item, item.sales_today) }}</strong></div>
             <div><span>Продаж за месяц</span><strong>{{ dashboardMoney(item, item.sales_month) }}</strong></div>
           </div>
-          <dl class="store-dashboard-card__attention">
-            <div>
-              <dt><span class="metric-dot metric-dot--review" aria-hidden="true"></span>Отзывы требуют ответа</dt>
-              <dd>{{ item.pending_reviews ?? '—' }}</dd>
+          <div class="store-dashboard-card__attention">
+            <div class="store-dashboard-card__attention-action">
+              <button
+                type="button"
+                :disabled="item.provider_code !== 'yandex_market'"
+                :aria-label="`Открыть отзывы магазина ${item.store_name}: требуют ответа ${item.pending_reviews ?? 'нет данных'}`"
+                @click="openStoreReviews(item)"
+              >
+                <span><span class="metric-dot metric-dot--review" aria-hidden="true"></span>Отзывы требуют ответа</span>
+                <strong>{{ item.pending_reviews ?? '—' }}</strong>
+                <span class="store-dashboard-card__attention-arrow" aria-hidden="true">↗</span>
+              </button>
             </div>
             <div>
-              <dt><span class="metric-dot metric-dot--chat" aria-hidden="true"></span>Новые сообщения</dt>
-              <dd>{{ item.pending_chats ?? '—' }}</dd>
+              <span class="store-dashboard-card__attention-label"><span class="metric-dot metric-dot--chat" aria-hidden="true"></span>Новые сообщения</span>
+              <strong class="store-dashboard-card__attention-value">{{ item.pending_chats ?? '—' }}</strong>
             </div>
             <div>
-              <dt><span class="metric-dot metric-dot--subscription" aria-hidden="true"></span>До окончания подписки</dt>
-              <dd>{{ subscriptionDaysLabel(item) }}</dd>
+              <span class="store-dashboard-card__attention-label"><span class="metric-dot metric-dot--subscription" aria-hidden="true"></span>До окончания подписки</span>
+              <strong class="store-dashboard-card__attention-value">{{ subscriptionDaysLabel(item) }}</strong>
             </div>
-          </dl>
+          </div>
           <footer>
             <span v-if="item.provider_code !== 'yandex_market'">Показатели Ozon пока недоступны без финансовых методов</span>
             <span v-else-if="item.insights_error" class="store-dashboard-card__error" :title="item.insights_error">Отзывы и сообщения временно не обновились</span>
@@ -1836,8 +1853,6 @@ onBeforeUnmount(() => {
           </footer>
         </article>
       </div>
-
-      <ReviewsView v-if="activeSection === 'reviews'" :connections="connections" />
 
       <div v-if="activeSection === 'stores'" class="dashboard-heading">
         <div>
@@ -2169,6 +2184,25 @@ onBeforeUnmount(() => {
       @close="closeStoreLaunch"
     />
 
+    <div v-if="selectedReviewsConnection" class="reviews-modal-backdrop" @click.self="closeStoreReviews">
+      <section
+        class="reviews-modal"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="`Отзывы магазина ${selectedReviewsConnection.display_name}`"
+      >
+        <button class="reviews-modal__close" type="button" aria-label="Закрыть отзывы" @click="closeStoreReviews">×</button>
+        <ReviewsView
+          :key="selectedReviewsConnection.id"
+          :connections="connections"
+          :connection-id="selectedReviewsConnection.id"
+          :connection-name="selectedReviewsConnection.display_name"
+          dialog
+          @pending-change="updateSelectedStorePendingReviews"
+        />
+      </section>
+    </div>
+
     <div v-if="isConnectionModalOpen" class="modal-backdrop" @click.self="closeConnectionModal">
       <section class="connection-modal" role="dialog" aria-modal="true" aria-labelledby="connection-title">
         <button class="modal-close" type="button" aria-label="Закрыть" @click="closeConnectionModal">×</button>
@@ -2219,7 +2253,6 @@ onBeforeUnmount(() => {
 .session-loader { position: relative; z-index: 1; display: grid; width: max-content; max-width: 100%; place-items: center; margin: 18vh auto 0; padding: 22px 28px 20px; border: 1px solid rgba(144,160,204,.25); border-radius: 22px; background: linear-gradient(140deg,rgba(22,33,62,.96),rgba(10,15,34,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
 .seller-dashboard { position: relative; z-index: 1; width: min(100%,1760px); margin: 0 auto; } .seller-nav { display: flex; width: max-content; max-width: 100%; gap: 7px; padding: 6px; border: 1px solid rgba(149,164,203,.24); border-radius: 18px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025); } .seller-nav__item { display: inline-flex; min-height: 46px; align-items: center; justify-content: center; gap: 7px; padding: 0 18px; font-size: 14px; line-height: 1; transition: color .18s,border-color .18s,background .18s,transform .18s; } .seller-nav__item:hover:not(.seller-nav__item--active) { color: #eef3ff; border-color: rgba(112,140,222,.5); background: rgba(38,50,86,.88); transform: translateY(-1px); } .seller-nav__item--active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); box-shadow: 0 8px 22px rgba(20,62,195,.2); }
 .seller-nav__badge { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 6px; border-radius: 999px; color: #072136 !important; background: #58e5bd; font-size: 10px; line-height: 1; font-weight: 900; }
-.seller-nav__badge--review { color:#332204 !important; background:#ffd260; }
 .order-toast-stack { position: fixed; z-index: 80; top: 118px; right: clamp(18px,3vw,48px); display: grid; width: min(390px,calc(100vw - 32px)); gap: 10px; pointer-events: none; } .order-toast { position: relative; display: grid; grid-template-columns: 48px minmax(0,1fr) 28px; align-items: center; gap: 12px; padding: 14px; overflow: hidden; border: 1px solid rgba(77,225,190,.46); border-radius: 18px; color: #eef6ff; background: linear-gradient(145deg,rgba(15,42,62,.98),rgba(10,19,42,.99)); box-shadow: 0 18px 55px rgba(2,9,27,.48),inset 0 1px rgba(255,255,255,.04); cursor: pointer; pointer-events: auto; } .order-toast::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: #54e3bd; box-shadow: 0 0 20px rgba(84,227,189,.6); } .order-toast__mark { display: grid; width: 48px; height: 48px; place-items: center; overflow: hidden; border: 1px solid rgba(111,145,232,.34); border-radius: 14px; color: #67ecc8; background: rgba(22,43,83,.84); font-size: 13px; font-weight: 900; } .order-toast__mark img { width: 34px; height: 34px; object-fit: contain; } .order-toast__copy { min-width: 0; } .order-toast__copy > span { color: #63dfbf; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .order-toast__copy strong { display: block; overflow: hidden; margin-top: 3px; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; } .order-toast__copy p { overflow: hidden; margin: 4px 0 0; color: #aebbd5; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; } .order-toast > button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 9px; color: #8997b5; background: rgba(105,124,172,.1); font-size: 19px; } .order-toast > button:hover { color: #fff; background: rgba(105,124,172,.22); } .order-toast-enter-active,.order-toast-leave-active { transition: opacity .22s ease,transform .22s ease; } .order-toast-enter-from,.order-toast-leave-to { opacity: 0; transform: translateX(22px) scale(.98); } .order-toast-move { transition: transform .22s ease; }
 .sync-activity { position: relative; display: grid; grid-template-columns: 64px minmax(0,1fr) auto; align-items: center; gap: 15px; margin-top: 18px; padding: 11px 15px 11px 12px; overflow: hidden; border: 1px solid rgba(92,126,226,.34); border-radius: 20px; background: linear-gradient(115deg,rgba(21,36,77,.92),rgba(13,21,46,.92)); box-shadow: 0 18px 45px rgba(4,10,29,.2),inset 0 1px rgba(255,255,255,.025); } .sync-activity::after { content: ''; position: absolute; right: 13%; bottom: -90px; width: 210px; aspect-ratio: 1; border: 1px solid rgba(96,128,222,.12); border-radius: 50%; pointer-events: none; } .sync-activity--succeeded { border-color: rgba(80,230,193,.36); background: linear-gradient(115deg,rgba(18,53,62,.82),rgba(13,25,47,.93)); } .sync-activity--failed { border-color: rgba(255,150,155,.4); background: linear-gradient(115deg,rgba(67,31,48,.76),rgba(19,23,48,.94)); } .sync-activity__visual { position: relative; z-index: 1; display: grid; width: 64px; height: 64px; place-items: center; border-radius: 17px; background: rgba(8,15,34,.48); } .sync-activity__result { color: var(--success); border: 1px solid rgba(80,230,193,.26); background: rgba(80,230,193,.08); } .sync-activity--failed .sync-activity__result { color: #ffaaa8; border-color: rgba(255,150,155,.28); background: rgba(255,150,155,.08); } .sync-activity__result svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; } .sync-activity__copy { position: relative; z-index: 1; min-width: 0; } .sync-activity__copy > span { display: block; margin-bottom: 3px; color: #7894ff; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .sync-activity--succeeded .sync-activity__copy > span { color: #58dcb8; } .sync-activity--failed .sync-activity__copy > span { color: #ff9fa4; } .sync-activity__copy strong { display: block; color: #f2f5ff; font-size: 15px; } .sync-activity__copy p { overflow: hidden; margin: 3px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; } .sync-activity__live { position: relative; z-index: 1; padding: 7px 10px; border: 1px solid rgba(115,144,235,.24); border-radius: 999px; color: #b8c5e3; background: rgba(26,39,76,.52); font-size: 10px; font-weight: 800; white-space: nowrap; } .sync-activity__close { position: relative; z-index: 1; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid rgba(149,164,203,.27); border-radius: 11px; color: #c3cde3; background: rgba(21,31,58,.62); font-size: 23px; line-height: 1; } .sync-activity + .dashboard-heading,.sync-activity + .snapshot-view { margin-top: 28px; } .sync-activity-enter-active,.sync-activity-leave-active { transition: opacity .18s ease,transform .18s ease; } .sync-activity-enter-from,.sync-activity-leave-to { opacity: 0; transform: translateY(-6px); }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 46px 0 27px; } .dashboard-heading h1, .connection-modal h1 { margin: 8px 0 10px; font-size: clamp(35px,4vw,52px); letter-spacing: -.065em; } .dashboard-heading p:not(.kicker) { max-width: 630px; margin: 0; color: #aeb9d4; line-height: 1.55; } .kicker { margin: 0; color: #7290ff; font-size: 12px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
@@ -2231,7 +2264,16 @@ onBeforeUnmount(() => {
 .store-dashboard-card--disabled { filter: saturate(.62); opacity: .72; }
 .store-dashboard-card__head { position: relative; z-index: 1; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; align-items: center; gap: 13px; } .store-dashboard-card__head .market-mark { width: 48px; height: 48px; border-radius: 14px; } .store-dashboard-card__head p { margin: 0 0 3px; color: #8f9dbb; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; } .store-dashboard-card__head h2 { overflow: hidden; margin: 0; color: #f4f7ff; font-size: 20px; letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; } .store-dashboard-card__state { padding: 5px 8px; border: 1px solid rgba(156,169,201,.25); border-radius: 999px; color: #9aa6bf; font-size: 9px; font-weight: 850; text-transform: uppercase; }
 .store-dashboard-card__sales { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; } .store-dashboard-card__sales > div { min-width: 0; padding: 15px; border: 1px solid rgba(115,144,227,.19); border-radius: 16px; background: rgba(7,15,37,.42); } .store-dashboard-card__sales span { display: block; margin-bottom: 8px; color: #8f9dbb; font-size: 10px; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; } .store-dashboard-card__sales strong { display: block; overflow: hidden; color: #f7f9ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: clamp(18px,1.7vw,25px); letter-spacing: -.055em; text-overflow: ellipsis; white-space: nowrap; }
-.store-dashboard-card__attention { display: grid; align-content: start; margin: 0; border-top: 1px solid rgba(145,164,205,.17); } .store-dashboard-card__attention > div { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 14px; min-height: 48px; border-bottom: 1px solid rgba(145,164,205,.17); } .store-dashboard-card__attention dt { display: flex; min-width: 0; align-items: center; gap: 9px; color: #b2bdd5; font-size: 13px; } .store-dashboard-card__attention dd { margin: 0; color: #eef2ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 14px; font-weight: 800; text-align: right; }
+.store-dashboard-card__attention { display: grid; align-content: start; margin: 0; border-top: 1px solid rgba(145,164,205,.17); } .store-dashboard-card__attention > div { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 14px; min-height: 48px; border-bottom: 1px solid rgba(145,164,205,.17); } .store-dashboard-card__attention-label { display: flex; min-width: 0; align-items: center; gap: 9px; color: #b2bdd5; font-size: 13px; } .store-dashboard-card__attention-value { margin: 0; color: #eef2ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 14px; font-weight: 800; text-align: right; }
+.store-dashboard-card__attention > .store-dashboard-card__attention-action { display:block; min-height:48px; }
+.store-dashboard-card__attention-action button { display:grid; width:calc(100% + 12px); min-height:48px; grid-template-columns:minmax(0,1fr) auto 20px; align-items:center; gap:10px; margin-left:-6px; padding:0 6px; border:0; border-radius:11px; color:inherit; background:transparent; text-align:left; transition:color .18s,background .18s,transform .18s; }
+.store-dashboard-card__attention-action button > span:first-child { display:flex; min-width:0; align-items:center; gap:9px; color:#c3cde1; font-size:13px; }
+.store-dashboard-card__attention-action button strong { color:#ffd269; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:14px; text-align:right; }
+.store-dashboard-card__attention-arrow { color:#7183b0; font-size:15px; transition:color .18s,transform .18s; }
+.store-dashboard-card__attention-action button:hover { color:#fff; background:linear-gradient(90deg,rgba(61,93,184,.13),rgba(255,204,82,.055)); transform:translateX(2px); }
+.store-dashboard-card__attention-action button:hover .store-dashboard-card__attention-arrow { color:#ffd269; transform:translate(2px,-2px); }
+.store-dashboard-card__attention-action button:focus-visible { outline:2px solid rgba(255,210,105,.68); outline-offset:2px; }
+.store-dashboard-card__attention-action button:disabled { cursor:default; opacity:.55; }
 .metric-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #7894ff; box-shadow: 0 0 0 4px rgba(120,148,255,.09); } .metric-dot--review { background: #ffc75a; box-shadow: 0 0 0 4px rgba(255,199,90,.09); } .metric-dot--chat { background: #58e5bd; box-shadow: 0 0 0 4px rgba(88,229,189,.09); }
 .store-dashboard-card footer { color: #7f8da9; font-size: 11px; line-height: 1.45; } .store-dashboard-card__error { color: #ffaaa8; }
 .primary-button { min-height: 52px; padding: 0 20px; border: 0; border-radius: 14px; color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); font-weight: 850; box-shadow: 0 13px 32px rgba(32,77,220,.28); transition: transform .2s, filter .2s; } .primary-button:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.08); }
@@ -2243,6 +2285,10 @@ onBeforeUnmount(() => {
 .auth-card { position: relative; z-index: 1; width: min(100%,870px); display: grid; grid-template-columns: minmax(250px,.9fr) minmax(280px,1fr); gap: clamp(30px,6vw,85px); margin: 12vh auto 0; padding: clamp(30px,5vw,66px); border: 1px solid rgba(144,160,204,.25); border-radius: 30px; background: linear-gradient(140deg,rgba(22,33,62,.97),rgba(10,15,34,.97)); box-shadow: 0 30px 90px rgba(0,0,0,.32); } .auth-card__intro h1 { margin: 12px 0 18px; white-space: pre-line; font-size: clamp(36px,4.3vw,65px); line-height: .95; letter-spacing: -.075em; } .auth-card__intro p:not(.kicker) { margin: 0; color: #aeb9d4; line-height: 1.55; }
 .auth-form, .connection-form { display: grid; gap: 16px; align-content: center; } .auth-form label, .connection-form label { display: grid; gap: 7px; color: #c3cbe0; font-size: 13px; font-weight: 750; } .auth-form input, .connection-form input, .connection-form textarea { width: 100%; min-height: 52px; padding: 0 16px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); transition: border-color .2s,box-shadow .2s; } .connection-form textarea { min-height: 105px; padding: 13px 16px; resize: vertical; } .auth-form input:focus, .connection-form input:focus, .connection-form textarea:focus { border-color: var(--brand-blue-bright); box-shadow: 0 0 0 4px var(--brand-blue-soft); } .form-error, .form-success { margin: 0 0 14px; font-size: 13px; } .form-error { color: #ffaaa8; } .form-success { color: var(--success); } .auth-card__footer { grid-column: 2; display: flex; gap: 8px; color: #9eaac5; font-size: 13px; } .auth-card__footer button { padding: 0; border: 0; color: #7894ff; background: transparent; font-weight: 750; }
 .modal-backdrop { position: fixed; z-index: 5; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2,6,19,.7); backdrop-filter: blur(9px); } .connection-modal { position: relative; width: min(100%,670px); max-height: calc(100vh - 48px); overflow: auto; padding: clamp(28px,4vw,46px); border: 1px solid rgba(146,164,205,.3); border-radius: 26px; background: linear-gradient(145deg,#14203d,#0b1128); box-shadow: 0 30px 100px rgba(0,0,0,.45); } .modal-close { position: absolute; top: 18px; right: 22px; padding: 0; border: 0; color: #bac4dc; background: transparent; font-size: 38px; line-height: 1; }
+.reviews-modal-backdrop { position:fixed; z-index:8; inset:0; display:grid; place-items:center; padding:clamp(12px,2vw,28px); background:rgba(2,6,19,.78); backdrop-filter:blur(12px); }
+.reviews-modal { position:relative; width:min(1180px,100%); max-height:calc(100vh - clamp(24px,4vw,56px)); overflow:auto; padding:clamp(18px,3vw,34px); border:1px solid rgba(137,158,211,.3); border-radius:28px; background:radial-gradient(circle at 100% 0,rgba(255,201,74,.055),transparent 30%),linear-gradient(145deg,#101a36,#080f24); box-shadow:0 36px 120px rgba(0,0,0,.58),inset 0 1px rgba(255,255,255,.04); }
+.reviews-modal__close { position:sticky; z-index:3; top:0; display:grid; width:42px; height:42px; place-items:center; float:right; margin:0 0 -42px; padding:0; border:1px solid rgba(151,169,211,.26); border-radius:13px; color:#c8d2e8; background:rgba(8,15,35,.88); font-size:28px; line-height:1; backdrop-filter:blur(8px); transition:color .18s,border-color .18s,transform .18s; }
+.reviews-modal__close:hover { color:#fff; border-color:rgba(255,210,105,.48); transform:rotate(4deg); }
 .provider-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 26px 0; } .provider-picker button { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 800; } .provider-picker button.active { border-color: var(--brand-blue-bright); background: linear-gradient(115deg,rgba(23,72,220,.38),rgba(75,115,255,.22)); } .provider-picker .market-mark { width: 35px; height: 35px; border-radius: 10px; }
 .yandex-discovery { display: grid; gap: 13px; } .yandex-discovery__hint { margin: 0; color: #9eabc7; font-size: 13px; line-height: 1.5; } .secondary-button { min-height: 48px; padding: 0 16px; } .store-choice { display: grid; gap: 8px; } .store-choice > span { color: #b7c2da; font-size: 13px; font-weight: 750; } .store-choice button { display: flex; justify-content: space-between; padding: 12px; border: 1px solid rgba(149,164,203,.25); border-radius: 12px; color: #edf1ff; background: rgba(24,34,61,.7); text-align: left; } .store-choice button.active { border-color: var(--brand-blue-bright); background: var(--brand-blue-soft); } .store-choice small { color: #aeb9d4; } .connection-form__actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 9px; } .connection-form__actions .primary-button { min-width: 190px; }
 .snapshot-view { display: grid; gap: 18px; margin-top: 46px; } .snapshot-toolbar { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(0, 1.6fr) auto; align-items: end; gap: 14px; } .snapshot-search { display: grid; gap: 7px; } .snapshot-search label, .orders-filter-row label > span { color: #c3cbe0; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; } .snapshot-search input, .orders-filter-row input, .orders-filter-row select { width: 100%; min-height: 50px; padding: 0 15px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; outline: none; color: #eef3ff; background: rgba(6,11,27,.66); } .orders-filter-row input, .orders-filter-row select { height: 52px; min-height: 52px; } .store-filters { display: flex; min-width: 0; gap: 8px; overflow-x: auto; padding-bottom: 1px; } .store-filters button { display: inline-flex; min-height: 50px; align-items: center; gap: 8px; flex: 0 0 auto; padding: 0 13px; border: 1px solid rgba(149,164,203,.28); border-radius: 13px; color: #cbd5eb; background: rgba(31,40,70,.72); font-weight: 600; } .store-filters button > span:last-child { display: grid; gap: 1px; text-align: left; } .store-filters button small { color: #929db8; font-size: 9px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; } .store-filters button.active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); } .store-filters button.active small { color: #dce5ff; } .store-filters button.store-filter--disabled:not(.active) { border-style: dashed; color: #9ca7c0; background: rgba(25,32,55,.6); } .store-filters .market-mark { width: 25px; height: 25px; border-radius: 8px; font-size: 8px; } .store-filters .market-mark--yandex_market { font-size: 16px; } .sync-button { display: inline-flex; min-width: 142px; min-height: 52px; align-items: center; justify-content: center; gap: 9px; padding: 0 17px; border: 1px solid rgba(116,140,205,.34); border-radius: 14px; color: #cbd5eb; background: linear-gradient(145deg,rgba(35,48,84,.82),rgba(22,31,60,.9)); box-shadow: inset 0 1px rgba(255,255,255,.035),0 8px 20px rgba(2,7,22,.14); font-weight: 750; transition: color .18s,border-color .18s,background .18s,transform .18s; } .sync-button:hover:not(:disabled) { color: #eef3ff; border-color: rgba(112,140,222,.54); background: linear-gradient(145deg,rgba(42,58,101,.9),rgba(25,36,69,.94)); transform: translateY(-1px); } .sync-button > span:first-child { color: #8ca6f2; font-size: 22px; line-height: 1; } .spinning { animation: snapshot-spin .8s linear infinite; } @keyframes snapshot-spin { to { transform: rotate(360deg); } } .snapshot-archive-notice { margin: 0; padding: 11px 14px; border: 1px dashed rgba(149,164,203,.28); border-radius: 13px; color: #aeb9d4; background: rgba(20,28,52,.56); font-size: 13px; } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 6px; border: 1px solid rgba(159,172,202,.3); border-radius: 999px; color: #aeb9d4; font-size: 9px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
@@ -2261,5 +2307,6 @@ onBeforeUnmount(() => {
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
 @media (max-width:660px) { .order-popup-toggle { width: 42px; height: 42px; } .seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }
+@media (max-width:660px) { .reviews-modal-backdrop { align-items:stretch; padding:0; } .reviews-modal { max-height:100vh; padding:16px; border:0; border-radius:0; } }
 @media (prefers-reduced-motion:reduce) { .order-card-live-move,.order-card-live-enter-active,.order-card-live-enter-active::after,.order-card-live-leave-active { animation: none; transition: none; } }
 </style>

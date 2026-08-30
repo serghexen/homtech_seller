@@ -5,6 +5,9 @@ import yandexMarketLogo from '../assets/yandex-market-logo.png'
 
 const props = defineProps({
   connections: { type: Array, default: () => [] },
+  connectionId: { type: Number, default: null },
+  connectionName: { type: String, default: '' },
+  dialog: { type: Boolean, default: false },
 })
 const emit = defineEmits(['pending-change'])
 
@@ -14,7 +17,7 @@ const pendingTotal = ref(0)
 const state = ref('pending')
 const page = ref(1)
 const pageSize = 20
-const selectedConnectionId = ref(null)
+const selectedConnectionId = ref(props.connectionId)
 const loading = ref(false)
 const error = ref('')
 const sendingReviewId = ref(0)
@@ -23,6 +26,11 @@ let refreshTimer = null
 let requestSequence = 0
 
 const yandexConnections = computed(() => props.connections.filter((item) => item.provider_code === 'yandex_market'))
+const connectionScoped = computed(() => Number.isInteger(props.connectionId) && props.connectionId > 0)
+const selectedStoreName = computed(() => props.connectionName
+  || yandexConnections.value.find((item) => item.id === selectedConnectionId.value)?.display_name
+  || items.value[0]?.store_name
+  || 'магазина')
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const hasActiveJobs = computed(() => items.value.some((item) => ['queued', 'preparing', 'sending'].includes(item.reply?.state)))
 
@@ -141,12 +149,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="reviews-view" aria-labelledby="reviews-title">
+  <section class="reviews-view" :class="{ 'reviews-view--dialog': dialog }" aria-labelledby="reviews-title">
     <header class="reviews-hero">
       <div>
         <p class="reviews-kicker">ГОЛОС ПОКУПАТЕЛЯ</p>
-        <h1 id="reviews-title">Отзывы</h1>
-        <p>Читайте опубликованные отзывы и отвечайте покупателям от имени магазина.</p>
+        <h1 id="reviews-title">Отзывы <span v-if="connectionScoped">· {{ selectedStoreName }}</span></h1>
+        <p>Читайте опубликованные отзывы и отвечайте покупателям от имени выбранного магазина.</p>
       </div>
       <div class="reviews-hero__counter" aria-label="Отзывы, требующие ответа">
         <span>ТРЕБУЮТ ОТВЕТА</span>
@@ -161,7 +169,7 @@ onBeforeUnmount(() => {
         </button>
         <button type="button" :class="{ active: state === 'all' }" @click="selectState('all')">Все сохранённые</button>
       </div>
-      <div class="reviews-stores" aria-label="Фильтр по магазину">
+      <div v-if="!connectionScoped" class="reviews-stores" aria-label="Фильтр по магазину">
         <button type="button" :class="{ active: selectedConnectionId === null }" @click="selectConnection(null)">Все магазины</button>
         <button
           v-for="connection in yandexConnections"
@@ -262,9 +270,13 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .reviews-view { display:grid; gap:20px; margin-top:42px; color:#eef3ff; }
+.reviews-view--dialog { margin-top:0; }
 .reviews-hero { position:relative; display:flex; align-items:end; justify-content:space-between; gap:28px; padding:28px 30px; overflow:hidden; border:1px solid rgba(135,158,214,.22); border-radius:26px; background:linear-gradient(125deg,rgba(16,27,60,.92),rgba(29,37,67,.82)); box-shadow:inset 0 1px rgba(255,255,255,.035); }
 .reviews-hero::after { position:absolute; right:-80px; bottom:-130px; width:320px; height:320px; border:1px solid rgba(255,205,82,.12); border-radius:50%; content:''; box-shadow:0 0 90px rgba(255,205,82,.04); }
 .reviews-hero h1 { margin:3px 0 7px; font-size:clamp(42px,5vw,72px); line-height:.96; letter-spacing:-.065em; }
+.reviews-hero h1 span { color:#ffd269; font-size:.38em; letter-spacing:-.025em; white-space:nowrap; }
+.reviews-view--dialog .reviews-hero { padding-right:78px; }
+.reviews-view--dialog .reviews-hero h1 { font-size:clamp(34px,4vw,58px); }
 .reviews-hero p { margin:0; color:#aebbd5; line-height:1.55; }
 .reviews-kicker { color:#f5c85d !important; font-size:10px; font-weight:900; letter-spacing:.17em; }
 .reviews-hero__counter { position:relative; z-index:1; display:grid; min-width:176px; gap:2px; padding-left:22px; border-left:1px solid rgba(255,210,94,.28); text-align:right; }
@@ -296,5 +308,5 @@ onBeforeUnmount(() => {
 .review-compose { display:grid; gap:9px; margin-top:18px; padding-top:17px; border-top:1px solid rgba(155,175,220,.17); }.review-compose label { color:#c8d2e7; font-size:10px; font-weight:900; letter-spacing:.09em; text-transform:uppercase; }.review-compose textarea { width:100%; box-sizing:border-box; resize:vertical; padding:14px 15px; border:1px solid rgba(136,158,212,.3); border-radius:15px; outline:none; color:#edf3ff; background:rgba(5,11,28,.58); font:inherit; line-height:1.5; }.review-compose textarea:focus { border-color:rgba(79,121,255,.72); box-shadow:0 0 0 3px rgba(71,111,245,.12); }.review-compose footer { display:flex; align-items:center; justify-content:space-between; gap:14px; }.review-compose footer span { color:#7f8da8; font-size:10px; }.review-compose button { min-height:43px; padding:0 17px; border:1px solid rgba(74,116,255,.78); border-radius:12px; color:#fff; background:linear-gradient(135deg,#2253e5,#496fff); font-weight:850; }.review-compose button:disabled { cursor:not-allowed; opacity:.45; }.review-compose-disabled { margin:17px 0 0; padding:12px 14px; border:1px dashed rgba(144,160,204,.22); border-radius:13px; color:#8f9bb5; font-size:12px; }
 .reviews-pagination { display:flex; align-items:center; justify-content:center; gap:15px; padding:6px; color:#9eabc4; }.reviews-pagination button { min-height:42px; padding:0 14px; border:1px solid rgba(149,164,203,.25); border-radius:12px; color:#dce5f9; background:rgba(31,40,70,.72); font-weight:750; }.reviews-pagination button:disabled { opacity:.4; }
 @media (max-width:800px) { .reviews-toolbar,.reviews-hero { align-items:stretch; flex-direction:column; }.reviews-hero__counter { width:fit-content; padding:12px 0 0; border-top:1px solid rgba(255,210,94,.22); border-left:0; text-align:left; }.reviews-stores { max-width:100%; }.review-card { grid-template-columns:1fr; }.review-card__rail { align-items:center; flex-direction:row; padding:13px 16px; border-right:0; border-bottom:1px solid rgba(149,168,213,.16); }.review-state { margin:0 0 0 auto; }.review-card__head { flex-direction:column; gap:9px; }.review-card__byline { text-align:left; }.review-copy > div { grid-template-columns:1fr; gap:4px; } }
-@media (max-width:520px) { .reviews-view { margin-top:28px; }.reviews-hero { padding:22px 20px; }.reviews-toolbar { align-items:stretch; }.reviews-tabs { display:grid; grid-template-columns:1fr 1fr; }.reviews-tabs button { padding:0 8px; }.review-card__content { padding:20px 17px; }.review-compose footer { align-items:stretch; flex-direction:column; }.review-compose button { width:100%; } }
+@media (max-width:520px) { .reviews-view { margin-top:28px; }.reviews-view--dialog { margin-top:0; }.reviews-hero { padding:22px 20px; }.reviews-view--dialog .reviews-hero { padding:22px 58px 22px 20px; }.reviews-hero h1 span { display:block; margin-top:8px; font-size:.43em; white-space:normal; }.reviews-toolbar { align-items:stretch; }.reviews-tabs { display:grid; grid-template-columns:1fr 1fr; }.reviews-tabs button { padding:0 8px; }.review-card__content { padding:20px 17px; }.review-compose footer { align-items:stretch; flex-direction:column; }.review-compose button { width:100%; } }
 </style>
