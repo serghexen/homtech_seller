@@ -9,6 +9,7 @@ import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentAction from './components/OrderFulfillmentAction.vue'
 import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
+import ReviewsView from './components/ReviewsView.vue'
 import StoreLaunchModal from './components/StoreLaunchModal.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
@@ -170,6 +171,10 @@ const catalogEmptyMessage = computed(() => catalogEmptyStateMessage({
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
 const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
 const canManageSupplier = computed(() => workspaceAccess.value?.capabilities?.includes('supplier_mapping.manage') === true)
+const pendingReviewsCount = computed(() => dashboardItems.value.reduce(
+  (total, item) => total + (item.provider_code === 'yandex_market' ? Number(item.pending_reviews || 0) : 0),
+  0,
+))
 
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
@@ -1696,6 +1701,15 @@ onBeforeUnmount(() => {
         >
           <span>Заказы</span><small v-if="unreadOrdersCount" class="seller-nav__badge">{{ unreadOrdersCount > 99 ? '99+' : unreadOrdersCount }}</small>
         </button>
+        <button
+          class="seller-nav__item"
+          :class="{ 'seller-nav__item--active': activeSection === 'reviews' }"
+          type="button"
+          :aria-current="activeSection === 'reviews' ? 'page' : undefined"
+          @click="changeSection('reviews')"
+        >
+          <span>Отзывы</span><small v-if="pendingReviewsCount" class="seller-nav__badge seller-nav__badge--review">{{ pendingReviewsCount > 99 ? '99+' : pendingReviewsCount }}</small>
+        </button>
       </nav>
       <div v-if="user" class="app-account">
         <div
@@ -1822,6 +1836,8 @@ onBeforeUnmount(() => {
           </footer>
         </article>
       </div>
+
+      <ReviewsView v-if="activeSection === 'reviews'" :connections="connections" />
 
       <div v-if="activeSection === 'stores'" class="dashboard-heading">
         <div>
@@ -2203,6 +2219,7 @@ onBeforeUnmount(() => {
 .session-loader { position: relative; z-index: 1; display: grid; width: max-content; max-width: 100%; place-items: center; margin: 18vh auto 0; padding: 22px 28px 20px; border: 1px solid rgba(144,160,204,.25); border-radius: 22px; background: linear-gradient(140deg,rgba(22,33,62,.96),rgba(10,15,34,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
 .seller-dashboard { position: relative; z-index: 1; width: min(100%,1760px); margin: 0 auto; } .seller-nav { display: flex; width: max-content; max-width: 100%; gap: 7px; padding: 6px; border: 1px solid rgba(149,164,203,.24); border-radius: 18px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025); } .seller-nav__item { display: inline-flex; min-height: 46px; align-items: center; justify-content: center; gap: 7px; padding: 0 18px; font-size: 14px; line-height: 1; transition: color .18s,border-color .18s,background .18s,transform .18s; } .seller-nav__item:hover:not(.seller-nav__item--active) { color: #eef3ff; border-color: rgba(112,140,222,.5); background: rgba(38,50,86,.88); transform: translateY(-1px); } .seller-nav__item--active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); box-shadow: 0 8px 22px rgba(20,62,195,.2); }
 .seller-nav__badge { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 6px; border-radius: 999px; color: #072136 !important; background: #58e5bd; font-size: 10px; line-height: 1; font-weight: 900; }
+.seller-nav__badge--review { color:#332204 !important; background:#ffd260; }
 .order-toast-stack { position: fixed; z-index: 80; top: 118px; right: clamp(18px,3vw,48px); display: grid; width: min(390px,calc(100vw - 32px)); gap: 10px; pointer-events: none; } .order-toast { position: relative; display: grid; grid-template-columns: 48px minmax(0,1fr) 28px; align-items: center; gap: 12px; padding: 14px; overflow: hidden; border: 1px solid rgba(77,225,190,.46); border-radius: 18px; color: #eef6ff; background: linear-gradient(145deg,rgba(15,42,62,.98),rgba(10,19,42,.99)); box-shadow: 0 18px 55px rgba(2,9,27,.48),inset 0 1px rgba(255,255,255,.04); cursor: pointer; pointer-events: auto; } .order-toast::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: #54e3bd; box-shadow: 0 0 20px rgba(84,227,189,.6); } .order-toast__mark { display: grid; width: 48px; height: 48px; place-items: center; overflow: hidden; border: 1px solid rgba(111,145,232,.34); border-radius: 14px; color: #67ecc8; background: rgba(22,43,83,.84); font-size: 13px; font-weight: 900; } .order-toast__mark img { width: 34px; height: 34px; object-fit: contain; } .order-toast__copy { min-width: 0; } .order-toast__copy > span { color: #63dfbf; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .order-toast__copy strong { display: block; overflow: hidden; margin-top: 3px; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; } .order-toast__copy p { overflow: hidden; margin: 4px 0 0; color: #aebbd5; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; } .order-toast > button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 9px; color: #8997b5; background: rgba(105,124,172,.1); font-size: 19px; } .order-toast > button:hover { color: #fff; background: rgba(105,124,172,.22); } .order-toast-enter-active,.order-toast-leave-active { transition: opacity .22s ease,transform .22s ease; } .order-toast-enter-from,.order-toast-leave-to { opacity: 0; transform: translateX(22px) scale(.98); } .order-toast-move { transition: transform .22s ease; }
 .sync-activity { position: relative; display: grid; grid-template-columns: 64px minmax(0,1fr) auto; align-items: center; gap: 15px; margin-top: 18px; padding: 11px 15px 11px 12px; overflow: hidden; border: 1px solid rgba(92,126,226,.34); border-radius: 20px; background: linear-gradient(115deg,rgba(21,36,77,.92),rgba(13,21,46,.92)); box-shadow: 0 18px 45px rgba(4,10,29,.2),inset 0 1px rgba(255,255,255,.025); } .sync-activity::after { content: ''; position: absolute; right: 13%; bottom: -90px; width: 210px; aspect-ratio: 1; border: 1px solid rgba(96,128,222,.12); border-radius: 50%; pointer-events: none; } .sync-activity--succeeded { border-color: rgba(80,230,193,.36); background: linear-gradient(115deg,rgba(18,53,62,.82),rgba(13,25,47,.93)); } .sync-activity--failed { border-color: rgba(255,150,155,.4); background: linear-gradient(115deg,rgba(67,31,48,.76),rgba(19,23,48,.94)); } .sync-activity__visual { position: relative; z-index: 1; display: grid; width: 64px; height: 64px; place-items: center; border-radius: 17px; background: rgba(8,15,34,.48); } .sync-activity__result { color: var(--success); border: 1px solid rgba(80,230,193,.26); background: rgba(80,230,193,.08); } .sync-activity--failed .sync-activity__result { color: #ffaaa8; border-color: rgba(255,150,155,.28); background: rgba(255,150,155,.08); } .sync-activity__result svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; } .sync-activity__copy { position: relative; z-index: 1; min-width: 0; } .sync-activity__copy > span { display: block; margin-bottom: 3px; color: #7894ff; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .sync-activity--succeeded .sync-activity__copy > span { color: #58dcb8; } .sync-activity--failed .sync-activity__copy > span { color: #ff9fa4; } .sync-activity__copy strong { display: block; color: #f2f5ff; font-size: 15px; } .sync-activity__copy p { overflow: hidden; margin: 3px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; } .sync-activity__live { position: relative; z-index: 1; padding: 7px 10px; border: 1px solid rgba(115,144,235,.24); border-radius: 999px; color: #b8c5e3; background: rgba(26,39,76,.52); font-size: 10px; font-weight: 800; white-space: nowrap; } .sync-activity__close { position: relative; z-index: 1; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid rgba(149,164,203,.27); border-radius: 11px; color: #c3cde3; background: rgba(21,31,58,.62); font-size: 23px; line-height: 1; } .sync-activity + .dashboard-heading,.sync-activity + .snapshot-view { margin-top: 28px; } .sync-activity-enter-active,.sync-activity-leave-active { transition: opacity .18s ease,transform .18s ease; } .sync-activity-enter-from,.sync-activity-leave-to { opacity: 0; transform: translateY(-6px); }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 46px 0 27px; } .dashboard-heading h1, .connection-modal h1 { margin: 8px 0 10px; font-size: clamp(35px,4vw,52px); letter-spacing: -.065em; } .dashboard-heading p:not(.kicker) { max-width: 630px; margin: 0; color: #aeb9d4; line-height: 1.55; } .kicker { margin: 0; color: #7290ff; font-size: 12px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }

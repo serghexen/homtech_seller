@@ -9,6 +9,18 @@ from scripts.run_migrations import split_sql_statements
 
 
 class MigrationFilesTests(unittest.TestCase):
+    def test_yandex_reviews_are_workspace_scoped_and_replies_start_disabled(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260830_02_yandex_reviews.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("review_reply_enabled boolean NOT NULL DEFAULT false", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.marketplace_reviews", joined)
+        self.assertIn("workspace_id bigint NOT NULL", joined)
+        self.assertIn("FOREIGN KEY (review_id, workspace_id, connection_id)", joined)
+        self.assertIn("'submitted', 'unknown', 'failed'", joined)
+        self.assertIn("WHERE state IN ('preparing', 'sending')", joined)
+
     def test_marketplace_dashboard_keeps_orders_unique_and_snapshots_workspace_scoped(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260830_01_marketplace_dashboard.sql"

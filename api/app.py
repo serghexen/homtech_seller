@@ -18,13 +18,14 @@ from domains.marketplace_dashboard_api import mount_marketplace_dashboard_routes
 from domains.marketplace_key_pools_api import mount_marketplace_key_pool_routes
 from domains.marketplace_key_reveals_api import mount_marketplace_key_reveal_routes
 from domains.marketplace_read_api import mount_marketplace_read_routes
+from domains.marketplace_reviews_api import mount_marketplace_review_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 from domains.supplier_hub_api import mount_supplier_hub_routes
 from domains.workspace_entitlements import WorkspaceAccess, read_workspace_access
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.80")
+app = FastAPI(title="HomTech Seller API", version="0.0.81")
 
 
 def cors_origins() -> list[str]:
@@ -332,6 +333,15 @@ mount_marketplace_read_routes(
 
 # Главная читает локальные суммы заказов и фоновые read-only снимки обращений покупателей.
 mount_marketplace_dashboard_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+# Отзывы читаются из локального снимка, а ручные ответы только ставятся в долговечный outbox.
+mount_marketplace_review_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

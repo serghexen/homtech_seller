@@ -114,6 +114,108 @@ def review_order_id(review: dict[str, Any]) -> str:
     return str(identifiers.get("orderId") or identifiers.get("order_id") or "").strip()
 
 
+def review_feedback_id(review: dict[str, Any]) -> int | None:
+    value = review.get("feedbackId") or review.get("feedback_id") or review.get("id")
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _integer(value: Any, *, minimum: int = 0, maximum: int | None = None) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < minimum or (maximum is not None and parsed > maximum):
+        return None
+    return parsed
+
+
+def save_pending_reviews(
+    connection,
+    *,
+    workspace_id: int,
+    connection_id: int,
+    business_id: str,
+    reviews: list[dict[str, Any]],
+) -> int:
+    """Атомарно заменяет локальный набор отзывов, требующих реакции конкретного магазина."""
+
+    persisted = 0
+    with connection.cursor() as cursor:
+        # Этот шаг выполняется только после полного успешного ответа Маркета. Если дальнейший
+        # upsert сломается, транзакция откатит и снятие need_reaction.
+        cursor.execute(
+            """
+            UPDATE seller.marketplace_reviews
+            SET need_reaction=false, updated_at=now()
+            WHERE workspace_id=%s AND connection_id=%s AND need_reaction=true
+            """,
+            (workspace_id, connection_id),
+        )
+        for review in reviews:
+            feedback_id = review_feedback_id(review)
+            if feedback_id is None:
+                continue
+            identifiers = review.get("identifiers") if isinstance(review.get("identifiers"), dict) else {}
+            description = review.get("description") if isinstance(review.get("description"), dict) else {}
+            statistics = review.get("statistics") if isinstance(review.get("statistics"), dict) else {}
+            media = review.get("media") if isinstance(review.get("media"), dict) else {}
+            cursor.execute(
+                """
+                INSERT INTO seller.marketplace_reviews(
+                  workspace_id, connection_id, business_id, feedback_id,
+                  external_order_id, offer_id, author, provider_created_at,
+                  need_reaction, rating, comments_count, recommended, paid_amount,
+                  advantages, disadvantages, comment_text, media_json, raw_payload,
+                  last_seen_at, updated_at
+                ) VALUES (
+                  %s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,now(),now()
+                )
+                ON CONFLICT (workspace_id, business_id, feedback_id) DO UPDATE SET
+                  connection_id=EXCLUDED.connection_id,
+                  external_order_id=EXCLUDED.external_order_id,
+                  offer_id=EXCLUDED.offer_id,
+                  author=EXCLUDED.author,
+                  provider_created_at=EXCLUDED.provider_created_at,
+                  need_reaction=true,
+                  rating=EXCLUDED.rating,
+                  comments_count=EXCLUDED.comments_count,
+                  recommended=EXCLUDED.recommended,
+                  paid_amount=EXCLUDED.paid_amount,
+                  advantages=EXCLUDED.advantages,
+                  disadvantages=EXCLUDED.disadvantages,
+                  comment_text=EXCLUDED.comment_text,
+                  media_json=EXCLUDED.media_json,
+                  raw_payload=EXCLUDED.raw_payload,
+                  last_seen_at=now(), updated_at=now()
+                """,
+                (
+                    workspace_id,
+                    connection_id,
+                    business_id,
+                    feedback_id,
+                    str(identifiers.get("orderId") or "").strip(),
+                    str(identifiers.get("offerId") or "").strip(),
+                    str(review.get("author") or "").strip(),
+                    review.get("createdAt"),
+                    _integer(statistics.get("rating"), minimum=1, maximum=5),
+                    _integer(statistics.get("commentsCount"), minimum=0) or 0,
+                    statistics.get("recommended") if isinstance(statistics.get("recommended"), bool) else None,
+                    statistics.get("paidAmount"),
+                    str(description.get("advantages") or "").strip(),
+                    str(description.get("disadvantages") or "").strip(),
+                    str(description.get("comment") or "").strip(),
+                    json.dumps(media, ensure_ascii=False),
+                    json.dumps(review, ensure_ascii=False),
+                ),
+            )
+            persisted += 1
+    return persisted
+
+
 def chat_campaign_id(chat: dict[str, Any]) -> str:
     context = chat.get("context") if isinstance(chat.get("context"), dict) else {}
     return str(context.get("campaignId") or context.get("campaign_id") or "").strip()
@@ -160,16 +262,25 @@ def sync_dashboard_connection(connection, connection_row: tuple[Any, ...]) -> in
 
     reviews = fetch_yandex_pending_reviews(business_id=int(business_id), token=str(token))
     chats = fetch_yandex_pending_chats(business_id=int(business_id), token=str(token))
-    matched_reviews = sum(
-        belongs_to_connection(review_order_id(review), order_ids, only_connection=only_connection)
-        for review in reviews
-    )
+    matched_review_rows = [
+        review for review in reviews
+        if belongs_to_connection(review_order_id(review), order_ids, only_connection=only_connection)
+    ]
+    matched_reviews = len(matched_review_rows)
     expected_campaigns = {str(campaign_id)}
     matched_chats = sum(
         belongs_to_connection(chat_campaign_id(chat), expected_campaigns, only_connection=only_connection)
         for chat in chats
     )
     unassigned_reviews = max(0, len(reviews) - matched_reviews)
+
+    save_pending_reviews(
+        connection,
+        workspace_id=workspace_id,
+        connection_id=int(connection_id),
+        business_id=str(business_id),
+        reviews=matched_review_rows,
+    )
 
     with connection.cursor() as cursor:
         cursor.execute(

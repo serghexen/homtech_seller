@@ -22,6 +22,7 @@ from domains.yandex_market_webhook_processor import build_yandex_market_webhook_
 from domains.yandex_market_webhooks_api import webhook_processing_enabled
 from domains.yandex_market_outbound import build_yandex_outbound_processor
 from domains.yandex_market_stock_outbound import build_yandex_stock_outbound_processor
+from domains.yandex_review_replies import build_yandex_review_reply_processor
 
 
 SYNC_LOCK_NAMESPACE = 20_260_824
@@ -58,6 +59,10 @@ def webhook_batch_size() -> int:
 
 def outbound_batch_size() -> int:
     return max(1, min(int(os.getenv("YANDEX_MARKET_OUTBOUND_BATCH_SIZE", "5")), 50))
+
+
+def review_reply_batch_size() -> int:
+    return max(1, min(int(os.getenv("YANDEX_MARKET_REVIEW_REPLY_BATCH_SIZE", "5")), 50))
 
 
 def fulfillment_batch_size() -> int:
@@ -387,6 +392,7 @@ def run_worker() -> int:
     stock_outbound = build_yandex_stock_outbound_processor(database_url=database_url, psycopg=psycopg)
     ozon_stock_outbound = build_ozon_stock_outbound_processor(database_url=database_url, psycopg=psycopg)
     fulfillment = build_supplier_fulfillment_processor(database_url=database_url, psycopg=psycopg)
+    review_replies = build_yandex_review_reply_processor(database_url=database_url, psycopg=psycopg)
     print("Seller worker started", flush=True)
     while not stopping:
         try:
@@ -396,6 +402,16 @@ def run_worker() -> int:
             processed_fulfillments = fulfillment.process_pending(fulfillment_batch_size())
             if processed_fulfillments:
                 print(f"Processed fulfillment resolutions: {processed_fulfillments}", flush=True)
+            requeued_review_replies, unknown_review_replies = review_replies.recover_stale()
+            if requeued_review_replies or unknown_review_replies:
+                print(
+                    "Recovered review reply jobs: "
+                    f"requeued={requeued_review_replies}, unknown={unknown_review_replies}",
+                    flush=True,
+                )
+            processed_review_replies = review_replies.process_pending_jobs(review_reply_batch_size())
+            if processed_review_replies:
+                print(f"Processed Yandex review replies: {processed_review_replies}", flush=True)
             requeued_outbound, unknown_outbound = outbound.recover_stale()
             if requeued_outbound or unknown_outbound:
                 print(
@@ -439,7 +455,8 @@ def run_worker() -> int:
                 job = claim_next_job(lock_connection)
                 if not job:
                     if not any((
-                        processed_fulfillments, processed_webhooks, processed_outbound, processed_stock,
+                        processed_fulfillments, processed_review_replies, processed_webhooks,
+                        processed_outbound, processed_stock,
                         processed_ozon_outbound, processed_ozon_stock, scheduled_orders, scheduled_dashboard,
                     )):
                         time.sleep(poll_seconds())
