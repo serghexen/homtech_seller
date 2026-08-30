@@ -1820,8 +1820,8 @@ onBeforeUnmount(() => {
             <span v-if="item.status === 'disabled'" class="store-dashboard-card__state">Отключён</span>
           </header>
           <div class="store-dashboard-card__sales">
-            <div><span>Продаж за день</span><strong>{{ dashboardMoney(item, item.sales_today) }}</strong></div>
             <div><span>Продаж за месяц</span><strong>{{ dashboardMoney(item, item.sales_month) }}</strong></div>
+            <div><span>Продаж за день</span><strong>{{ dashboardMoney(item, item.sales_today) }}</strong></div>
           </div>
           <div class="store-dashboard-card__attention">
             <div class="store-dashboard-card__attention-action">
