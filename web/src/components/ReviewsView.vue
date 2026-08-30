@@ -244,7 +244,6 @@ onBeforeUnmount(() => {
               v-model="drafts[review.id]"
               maxlength="4096"
               rows="3"
-              placeholder="Напишите покупателю человеческий, конкретный ответ…"
             ></textarea>
             <footer>
               <span>Без контактов магазина и внешних ссылок · {{ String(drafts[review.id] || '').length }}/4096</span>
