@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from domains.marketplace_sync_service import execute_sync_job, record_connection_error
 from domains.marketplace_dashboard_service import dashboard_insights_enabled
 from domains.ozon_outbound import build_ozon_outbound_processor
+from domains.ozon_review_replies import build_ozon_review_reply_processor
 from domains.ozon_stock_outbound import build_ozon_stock_outbound_processor
 from domains.supplier_fulfillment import build_supplier_fulfillment_processor
 from domains.yandex_market_webhook_processor import build_yandex_market_webhook_processor
@@ -95,7 +96,7 @@ def stable_dashboard_jitter_seconds(connection_id: int) -> int:
 
 
 def enqueue_due_dashboard_jobs(connection, limit: int = 20) -> int:
-    """Ставит read-only снимки Яндекса в общую очередь без отдельного polling-процесса."""
+    """Ставит read-only снимки маркетплейсов в общую очередь без отдельных polling-процессов."""
 
     if not dashboard_insights_enabled():
         return 0
@@ -106,7 +107,8 @@ def enqueue_due_dashboard_jobs(connection, limit: int = 20) -> int:
             FROM seller.marketplace_connections AS marketplace
             LEFT JOIN seller.marketplace_dashboard_snapshots AS snapshot
               ON snapshot.connection_id=marketplace.id
-            WHERE marketplace.status='active' AND marketplace.provider_code='yandex_market'
+            WHERE marketplace.status='active'
+              AND marketplace.provider_code IN ('yandex_market', 'ozon')
               AND COALESCE(snapshot.next_refresh_at, now()) <= now()
             ORDER BY COALESCE(snapshot.next_refresh_at, marketplace.created_at), marketplace.id
             FOR UPDATE OF marketplace SKIP LOCKED
@@ -393,6 +395,7 @@ def run_worker() -> int:
     ozon_stock_outbound = build_ozon_stock_outbound_processor(database_url=database_url, psycopg=psycopg)
     fulfillment = build_supplier_fulfillment_processor(database_url=database_url, psycopg=psycopg)
     review_replies = build_yandex_review_reply_processor(database_url=database_url, psycopg=psycopg)
+    ozon_review_replies = build_ozon_review_reply_processor(database_url=database_url, psycopg=psycopg)
     print("Seller worker started", flush=True)
     while not stopping:
         try:
@@ -412,6 +415,16 @@ def run_worker() -> int:
             processed_review_replies = review_replies.process_pending_jobs(review_reply_batch_size())
             if processed_review_replies:
                 print(f"Processed Yandex review replies: {processed_review_replies}", flush=True)
+            requeued_ozon_reviews, unknown_ozon_reviews = ozon_review_replies.recover_stale()
+            if requeued_ozon_reviews or unknown_ozon_reviews:
+                print(
+                    "Recovered Ozon review reply jobs: "
+                    f"requeued={requeued_ozon_reviews}, unknown={unknown_ozon_reviews}",
+                    flush=True,
+                )
+            processed_ozon_review_replies = ozon_review_replies.process_pending_jobs(review_reply_batch_size())
+            if processed_ozon_review_replies:
+                print(f"Processed Ozon review replies: {processed_ozon_review_replies}", flush=True)
             requeued_outbound, unknown_outbound = outbound.recover_stale()
             if requeued_outbound or unknown_outbound:
                 print(
@@ -455,7 +468,8 @@ def run_worker() -> int:
                 job = claim_next_job(lock_connection)
                 if not job:
                     if not any((
-                        processed_fulfillments, processed_review_replies, processed_webhooks,
+                        processed_fulfillments, processed_review_replies, processed_ozon_review_replies,
+                        processed_webhooks,
                         processed_outbound, processed_stock,
                         processed_ozon_outbound, processed_ozon_stock, scheduled_orders, scheduled_dashboard,
                     )):

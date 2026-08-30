@@ -123,17 +123,16 @@ def mount_marketplace_dashboard_routes(
         remaining_days = subscription_days(valid_until)
         items: list[MarketplaceDashboardItemOut] = []
         for row in rows:
-            is_yandex = str(row[1]) == "yandex_market"
-            insights_ready = is_yandex and row[9] is not None
+            insights_ready = row[9] is not None
             items.append(
                 MarketplaceDashboardItemOut(
                     connection_id=int(row[0]),
                     provider_code=str(row[1]),
                     store_name=str(row[2]),
                     status=str(row[3]),
-                    sales_today=money_text(row[4]) if is_yandex else None,
-                    sales_month=money_text(row[5]) if is_yandex else None,
-                    currency_code=str(row[6] or "RUR") if is_yandex else "",
+                    sales_today=money_text(row[4]),
+                    sales_month=money_text(row[5]),
+                    currency_code=str(row[6] or ("RUB" if str(row[1]) == "ozon" else "RUR")),
                     pending_reviews=int(row[7]) if insights_ready else None,
                     pending_chats=int(row[8]) if insights_ready else None,
                     insights_last_successful_sync_at=row[9],

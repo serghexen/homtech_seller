@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from domains.local_auth import AuthenticatedUser
+from domains.ozon_review_replies import ozon_review_reply_enabled
 from domains.yandex_review_replies import review_reply_enabled
 
 
@@ -29,8 +30,10 @@ class MarketplaceReviewReplyOut(BaseModel):
 class MarketplaceReviewOut(BaseModel):
     id: int
     connection_id: int
+    provider_code: str
     store_name: str
-    feedback_id: int
+    external_review_id: str
+    feedback_id: int | None = None
     external_order_id: str = ""
     offer_id: str = ""
     product_title: str = ""
@@ -46,6 +49,8 @@ class MarketplaceReviewOut(BaseModel):
     comment: str = ""
     photos: list[str] = Field(default_factory=list)
     videos: list[str] = Field(default_factory=list)
+    reply_allowed: bool = True
+    reply_disabled_reason: str = ""
     can_reply: bool = False
     reply: MarketplaceReviewReplyOut | None = None
 
@@ -72,6 +77,14 @@ def _media_values(value, key: str) -> list[str]:
     return [str(item) for item in value[key] if str(item or "").strip()]
 
 
+def _provider_reply_enabled(provider_code: str) -> bool:
+    if provider_code == "yandex_market":
+        return review_reply_enabled()
+    if provider_code == "ozon":
+        return ozon_review_reply_enabled()
+    return False
+
+
 def mount_marketplace_review_routes(
     app: FastAPI,
     *,
@@ -96,7 +109,7 @@ def mount_marketplace_review_routes(
     ) -> MarketplaceReviewListOut:
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
-            filters = ["review.workspace_id=%s", "market.provider_code='yandex_market'"]
+            filters = ["review.workspace_id=%s", "market.provider_code IN ('yandex_market','ozon')"]
             params: list[object] = [seller_user.workspace_id]
             if connection_id is not None:
                 filters.append("review.connection_id=%s")
@@ -118,7 +131,11 @@ def mount_marketplace_review_routes(
                 count_row = cursor.fetchone()
                 total = int(count_row[0])
                 # pending_total должен учитывать выбранный магазин, но не активную вкладку.
-                pending_filters = ["review.workspace_id=%s", "market.provider_code='yandex_market'", "review.need_reaction=true"]
+                pending_filters = [
+                    "review.workspace_id=%s",
+                    "market.provider_code IN ('yandex_market','ozon')",
+                    "review.need_reaction=true",
+                ]
                 pending_params: list[object] = [seller_user.workspace_id]
                 if connection_id is not None:
                     pending_filters.append("review.connection_id=%s")
@@ -136,13 +153,14 @@ def mount_marketplace_review_routes(
                 pending_total = int(cursor.fetchone()[0])
                 cursor.execute(
                     f"""
-                    SELECT review.id, review.connection_id, market.display_name,
-                           review.feedback_id, review.external_order_id, review.offer_id,
+                    SELECT review.id, review.connection_id, market.provider_code, market.display_name,
+                           review.external_review_id, review.feedback_id,
+                           review.external_order_id, review.offer_id,
                            COALESCE(product.title, ''), review.author, review.provider_created_at,
                            review.need_reaction, review.rating, review.comments_count,
                            review.recommended, review.paid_amount, review.advantages,
                            review.disadvantages, review.comment_text, review.media_json,
-                           market.status, market.review_reply_enabled,
+                           review.reply_allowed, market.status, market.review_reply_enabled,
                            reply.id, reply.state, reply.response_text,
                            reply.provider_status, reply.last_error, reply.created_at,
                            reply.submitted_at
@@ -153,7 +171,8 @@ def mount_marketplace_review_routes(
                       SELECT item.title
                       FROM seller.catalog_items AS item
                       WHERE item.connection_id=review.connection_id
-                        AND (item.offer_id=review.offer_id OR item.external_product_id=review.offer_id)
+                        AND (item.offer_id=review.offer_id OR item.external_product_id=review.offer_id
+                             OR item.sku=review.offer_id)
                       ORDER BY item.is_present DESC, item.synced_at DESC
                       LIMIT 1
                     ) AS product ON true
@@ -174,43 +193,55 @@ def mount_marketplace_review_routes(
                 )
                 rows = cursor.fetchall()
 
-        global_enabled = review_reply_enabled()
         items: list[MarketplaceReviewOut] = []
         for row in rows:
             reply = None
-            if row[20] is not None:
+            if row[23] is not None:
                 reply = MarketplaceReviewReplyOut(
-                    id=int(row[20]),
-                    state=str(row[21]),
-                    text=str(row[22]),
-                    provider_status=str(row[23] or ""),
-                    last_error=str(row[24] or ""),
-                    created_at=row[25],
-                    submitted_at=row[26],
+                    id=int(row[23]),
+                    state=str(row[24]),
+                    text=str(row[25]),
+                    provider_status=str(row[26] or ""),
+                    last_error=str(row[27] or ""),
+                    created_at=row[28],
+                    submitted_at=row[29],
                 )
             active_reply = reply is not None and reply.state in {"queued", "preparing", "sending", "unknown"}
+            provider_code = str(row[2])
+            reply_allowed = bool(row[20])
             items.append(
                 MarketplaceReviewOut(
                     id=int(row[0]),
                     connection_id=int(row[1]),
-                    store_name=str(row[2]),
-                    feedback_id=int(row[3]),
-                    external_order_id=str(row[4] or ""),
-                    offer_id=str(row[5] or ""),
-                    product_title=str(row[6] or ""),
-                    author=str(row[7] or ""),
-                    created_at=row[8],
-                    need_reaction=bool(row[9]),
-                    rating=int(row[10]) if row[10] is not None else None,
-                    comments_count=int(row[11] or 0),
-                    recommended=row[12] if isinstance(row[12], bool) else None,
-                    paid_amount=_money(row[13]),
-                    advantages=str(row[14] or ""),
-                    disadvantages=str(row[15] or ""),
-                    comment=str(row[16] or ""),
-                    photos=_media_values(row[17], "photos"),
-                    videos=_media_values(row[17], "videos"),
-                    can_reply=bool(global_enabled and row[18] == "active" and row[19] and row[9] and not active_reply),
+                    provider_code=provider_code,
+                    store_name=str(row[3]),
+                    external_review_id=str(row[4]),
+                    feedback_id=int(row[5]) if row[5] is not None else None,
+                    external_order_id=str(row[6] or ""),
+                    offer_id=str(row[7] or ""),
+                    product_title=str(row[8] or ""),
+                    author=str(row[9] or ""),
+                    created_at=row[10],
+                    need_reaction=bool(row[11]),
+                    rating=int(row[12]) if row[12] is not None else None,
+                    comments_count=int(row[13] or 0),
+                    recommended=row[14] if isinstance(row[14], bool) else None,
+                    paid_amount=_money(row[15]),
+                    advantages=str(row[16] or ""),
+                    disadvantages=str(row[17] or ""),
+                    comment=str(row[18] or ""),
+                    photos=_media_values(row[19], "photos"),
+                    videos=_media_values(row[19], "videos"),
+                    reply_allowed=reply_allowed,
+                    reply_disabled_reason=(
+                        "Ozon не принимает ответы на отзывы без текста, фото или видео"
+                        if provider_code == "ozon" and not reply_allowed else ""
+                    ),
+                    can_reply=bool(
+                        _provider_reply_enabled(provider_code)
+                        and row[21] == "active" and row[22] and row[11]
+                        and reply_allowed and not active_reply
+                    ),
                     reply=reply,
                 )
             )
@@ -233,16 +264,14 @@ def mount_marketplace_review_routes(
             raise HTTPException(status_code=400, detail="Напишите текст ответа")
         if len(text) > 4096:
             raise HTTPException(status_code=400, detail="Ответ не должен быть длиннее 4096 символов")
-        if not review_reply_enabled():
-            raise HTTPException(status_code=409, detail="Публикация ответов на отзывы пока выключена")
-
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     SELECT review.connection_id, review.need_reaction,
-                           market.status, market.provider_code, market.review_reply_enabled
+                           market.status, market.provider_code, market.review_reply_enabled,
+                           review.reply_allowed
                     FROM seller.marketplace_reviews AS review
                     JOIN seller.marketplace_connections AS market
                       ON market.id=review.connection_id AND market.workspace_id=review.workspace_id
@@ -254,12 +283,20 @@ def mount_marketplace_review_routes(
                 review_row = cursor.fetchone()
                 if not review_row:
                     raise HTTPException(status_code=404, detail="Отзыв не найден")
-                if str(review_row[2]) != "active" or str(review_row[3]) != "yandex_market":
+                provider_code = str(review_row[3])
+                if str(review_row[2]) != "active" or provider_code not in {"yandex_market", "ozon"}:
                     raise HTTPException(status_code=409, detail="Магазин недоступен для ответа")
+                if not _provider_reply_enabled(provider_code):
+                    raise HTTPException(status_code=409, detail="Публикация ответов для этого маркетплейса пока выключена")
                 if not bool(review_row[4]):
                     raise HTTPException(status_code=409, detail="Ответы для этого магазина пока выключены")
                 if not bool(review_row[1]):
                     raise HTTPException(status_code=409, detail="Отзыв уже обработан")
+                if not bool(review_row[5]):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Ozon не принимает ответы на отзывы без текста, фото или видео",
+                    )
                 connection_id = int(review_row[0])
                 cursor.execute(
                     """

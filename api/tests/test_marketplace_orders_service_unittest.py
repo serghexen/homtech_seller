@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from domains.marketplace_orders_service import (
     MarketplacePaginationError,
+    _fetch_ozon_fbo_orders,
     _fetch_ozon_orders,
     _fetch_yandex_market_orders,
     fetch_yandex_market_order,
@@ -222,3 +223,27 @@ class MarketplaceOrdersServiceTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["__marketplace_source"], "DIGITAL")
         self.assertEqual(rows[0]["products"][0]["required_qty_for_digital_code"], 1)
+
+    @patch("domains.marketplace_orders_service._request_json")
+    def test_ozon_fbo_v3_uses_cursor_and_does_not_request_financial_data(self, request_json) -> None:
+        request_json.side_effect = [
+            {"postings": [{"posting_number": "1"}], "has_next": True, "cursor": "next"},
+            {"postings": [{"posting_number": "2"}], "has_next": False, "cursor": "done"},
+        ]
+
+        rows = _fetch_ozon_fbo_orders(
+            client_id="client",
+            token="secret",
+            period_from=datetime(2026, 8, 29, tzinfo=timezone.utc),
+            period_to=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual([row["posting_number"] for row in rows], ["1", "2"])
+        first_call = request_json.call_args_list[0]
+        second_call = request_json.call_args_list[1]
+        self.assertTrue(first_call.args[0].endswith("/v3/posting/fbo/list"))
+        self.assertEqual(first_call.kwargs["payload"]["filter"]["status"], [
+            "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled",
+        ])
+        self.assertFalse(first_call.kwargs["payload"]["with"]["financial_data"])
+        self.assertEqual(second_call.kwargs["payload"]["cursor"], "next")

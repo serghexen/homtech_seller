@@ -21,6 +21,19 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("'submitted', 'unknown', 'failed'", joined)
         self.assertIn("WHERE state IN ('preparing', 'sending')", joined)
 
+    def test_ozon_reviews_use_provider_scoped_text_ids(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260830_03_ozon_dashboard_reviews.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("provider_code text NOT NULL DEFAULT 'yandex_market'", joined)
+        self.assertIn("external_review_id text", joined)
+        self.assertIn(
+            "workspace_id, connection_id, provider_code, external_review_id",
+            joined,
+        )
+        self.assertIn("provider_comment_id TYPE text", joined)
+
     def test_marketplace_dashboard_keeps_orders_unique_and_snapshots_workspace_scoped(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260830_01_marketplace_dashboard.sql"

@@ -167,32 +167,43 @@ def _fetch_ozon_digital_orders(
 def _fetch_ozon_fbo_orders(
     *, client_id: str, token: str, period_from: datetime, period_to: datetime,
 ) -> list[dict[str, Any]]:
-    # Читает FBO-заказы услуг заданного периода, которые Ozon возвращает массивом result.
+    # v2 отключается 31.08.2026. v3 использует cursor и возвращает products.price
+    # без необходимости включать финансовый блок.
     rows: list[dict[str, Any]] = []
-    offset = 0
+    cursor = ""
     limit = 100
     headers = {"Client-Id": client_id, "Api-Key": token}
     for _page in range(100):
         payload = _request_json(
-            f"{OZON_SELLER_BASE_URL}/v2/posting/fbo/list",
+            f"{OZON_SELLER_BASE_URL}/v3/posting/fbo/list",
             headers=headers,
             payload={
-                "dir": "DESC",
+                "cursor": cursor,
                 "filter": {
                     "since": _utc_text(period_from),
                     "to": _utc_text(period_to),
-                    "status": "",
+                    "status": [
+                        "awaiting_packaging", "awaiting_deliver", "delivering",
+                        "delivered", "cancelled",
+                    ],
                 },
                 "limit": limit,
-                "offset": offset,
-                "with": {"analytics_data": False, "financial_data": False},
+                "sort_dir": "desc",
+                "with": {
+                    "analytics_data": False,
+                    "financial_data": False,
+                    "legal_info": False,
+                },
             },
         )
-        postings = payload.get("result") if isinstance(payload.get("result"), list) else []
+        postings = payload.get("postings") if isinstance(payload.get("postings"), list) else []
         rows.extend({**item, "__marketplace_source": "FBO"} for item in postings if isinstance(item, dict))
-        if len(postings) < limit:
+        if not payload.get("has_next"):
             break
-        offset += len(postings)
+        next_cursor = str(payload.get("cursor") or "").strip()
+        if not next_cursor or next_cursor == cursor:
+            raise HTTPException(502, "Ozon не продвинул постраничное чтение FBO-заказов")
+        cursor = next_cursor
     else:
         raise HTTPException(502, "Список FBO-заказов Ozon превысил безопасный лимит страниц")
     return rows

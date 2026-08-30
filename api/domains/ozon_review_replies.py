@@ -1,4 +1,4 @@
-"""Долговечная ручная отправка ответов на отзывы без слепых повторов."""
+"""Долговечная ручная отправка ответов на отзывы Ozon без слепых повторов."""
 
 from __future__ import annotations
 
@@ -6,96 +6,98 @@ from dataclasses import dataclass
 import json
 import os
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any, Callable
 from uuid import UUID
 
-from domains.marketplace_connection_verification import YANDEX_MARKET_BASE_URL, _ssl_context
+from domains.marketplace_connection_verification import OZON_SELLER_BASE_URL, _ssl_context
 from domains.marketplace_sync_service import credentials_secret
 
 
 REVIEW_REPLY_LOCK_SECONDS = 120
 
 
-def review_reply_enabled() -> bool:
-    return str(os.getenv("SELLER_YANDEX_REVIEW_REPLY_ENABLED", "false")).strip().lower() in {
+def ozon_review_reply_enabled() -> bool:
+    return str(os.getenv("SELLER_OZON_REVIEW_REPLY_ENABLED", "false")).strip().lower() in {
         "1", "true", "yes",
     }
 
 
-def review_reply_timeout_seconds() -> int:
-    return max(3, min(int(os.getenv("YANDEX_MARKET_REVIEW_REPLY_TIMEOUT_SECONDS", "20")), 60))
+def ozon_review_reply_timeout_seconds() -> int:
+    return max(3, min(int(os.getenv("OZON_REVIEW_REPLY_TIMEOUT_SECONDS", "20")), 60))
 
 
-class YandexReviewReplyError(RuntimeError):
+class OzonReviewReplyError(RuntimeError):
     def __init__(self, message: str, *, definite: bool) -> None:
         super().__init__(message)
         self.definite = definite
 
 
 @dataclass(frozen=True)
-class ReviewReplyPayload:
+class OzonReviewReplyPayload:
     job_id: int
     lock_token: UUID
     review_id: int
-    business_id: int
-    feedback_id: int
+    external_review_id: str
     response_text: str
+    client_id: str
     token: str
 
 
-def send_yandex_review_reply(payload: ReviewReplyPayload) -> dict[str, Any]:
-    body = json.dumps(
-        {"feedbackId": payload.feedback_id, "comment": {"text": payload.response_text}},
-        ensure_ascii=False,
-    ).encode("utf-8")
-    query = urllib.parse.urlencode({"sourceType": "SELLER"})
+def send_ozon_review_reply(payload: OzonReviewReplyPayload) -> dict[str, Any]:
     request = urllib.request.Request(
-        f"{YANDEX_MARKET_BASE_URL}/v2/businesses/{payload.business_id}/goods-feedback/comments/update?{query}",
-        data=body,
+        f"{OZON_SELLER_BASE_URL}/v1/review/comment/create",
+        data=json.dumps(
+            {
+                "review_id": payload.external_review_id,
+                "text": payload.response_text,
+                "mark_review_as_processed": True,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
         method="POST",
-        headers={"Api-Key": payload.token, "Content-Type": "application/json"},
+        headers={
+            "Client-Id": payload.client_id,
+            "Api-Key": payload.token,
+            "Content-Type": "application/json",
+        },
     )
     try:
         with urllib.request.urlopen(
-            request, timeout=review_reply_timeout_seconds(), context=_ssl_context(),
+            request, timeout=ozon_review_reply_timeout_seconds(), context=_ssl_context(),
         ) as response:
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        # Ответ 4xx однозначно означает, что комментарий не принят. После 5xx или
-        # сетевого сбоя результат неизвестен и автоматический повтор запрещён.
-        raise YandexReviewReplyError(
-            f"Яндекс Маркет отклонил ответ: HTTP {exc.code}; {detail[:300]}",
+        raise OzonReviewReplyError(
+            f"Ozon отклонил ответ: HTTP {exc.code}; {detail[:300]}",
             definite=400 <= int(exc.code) < 500,
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        raise YandexReviewReplyError(
-            "Результат публикации ответа в Яндекс Маркете неизвестен",
+        raise OzonReviewReplyError(
+            "Результат публикации ответа в Ozon неизвестен",
             definite=False,
         ) from exc
-    if not isinstance(value, dict) or str(value.get("status") or "OK") != "OK":
-        raise YandexReviewReplyError("Яндекс Маркет не подтвердил публикацию ответа", definite=True)
-    result = value.get("result") if isinstance(value.get("result"), dict) else {}
-    return result
+    if not isinstance(value, dict) or not str(value.get("comment_id") or "").strip():
+        # HTTP 2xx уже мог применить действие, даже если подтверждение неожиданного формата.
+        # Такое задание нельзя разрешать повторить автоматически или из интерфейса.
+        raise OzonReviewReplyError("Ozon не подтвердил публикацию ответа", definite=False)
+    return value
 
 
-class YandexReviewReplyProcessor:
+class OzonReviewReplyProcessor:
     def __init__(
         self,
         *,
         database_url: Callable[[], str],
         psycopg,
-        sender: Callable[[ReviewReplyPayload], dict[str, Any]] = send_yandex_review_reply,
+        sender: Callable[[OzonReviewReplyPayload], dict[str, Any]] = send_ozon_review_reply,
     ) -> None:
         self._database_url = database_url
         self._psycopg = psycopg
         self._sender = sender
 
     def recover_stale(self) -> tuple[int, int]:
-        """До сети задание можно вернуть, после sending — только пометить unknown."""
-
         with self._psycopg.connect(self._database_url()) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -104,7 +106,7 @@ class YandexReviewReplyProcessor:
                     SET state='queued', lock_token=NULL, locked_until=NULL,
                         last_error='Worker перезапущен до публикации ответа', updated_at=now()
                     FROM seller.marketplace_reviews AS review
-                    WHERE review.id=job.review_id AND review.provider_code='yandex_market'
+                    WHERE review.id=job.review_id AND review.provider_code='ozon'
                       AND job.state='preparing' AND job.locked_until < now()
                     """
                 )
@@ -116,7 +118,7 @@ class YandexReviewReplyProcessor:
                         last_error='Результат публикации неизвестен; автоматический повтор запрещён',
                         updated_at=now()
                     FROM seller.marketplace_reviews AS review
-                    WHERE review.id=job.review_id AND review.provider_code='yandex_market'
+                    WHERE review.id=job.review_id AND review.provider_code='ozon'
                       AND job.state='sending' AND job.locked_until < now()
                     """
                 )
@@ -124,7 +126,7 @@ class YandexReviewReplyProcessor:
             return requeued, unknown
 
     def process_pending_jobs(self, limit: int = 5) -> int:
-        if not review_reply_enabled():
+        if not ozon_review_reply_enabled():
             return 0
         processed = 0
         for _index in range(max(1, min(int(limit), 50))):
@@ -134,19 +136,15 @@ class YandexReviewReplyProcessor:
             processed += 1
             try:
                 result = self._sender(payload)
-            except YandexReviewReplyError as exc:
+            except OzonReviewReplyError as exc:
                 self._finish(payload, state="failed" if exc.definite else "unknown", error=str(exc))
             except Exception:
-                self._finish(
-                    payload,
-                    state="unknown",
-                    error="Результат публикации ответа в Яндекс Маркете неизвестен",
-                )
+                self._finish(payload, state="unknown", error="Результат публикации ответа в Ozon неизвестен")
             else:
                 self._finish(payload, state="submitted", result=result)
         return processed
 
-    def _claim_and_prepare(self) -> ReviewReplyPayload | None:
+    def _claim_and_prepare(self) -> OzonReviewReplyPayload | None:
         with self._psycopg.connect(self._database_url()) as connection:
             try:
                 with connection.cursor() as cursor:
@@ -160,7 +158,8 @@ class YandexReviewReplyProcessor:
                          AND review.connection_id=job.connection_id
                         JOIN seller.marketplace_connections AS market ON market.id=job.connection_id
                         WHERE job.state='queued' AND market.status='active'
-                          AND market.provider_code='yandex_market' AND market.review_reply_enabled=true
+                          AND review.provider_code='ozon' AND market.provider_code='ozon'
+                          AND market.review_reply_enabled=true
                           AND NOT EXISTS (
                             SELECT 1 FROM seller.marketplace_review_reply_jobs AS inflight
                             WHERE inflight.connection_id=job.connection_id
@@ -203,9 +202,9 @@ class YandexReviewReplyProcessor:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT review.id, review.business_id, review.feedback_id, review.need_reaction,
-                           job.response_text, market.status, market.provider_code,
-                           market.review_reply_enabled,
+                    SELECT review.id, review.external_review_id, review.need_reaction,
+                           review.reply_allowed, job.response_text, market.status,
+                           market.provider_code, market.review_reply_enabled, market.client_id,
                            pgp_sym_decrypt(market.token_ciphertext, %s)
                     FROM seller.marketplace_review_reply_jobs AS job
                     JOIN seller.marketplace_reviews AS review
@@ -222,14 +221,16 @@ class YandexReviewReplyProcessor:
                 if not row:
                     return None
                 validation_error = ""
-                if not review_reply_enabled() or str(row[5]) != "active" or not bool(row[7]):
+                if not ozon_review_reply_enabled() or str(row[5]) != "active" or not bool(row[7]):
                     validation_error = "Публикация ответов для магазина выключена"
-                elif str(row[6]) != "yandex_market":
-                    validation_error = "Ответы поддерживаются только для Яндекс Маркета"
-                elif not bool(row[3]):
+                elif str(row[6]) != "ozon":
+                    validation_error = "Задание не принадлежит Ozon"
+                elif not bool(row[2]):
                     validation_error = "Отзыв уже обработан"
-                elif not str(row[1] or "").isdigit():
-                    validation_error = "У отзыва не определён кабинет Яндекс Маркета"
+                elif not bool(row[3]):
+                    validation_error = "Ozon не принимает ответы на отзывы без текста, фото или видео"
+                elif not str(row[1] or "").strip() or not str(row[8] or "").strip():
+                    validation_error = "У отзыва или магазина отсутствует внешний идентификатор"
                 if validation_error:
                     self._fail_before_send(connection, job_id, lock_token, validation_error)
                     return None
@@ -241,14 +242,14 @@ class YandexReviewReplyProcessor:
                     """,
                     (job_id, lock_token),
                 )
-            return ReviewReplyPayload(
+            return OzonReviewReplyPayload(
                 job_id=job_id,
                 lock_token=lock_token,
                 review_id=int(row[0]),
-                business_id=int(str(row[1])),
-                feedback_id=int(row[2]),
+                external_review_id=str(row[1]),
                 response_text=str(row[4]),
-                token=str(row[8]),
+                client_id=str(row[8]),
+                token=str(row[9]),
             )
 
     @staticmethod
@@ -266,23 +267,19 @@ class YandexReviewReplyProcessor:
 
     def _finish(
         self,
-        payload: ReviewReplyPayload,
+        payload: OzonReviewReplyPayload,
         *,
         state: str,
         result: dict[str, Any] | None = None,
         error: str = "",
     ) -> None:
         result = result or {}
-        provider_comment_id = result.get("id")
-        provider_status = str(result.get("status") or "")
         with self._psycopg.connect(self._database_url()) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     UPDATE seller.marketplace_review_reply_jobs
-                    SET state=%s,
-                        provider_comment_id=%s,
-                        provider_status=%s,
+                    SET state=%s, provider_comment_id=%s, provider_status=%s,
                         submitted_at=CASE WHEN %s='submitted' THEN now() ELSE submitted_at END,
                         unknown_at=CASE WHEN %s='unknown' THEN now() ELSE unknown_at END,
                         failed_at=CASE WHEN %s='failed' THEN now() ELSE failed_at END,
@@ -291,8 +288,8 @@ class YandexReviewReplyProcessor:
                     """,
                     (
                         state,
-                        str(provider_comment_id) if str(provider_comment_id or "").strip() else None,
-                        provider_status,
+                        str(result.get("comment_id") or "") or None,
+                        "PROCESSED" if state == "submitted" else "",
                         state,
                         state,
                         state,
@@ -312,5 +309,5 @@ class YandexReviewReplyProcessor:
                     )
 
 
-def build_yandex_review_reply_processor(*, database_url, psycopg, sender=send_yandex_review_reply):
-    return YandexReviewReplyProcessor(database_url=database_url, psycopg=psycopg, sender=sender)
+def build_ozon_review_reply_processor(*, database_url, psycopg, sender=send_ozon_review_reply):
+    return OzonReviewReplyProcessor(database_url=database_url, psycopg=psycopg, sender=sender)

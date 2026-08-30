@@ -14,8 +14,11 @@ from domains.marketplace_dashboard_api import (
     subscription_days,
 )
 from domains.marketplace_dashboard_service import (
+    fetch_ozon_pending_reviews,
+    fetch_ozon_unread_buyer_messages,
     fetch_yandex_pending_chats,
     fetch_yandex_pending_reviews,
+    save_ozon_pending_reviews,
     sync_dashboard_connection,
 )
 from domains.marketplace_read_api import normalize_marketplace_order_summary
@@ -43,9 +46,83 @@ class MarketplaceDashboardTests(unittest.TestCase):
         self.assertEqual(summary["sales_amount"], Decimal("1000.00"))
         self.assertEqual(summary["currency_code"], "RUR")
 
-    def test_ozon_amount_is_unavailable_without_financial_data(self) -> None:
-        summary = normalize_marketplace_order_summary("ozon", {"posting_number": "1", "status": "done"})
-        self.assertIsNone(summary["sales_amount"])
+    def test_ozon_amount_uses_product_prices_without_financial_data(self) -> None:
+        summary = normalize_marketplace_order_summary(
+            "ozon",
+            {
+                "posting_number": "1",
+                "status": "delivered",
+                "created_at": "2026-08-29T12:00:00Z",
+                "in_process_at": "2026-08-30T12:00:00Z",
+                "products": [
+                    {"price": "900.50", "currency": "RUB", "quantity": 2},
+                    {"price": {"amount": "99.00", "currency": "RUB"}, "quantity": 1},
+                ],
+            },
+        )
+        self.assertEqual(summary["sales_amount"], Decimal("1900.00"))
+        self.assertEqual(summary["currency_code"], "RUB")
+        self.assertEqual(summary["created_at"], datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc))
+
+    @patch("domains.marketplace_dashboard_service._request_ozon_json")
+    def test_ozon_review_reader_uses_unprocessed_status_and_cursor(self, request_json) -> None:
+        request_json.side_effect = [
+            {"reviews": [{"id": "r-1"}], "has_next": True, "last_id": "next"},
+            {"reviews": [{"id": "r-2"}], "has_next": False, "last_id": "done"},
+        ]
+
+        rows = fetch_ozon_pending_reviews(client_id="client", token="secret")
+
+        self.assertEqual([row["id"] for row in rows], ["r-1", "r-2"])
+        self.assertEqual(request_json.call_args_list[0].kwargs["payload"]["filters"], {"status": "UNPROCESSED"})
+        self.assertEqual(request_json.call_args_list[1].kwargs["payload"]["last_id"], "next")
+
+    @patch("domains.marketplace_dashboard_service._request_ozon_json")
+    def test_ozon_unread_count_excludes_support_and_system_chats(self, request_json) -> None:
+        request_json.return_value = {
+            "chats": [
+                {"chat": {"chat_type": "Buyer_Seller"}, "unread_count": 3},
+                {"chat": {"chat_type": "Buyer_Seller_Select"}, "unread_count": 2},
+                {"chat": {"chat_type": "SELLER_SUPPORT"}, "unread_count": 50},
+            ],
+            "total_unread_count": 55,
+            "has_next": False,
+        }
+
+        unread = fetch_ozon_unread_buyer_messages(client_id="client", token="secret")
+
+        self.assertEqual(unread, 5)
+        self.assertEqual(
+            request_json.call_args.kwargs["payload"]["filter"],
+            {"chat_status": "OPENED", "unread_only": True},
+        )
+
+    def test_ozon_review_snapshot_keeps_uuid_and_blocks_empty_review_reply(self) -> None:
+        cursor = MagicMock()
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        count = save_ozon_pending_reviews(
+            connection,
+            workspace_id=2,
+            connection_id=7,
+            reviews=[{
+                "id": "017c0d1c-66d3-b838-3d29-cf9b95a6ac48",
+                "sku": 148591503,
+                "text": "",
+                "published_at": "2026-08-30T10:00:00Z",
+                "rating": 5,
+                "comments_amount": 0,
+                "photos_amount": 0,
+                "videos_amount": 0,
+            }],
+        )
+
+        self.assertEqual(count, 1)
+        insert = next(call for call in cursor.execute.call_args_list if "INSERT INTO seller.marketplace_reviews" in call.args[0])
+        self.assertIn("provider_code, external_review_id", insert.args[0])
+        self.assertIn("017c0d1c-66d3-b838-3d29-cf9b95a6ac48", insert.args[1])
+        self.assertIn(False, insert.args[1])
 
     @patch("domains.marketplace_dashboard_service._request_json")
     def test_review_reader_uses_need_reaction_and_page_token(self, request_json) -> None:

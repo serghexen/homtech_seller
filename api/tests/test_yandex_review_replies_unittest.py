@@ -85,8 +85,9 @@ class YandexReviewReplyTests(unittest.TestCase):
     def test_processor_never_requeues_sending_jobs(self) -> None:
         source = inspect.getsource(YandexReviewReplyProcessor)
         self.assertIn("state='unknown'", source)
-        self.assertIn("state='sending' AND locked_until < now()", source)
-        self.assertNotIn("SET state='queued'", source.split("WHERE state='sending'")[0][-250:])
+        self.assertIn("job.state='sending' AND job.locked_until < now()", source)
+        sending_recovery = source.split("job.state='sending'", 1)[0][-400:]
+        self.assertNotIn("SET state='queued'", sending_recovery)
 
     def test_pending_review_snapshot_keeps_full_review_content(self) -> None:
         cursor = MagicMock()
@@ -112,7 +113,10 @@ class YandexReviewReplyTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         insert = next(call for call in cursor.execute.call_args_list if "INSERT INTO seller.marketplace_reviews" in call.args[0])
-        self.assertIn("ON CONFLICT (workspace_id, business_id, feedback_id)", insert.args[0])
+        self.assertIn(
+            "ON CONFLICT (workspace_id, connection_id, provider_code, external_review_id)",
+            insert.args[0],
+        )
         self.assertIn("SKU-1", insert.args[1])
 
 

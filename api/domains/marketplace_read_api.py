@@ -592,10 +592,31 @@ def normalize_marketplace_order_summary(provider_code: str, payload: dict[str, A
         order_id = first_text(payload.get("posting_number"), payload.get("order_id"), payload.get("id"))
         provider_status = first_text(payload.get("status"), payload.get("posting_status"))
         provider_substatus = first_text(payload.get("substatus"), payload.get("sub_status"))
-        currency_code = ""
         is_fake = False
-        # Текущие Ozon-запросы намеренно не читают financial_data; нулём это не маскируем.
-        sales_amount = None
+        # Сумма продажи уже присутствует в products.price; financial_data и отдельные
+        # финансовые методы для главной не нужны. Если цена отсутствует, не маскируем её нулём.
+        products = payload.get("products") if isinstance(payload.get("products"), list) else []
+        price_rows: list[tuple[Decimal, int, str]] = []
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            raw_price = product.get("price")
+            if isinstance(raw_price, dict):
+                amount = raw_price.get("amount")
+                currency = first_text(
+                    raw_price.get("currency"), product.get("currency"), product.get("currency_code"),
+                )
+            else:
+                amount = raw_price
+                currency = first_text(product.get("currency"), product.get("currency_code"))
+            if amount is None or not str(amount).strip():
+                continue
+            quantity = max(1, safe_int(
+                product.get("quantity") or product.get("required_qty_for_digital_code"), default=1,
+            ))
+            price_rows.append((safe_decimal(amount), quantity, currency))
+        sales_amount = sum((price * quantity for price, quantity, _currency in price_rows), Decimal("0")) if price_rows else None
+        currency_code = first_text(*[currency for _price, _quantity, currency in price_rows])
     else:
         return None
     if not order_id:
@@ -608,7 +629,7 @@ def normalize_marketplace_order_summary(provider_code: str, payload: dict[str, A
             provider_code=provider_code, status=provider_status, substatus=provider_substatus,
         ),
         "created_at": optional_datetime(
-            payload.get("creationDate") or payload.get("createdAt") or payload.get("in_process_at") or payload.get("created_at")
+            payload.get("creationDate") or payload.get("createdAt") or payload.get("created_at") or payload.get("in_process_at")
         ),
         "updated_at": optional_datetime(
             payload.get("updateDate") or payload.get("updatedAt") or payload.get("statusUpdateDate") or payload.get("updated_at")

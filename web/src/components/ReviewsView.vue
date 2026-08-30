@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { apiRequest } from '../api'
+import ozonLogo from '../assets/ozon-logo.png'
 import yandexMarketLogo from '../assets/yandex-market-logo.png'
 
 const props = defineProps({
@@ -25,10 +26,10 @@ const drafts = reactive({})
 let refreshTimer = null
 let requestSequence = 0
 
-const yandexConnections = computed(() => props.connections.filter((item) => item.provider_code === 'yandex_market'))
+const marketplaceConnections = computed(() => props.connections.filter((item) => ['yandex_market', 'ozon'].includes(item.provider_code)))
 const connectionScoped = computed(() => Number.isInteger(props.connectionId) && props.connectionId > 0)
 const selectedStoreName = computed(() => props.connectionName
-  || yandexConnections.value.find((item) => item.id === selectedConnectionId.value)?.display_name
+  || marketplaceConnections.value.find((item) => item.id === selectedConnectionId.value)?.display_name
   || items.value[0]?.store_name
   || 'магазина')
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
@@ -134,11 +135,19 @@ function reviewDate(value) {
 function replyLabel(reply) {
   if (!reply) return ''
   if (['queued', 'preparing'].includes(reply.state)) return 'Ответ в очереди'
-  if (reply.state === 'sending') return 'Публикуем в Маркете'
+  if (reply.state === 'sending') return 'Публикуем ответ'
   if (reply.state === 'submitted' && reply.provider_status === 'UNMODERATED') return 'Ответ на модерации'
   if (reply.state === 'submitted') return 'Ответ опубликован'
-  if (reply.state === 'unknown') return 'Нужно проверить в кабинете Яндекса'
+  if (reply.state === 'unknown') return 'Нужно проверить в кабинете маркетплейса'
   return 'Ответ не отправлен'
+}
+
+function providerLogo(providerCode) {
+  return providerCode === 'ozon' ? ozonLogo : yandexMarketLogo
+}
+
+function providerName(providerCode) {
+  return providerCode === 'ozon' ? 'Ozon' : 'Яндекс Маркет'
 }
 
 onMounted(loadReviews)
@@ -172,7 +181,7 @@ onBeforeUnmount(() => {
       <div v-if="!connectionScoped" class="reviews-stores" aria-label="Фильтр по магазину">
         <button type="button" :class="{ active: selectedConnectionId === null }" @click="selectConnection(null)">Все магазины</button>
         <button
-          v-for="connection in yandexConnections"
+          v-for="connection in marketplaceConnections"
           :key="connection.id"
           type="button"
           :class="{ active: selectedConnectionId === connection.id }"
@@ -188,13 +197,15 @@ onBeforeUnmount(() => {
     <div v-else-if="!items.length" class="reviews-empty reviews-empty--clear">
       <span aria-hidden="true">✓</span>
       <h2>{{ state === 'pending' ? 'Все отзывы обработаны' : 'Сохранённых отзывов пока нет' }}</h2>
-      <p>{{ state === 'pending' ? 'Новые отзывы появятся здесь после синхронизации с Яндекс Маркетом.' : 'Seller сохранит отзывы, когда Маркет передаст их при следующем обновлении.' }}</p>
+      <p>{{ state === 'pending' ? 'Новые отзывы появятся здесь после синхронизации магазина.' : 'Seller сохранит отзывы при следующем обновлении маркетплейса.' }}</p>
     </div>
 
     <div v-else class="reviews-list">
       <article v-for="review in items" :key="review.id" class="review-card" :class="{ 'review-card--done': !review.need_reaction }">
         <div class="review-card__rail">
-          <div class="review-market"><img :src="yandexMarketLogo" alt="" /></div>
+          <div class="review-market" :class="`review-market--${review.provider_code}`">
+            <img :src="providerLogo(review.provider_code)" :alt="providerName(review.provider_code)" />
+          </div>
           <div class="review-rating" :aria-label="`Оценка ${review.rating || 0} из 5`">
             <span v-for="star in 5" :key="star" :class="{ lit: star <= (review.rating || 0) }">★</span>
           </div>
@@ -207,7 +218,7 @@ onBeforeUnmount(() => {
           <header class="review-card__head">
             <div>
               <p>{{ review.store_name }}</p>
-              <h2>{{ review.product_title || review.offer_id || 'Товар Яндекс Маркета' }}</h2>
+              <h2>{{ review.product_title || review.offer_id || `Товар ${providerName(review.provider_code)}` }}</h2>
             </div>
             <div class="review-card__byline">
               <strong>{{ review.author || 'Покупатель' }}</strong>
@@ -253,7 +264,7 @@ onBeforeUnmount(() => {
             </footer>
           </form>
           <p v-else-if="review.need_reaction && !review.reply" class="review-compose-disabled">
-            Ручные ответы подготовлены, но публикация для этого магазина пока не включена.
+            {{ review.reply_disabled_reason || 'Ручные ответы подготовлены, но публикация для этого магазина пока не включена.' }}
           </p>
         </div>
       </article>
@@ -295,7 +306,7 @@ onBeforeUnmount(() => {
 .review-card { display:grid; grid-template-columns:118px minmax(0,1fr); overflow:hidden; border:1px solid rgba(139,160,210,.24); border-radius:19px; background:linear-gradient(145deg,rgba(25,39,76,.94),rgba(13,22,50,.97)); box-shadow:inset 0 1px rgba(255,255,255,.025); }
 .review-card--done { opacity:.78; }
 .review-card__rail { display:flex; align-items:center; flex-direction:column; gap:10px; padding:18px 12px; border-right:1px solid rgba(149,168,213,.16); background:linear-gradient(180deg,rgba(255,205,82,.055),transparent 62%); }
-.review-market { display:grid; width:40px; height:40px; place-items:center; border:1px solid rgba(255,208,74,.27); border-radius:12px; background:rgba(255,255,255,.92); }.review-market img { width:29px; }
+.review-market { display:grid; width:40px; height:40px; place-items:center; overflow:hidden; border:1px solid rgba(255,208,74,.27); border-radius:12px; background:rgba(255,255,255,.92); }.review-market img { width:29px; height:29px; object-fit:contain; }.review-market--ozon img { width:40px; height:40px; object-fit:cover; transform:scale(1.25); }
 .review-rating { display:flex; gap:1px; color:#48536f; font-size:13px; }.review-rating .lit { color:#ffd15d; text-shadow:0 0 12px rgba(255,209,93,.22); }
 .review-state { margin-top:auto; color:#ffd269; font-size:8px; font-weight:950; letter-spacing:.1em; text-align:center; }.review-state--done { color:#70d8bc; }
 .review-card__content { min-width:0; padding:17px 19px; }

@@ -109,7 +109,7 @@ def mount_marketplace_sync_job_routes(
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             connection_filter = "AND id=%s" if payload.connection_id else ""
-            provider_filter = "AND provider_code='yandex_market'" if sync_kind == "dashboard" else ""
+            provider_filter = "AND provider_code IN ('yandex_market','ozon')" if sync_kind == "dashboard" else ""
             params = [seller_user.workspace_id, *([payload.connection_id] if payload.connection_id else [])]
             with connection.cursor() as cursor:
                 cursor.execute(

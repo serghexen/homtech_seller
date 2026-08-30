@@ -216,7 +216,7 @@ function subscriptionDaysLabel(item) {
 
 function openStoreReviews(item) {
   // Отзывы открываются из контекста карточки и всегда ограничены одним подключением.
-  if (item.provider_code !== 'yandex_market') return
+  if (!['yandex_market', 'ozon'].includes(item.provider_code)) return
   selectedReviewsConnection.value = {
     id: Number(item.connection_id),
     display_name: item.store_name,
@@ -1801,7 +1801,7 @@ onBeforeUnmount(() => {
           <h1>Главная</h1>
           <p>Продажи и обращения покупателей по каждому подключённому магазину.</p>
         </div>
-        <p class="dashboard-heading__note">Суммы считаются по заказам: оплата, кешбэк и субсидия. Доставка не включена.</p>
+        <p class="dashboard-heading__note">Суммы считаются из данных заказов, без вызова финансовых методов маркетплейсов.</p>
       </div>
       <p v-if="activeSection === 'home' && dashboardError" class="form-error">{{ dashboardError }}</p>
       <div v-if="activeSection === 'home' && dashboardLoading" class="empty-state">Загружаем показатели магазинов…</div>
@@ -1827,7 +1827,7 @@ onBeforeUnmount(() => {
             <div class="store-dashboard-card__attention-action">
               <button
                 type="button"
-                :disabled="item.provider_code !== 'yandex_market'"
+                :disabled="!['yandex_market', 'ozon'].includes(item.provider_code)"
                 :aria-label="`Открыть отзывы магазина ${item.store_name}: требуют ответа ${item.pending_reviews ?? 'нет данных'}`"
                 @click="openStoreReviews(item)"
               >
@@ -1846,8 +1846,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <footer>
-            <span v-if="item.provider_code !== 'yandex_market'">Показатели Ozon пока недоступны без финансовых методов</span>
-            <span v-else-if="item.insights_error" class="store-dashboard-card__error" :title="item.insights_error">Отзывы и сообщения временно не обновились</span>
+            <span v-if="item.insights_error" class="store-dashboard-card__error" :title="item.insights_error">Отзывы и сообщения временно не обновились</span>
             <span v-else-if="!item.insights_last_successful_sync_at">Отзывы и сообщения собираются</span>
             <span v-else>Данные обновляются автоматически</span>
           </footer>
