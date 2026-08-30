@@ -17,6 +17,15 @@ class OrderActivityApiContractTests(unittest.TestCase):
         self.assertIn("WHERE event.workspace_id=%s AND event.id>%s", source)
         self.assertIn("connection.workspace_id=event.workspace_id", source)
 
+    def test_yandex_activity_starts_with_fulfillment_and_advances_past_hidden_events(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        source = (project_root / "api" / "domains" / "marketplace_read_api.py").read_text(encoding="utf-8")
+
+        self.assertIn("event.event_type='fulfillment_started'", source)
+        self.assertIn("FROM seller.order_fulfillments AS visible_fulfillment", source)
+        self.assertIn("activity_high_watermark", source)
+        self.assertIn("if len(items) >= limit else activity_high_watermark", source)
+
     def test_first_activity_request_only_establishes_a_cursor(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         source = (project_root / "api" / "domains" / "marketplace_read_api.py").read_text(encoding="utf-8")

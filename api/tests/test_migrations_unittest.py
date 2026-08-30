@@ -249,6 +249,17 @@ class MigrationFilesTests(unittest.TestCase):
         self.assertIn("ensure_marketplace_connection_subscription", joined)
         self.assertIn("plan.code='basic'", joined)
 
+    def test_yandex_working_order_activity_begins_with_fulfillment_without_backfill(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260830_05_yandex_working_orders.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("'new_order', 'fulfillment_started', 'status_changed'", joined)
+        self.assertIn("capture_yandex_fulfillment_started_event", joined)
+        self.assertIn("event_provider_code='yandex_market'", joined)
+        self.assertIn("AFTER INSERT ON seller.order_fulfillments", joined)
+        self.assertNotIn("INSERT INTO seller.order_activity_events SELECT", joined)
+
     def test_fulfillment_handling_mode_separates_automation_from_operator(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260827_03_fulfillment_handling_mode.sql"

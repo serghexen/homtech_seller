@@ -45,6 +45,20 @@ ORDER_SEARCH_EXPRESSIONS = (
     "item.offer_id",
 )
 
+# Яндекс присылает DBS-заказ ещё до оплаты. В рабочем списке такой снимок
+# появляется только после создания fulfillment, то есть когда Seller действительно
+# начал выдачу. Ozon сохраняет прежний контракт списка.
+YANDEX_STARTED_ORDER_VISIBILITY_SQL = """(
+  connection.provider_code <> 'yandex_market'
+  OR EXISTS (
+    SELECT 1
+    FROM seller.order_fulfillments AS visible_fulfillment
+    WHERE visible_fulfillment.connection_id=item.connection_id
+      AND visible_fulfillment.external_order_id=item.external_order_id
+      AND visible_fulfillment.external_item_id=item.external_item_id
+  )
+)"""
+
 SUPPLIER_PRICE_GUARD_MULTIPLIER = Decimal("1.05")
 
 
@@ -225,7 +239,7 @@ class MarketplaceOrderListOut(BaseModel):
 
 class MarketplaceOrderActivityItemOut(BaseModel):
     id: int
-    event_type: Literal["new_order", "status_changed"]
+    event_type: Literal["new_order", "fulfillment_started", "status_changed"]
     connection_id: int
     provider_code: str
     store_name: str
@@ -1372,6 +1386,7 @@ def mount_marketplace_read_routes(
                     FROM seller.order_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     WHERE connection.workspace_id=%s AND item.connection_id=%s
+                      AND {YANDEX_STARTED_ORDER_VISIBILITY_SQL}
                       AND ({identity_where})
                     """,
                     base_params,
@@ -1435,6 +1450,7 @@ def mount_marketplace_read_routes(
                     LEFT JOIN seller.fulfillment_outbound_jobs AS fulfillment_outbound
                       ON fulfillment_outbound.fulfillment_id=fulfillment.id
                     WHERE connection.workspace_id=%s AND item.connection_id=%s
+                      AND {YANDEX_STARTED_ORDER_VISIBILITY_SQL}
                       AND ({identity_where})
                     ORDER BY COALESCE(item.updated_at, item.created_at, item.synced_at) DESC,
                              item.external_order_id DESC, item.external_item_id ASC
@@ -1470,6 +1486,12 @@ def mount_marketplace_read_routes(
                     return MarketplaceOrderActivityOut(items=[], next_cursor=int(cursor.fetchone()[0]))
 
                 cursor.execute(
+                    "SELECT COALESCE(MAX(id), %s) FROM seller.order_activity_events WHERE workspace_id=%s",
+                    (after_id, seller_user.workspace_id),
+                )
+                activity_high_watermark = int(cursor.fetchone()[0])
+
+                cursor.execute(
                     """
                     SELECT event.id, event.event_type, event.connection_id,
                            connection.provider_code, connection.display_name,
@@ -1484,11 +1506,25 @@ def mount_marketplace_read_routes(
                       ON item.connection_id=event.connection_id
                      AND item.external_order_id=event.external_order_id
                      AND item.external_item_id=event.external_item_id
-                    WHERE event.workspace_id=%s AND event.id>%s
+                    WHERE event.workspace_id=%s AND event.id>%s AND event.id<=%s
+                      AND (
+                        connection.provider_code <> 'yandex_market'
+                        OR event.event_type='fulfillment_started'
+                        OR (
+                          event.event_type='status_changed'
+                          AND EXISTS (
+                            SELECT 1
+                            FROM seller.order_fulfillments AS visible_fulfillment
+                            WHERE visible_fulfillment.connection_id=event.connection_id
+                              AND visible_fulfillment.external_order_id=event.external_order_id
+                              AND visible_fulfillment.external_item_id=event.external_item_id
+                          )
+                        )
+                      )
                     ORDER BY event.id ASC
                     LIMIT %s
                     """,
-                    (seller_user.workspace_id, after_id, limit),
+                    (seller_user.workspace_id, after_id, activity_high_watermark, limit),
                 )
                 rows = cursor.fetchall()
 
@@ -1504,7 +1540,7 @@ def mount_marketplace_read_routes(
         ]
         return MarketplaceOrderActivityOut(
             items=items,
-            next_cursor=items[-1].id if items else after_id,
+            next_cursor=items[-1].id if len(items) >= limit else activity_high_watermark,
         )
 
     @app.get("/marketplaces/orders", response_model=MarketplaceOrderListOut)
@@ -1525,7 +1561,7 @@ def mount_marketplace_read_routes(
         if date_from and date_to and date_from > date_to:
             raise HTTPException(status_code=400, detail="Дата начала не может быть позже даты окончания")
         search = str(query or "").strip()
-        conditions = ["connection.workspace_id=%s"]
+        conditions = ["connection.workspace_id=%s", YANDEX_STARTED_ORDER_VISIBILITY_SQL]
         params: list[Any] = []
         if connection_id:
             conditions.append("item.connection_id=%s")

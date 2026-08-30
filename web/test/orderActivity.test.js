@@ -23,6 +23,15 @@ test('new order events are grouped per connection and external order', () => {
   assert.notEqual(groups[0].identity, groups[1].identity)
 })
 
+test('fulfillment start is treated as a new working order', () => {
+  const groups = groupNewOrderEvents([
+    { event_type: 'fulfillment_started', connection_id: 4, external_order_id: 'PAID', quantity: 1 },
+    { event_type: 'status_changed', connection_id: 4, external_order_id: 'PAID', quantity: 1 },
+  ])
+
+  assert.deepEqual(groups.map((item) => item.external_order_id), ['PAID'])
+})
+
 test('popup preference is isolated by workspace and user and defaults to enabled', () => {
   const values = new Map()
   const storage = {

@@ -34,7 +34,7 @@ export function orderActivityIdentity(event = {}) {
 export function groupNewOrderEvents(events = []) {
   const groups = new Map()
   for (const event of events) {
-    if (event.event_type !== 'new_order') continue
+    if (!['new_order', 'fulfillment_started'].includes(event.event_type)) continue
     const identity = orderActivityIdentity(event)
     if (!event.external_order_id || groups.has(identity)) {
       const current = groups.get(identity)

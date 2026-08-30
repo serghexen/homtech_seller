@@ -14,6 +14,7 @@ from domains.marketplace_catalog_actions_api import mount_marketplace_catalog_ac
 from domains.marketplace_read_api import (
     CATALOG_SEARCH_EXPRESSIONS,
     ORDER_SEARCH_EXPRESSIONS,
+    YANDEX_STARTED_ORDER_VISIBILITY_SQL,
     MarketplaceCatalogItemOut,
     MarketplaceCatalogStockPublishIn,
     MarketplaceCatalogSettingsIn,
@@ -32,6 +33,20 @@ from domains.marketplace_read_api import (
 
 
 class MarketplaceReadApiTests(unittest.TestCase):
+    def test_yandex_working_order_visibility_uses_fulfillment_identity(self) -> None:
+        self.assertIn("connection.provider_code <> 'yandex_market'", YANDEX_STARTED_ORDER_VISIBILITY_SQL)
+        self.assertIn("FROM seller.order_fulfillments AS visible_fulfillment", YANDEX_STARTED_ORDER_VISIBILITY_SQL)
+        self.assertIn("visible_fulfillment.connection_id=item.connection_id", YANDEX_STARTED_ORDER_VISIBILITY_SQL)
+        self.assertIn("visible_fulfillment.external_order_id=item.external_order_id", YANDEX_STARTED_ORDER_VISIBILITY_SQL)
+        self.assertIn("visible_fulfillment.external_item_id=item.external_item_id", YANDEX_STARTED_ORDER_VISIBILITY_SQL)
+
+        route_source = inspect.getsource(mount_marketplace_read_routes)
+        self.assertGreaterEqual(route_source.count("YANDEX_STARTED_ORDER_VISIBILITY_SQL"), 3)
+        self.assertIn(
+            'conditions = ["connection.workspace_id=%s", YANDEX_STARTED_ORDER_VISIBILITY_SQL]',
+            route_source,
+        )
+
     def test_order_list_exposes_stored_fulfillment_result(self) -> None:
         result = marketplace_order_from_row((
             3, "ozon", "ASAT", "04259716-0136-1", "5196324554", "17162", "5196324554",
