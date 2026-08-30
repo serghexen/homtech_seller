@@ -64,7 +64,8 @@ def _paged_yandex_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     page_token = ""
-    for _page in range(100):
+    seen_page_tokens: set[str] = set()
+    while True:
         query: dict[str, str | int] = {"limit": limit}
         if page_token:
             query["pageToken"] = page_token
@@ -77,11 +78,10 @@ def _paged_yandex_rows(
         next_token = _next_page_token(response)
         if not next_token:
             break
-        if next_token == page_token:
+        if next_token in seen_page_tokens:
             raise HTTPException(502, "Яндекс Маркет не продвинул постраничное чтение показателей")
+        seen_page_tokens.add(next_token)
         page_token = next_token
-    else:
-        raise HTTPException(502, "Показатели Яндекс Маркета превысили безопасный лимит страниц")
     return rows
 
 

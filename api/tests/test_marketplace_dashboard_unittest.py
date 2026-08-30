@@ -62,6 +62,33 @@ class MarketplaceDashboardTests(unittest.TestCase):
         self.assertIn("pageToken=next", request_json.call_args_list[1].args[0])
 
     @patch("domains.marketplace_dashboard_service._request_json")
+    def test_review_reader_does_not_truncate_more_than_one_hundred_pages(self, request_json) -> None:
+        request_json.side_effect = [
+            {
+                "result": {
+                    "feedbacks": [{"feedbackId": page}],
+                    "paging": {"nextPageToken": f"page-{page + 1}"} if page < 100 else {},
+                }
+            }
+            for page in range(101)
+        ]
+
+        rows = fetch_yandex_pending_reviews(business_id=77, token="secret")
+
+        self.assertEqual(len(rows), 101)
+        self.assertEqual(request_json.call_count, 101)
+
+    @patch("domains.marketplace_dashboard_service._request_json")
+    def test_review_reader_rejects_repeated_page_token(self, request_json) -> None:
+        request_json.side_effect = [
+            {"result": {"feedbacks": [], "paging": {"nextPageToken": "same"}}},
+            {"result": {"feedbacks": [], "paging": {"nextPageToken": "same"}}},
+        ]
+
+        with self.assertRaisesRegex(HTTPException, "не продвинул"):
+            fetch_yandex_pending_reviews(business_id=77, token="secret")
+
+    @patch("domains.marketplace_dashboard_service._request_json")
     def test_chat_reader_counts_only_dialogs_waiting_for_partner(self, request_json) -> None:
         request_json.return_value = {"result": {"chats": [{"id": 1}], "paging": {}}}
 
