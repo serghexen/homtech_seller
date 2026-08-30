@@ -425,6 +425,15 @@ def safe_int(value: Any, *, default: int = 1) -> int:
         return default
 
 
+def safe_decimal(value: Any) -> Decimal:
+    # Денежное поле внешнего ответа не должно ломать снимок неизвестным JSON-типом.
+    try:
+        result = Decimal(str(value if value is not None else "0"))
+    except Exception:
+        return Decimal("0")
+    return result if result.is_finite() and result >= 0 else Decimal("0")
+
+
 def ilike_search_condition(search: str, expressions: tuple[str, ...]) -> tuple[str, list[str]]:
     """Собирает поиск по тем же идентификаторам, которые видит оператор в интерфейсе."""
     cleaned = str(search or "").strip()
@@ -557,6 +566,57 @@ def normalize_order_items(provider_code: str, payload: dict[str, Any]) -> list[d
             )
         return result
     return []
+
+
+def normalize_marketplace_order_summary(provider_code: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    # Хранит заказ один раз: карточка главной не должна умножать сумму на число позиций.
+    if provider_code == "yandex_market":
+        order_id = first_text(payload.get("orderId"), payload.get("id"))
+        provider_status = first_text(payload.get("status"))
+        provider_substatus = first_text(payload.get("substatus"), payload.get("subStatus"))
+        prices = payload.get("prices") if isinstance(payload.get("prices"), dict) else {}
+        price_parts = [
+            prices.get(name).get("value")
+            for name in ("payment", "cashback", "subsidy")
+            if isinstance(prices.get(name), dict)
+        ]
+        currency_code = first_text(*[
+            prices.get(name).get("currencyId")
+            for name in ("payment", "cashback", "subsidy")
+            if isinstance(prices.get(name), dict)
+        ])
+        raw_fake = payload.get("fake")
+        is_fake = raw_fake if isinstance(raw_fake, bool) else str(raw_fake or "").strip().lower() == "true"
+        sales_amount: Decimal | None = sum((safe_decimal(value) for value in price_parts), Decimal("0"))
+    elif provider_code == "ozon":
+        order_id = first_text(payload.get("posting_number"), payload.get("order_id"), payload.get("id"))
+        provider_status = first_text(payload.get("status"), payload.get("posting_status"))
+        provider_substatus = first_text(payload.get("substatus"), payload.get("sub_status"))
+        currency_code = ""
+        is_fake = False
+        # Текущие Ozon-запросы намеренно не читают financial_data; нулём это не маскируем.
+        sales_amount = None
+    else:
+        return None
+    if not order_id:
+        return None
+    return {
+        "external_order_id": order_id,
+        "provider_status": provider_status,
+        "provider_substatus": provider_substatus,
+        "normalized_status": normalize_marketplace_order_status(
+            provider_code=provider_code, status=provider_status, substatus=provider_substatus,
+        ),
+        "created_at": optional_datetime(
+            payload.get("creationDate") or payload.get("createdAt") or payload.get("in_process_at") or payload.get("created_at")
+        ),
+        "updated_at": optional_datetime(
+            payload.get("updateDate") or payload.get("updatedAt") or payload.get("statusUpdateDate") or payload.get("updated_at")
+        ),
+        "sales_amount": sales_amount,
+        "currency_code": currency_code,
+        "is_fake": bool(is_fake),
+    }
 
 
 def mount_marketplace_read_routes(

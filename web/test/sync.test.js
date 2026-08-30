@@ -46,3 +46,8 @@ test('completed and failed sync jobs have distinct summaries', () => {
   assert.equal(syncActivityState(failed), 'failed')
   assert.match(syncActivityDetail(failed, 'failed'), /JoyCards: Ключ отозван/)
 })
+
+test('dashboard sync has its own presentation', () => {
+  const jobs = [{ status: 'running', sync_kind: 'dashboard', connection_id: 'one', store_name: 'JoyCards' }]
+  assert.equal(syncActivityTitle(jobs, syncActivityState(jobs)), 'Обновляем показатели')
+})

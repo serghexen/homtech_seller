@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import time
+import hashlib
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -13,6 +14,7 @@ import psycopg
 from fastapi import HTTPException
 
 from domains.marketplace_sync_service import execute_sync_job, record_connection_error
+from domains.marketplace_dashboard_service import dashboard_insights_enabled
 from domains.ozon_outbound import build_ozon_outbound_processor
 from domains.ozon_stock_outbound import build_ozon_stock_outbound_processor
 from domains.supplier_fulfillment import build_supplier_fulfillment_processor
@@ -76,6 +78,68 @@ def retry_delay_seconds(attempt_count: int) -> int:
     return min(15 * (2 ** max(0, attempt_count - 1)), 300)
 
 
+def dashboard_refresh_interval_seconds() -> int:
+    return max(60, min(int(os.getenv("SELLER_DASHBOARD_REFRESH_SECONDS", "600")), 86_400))
+
+
+def stable_dashboard_jitter_seconds(connection_id: int) -> int:
+    # Разносит восстановление 20/100 магазинов по времени одинаково после каждого рестарта.
+    window = max(1, dashboard_refresh_interval_seconds() // 4)
+    digest = hashlib.sha256(f"dashboard:{int(connection_id)}".encode("ascii")).digest()
+    return int.from_bytes(digest[:4], "big") % window
+
+
+def enqueue_due_dashboard_jobs(connection, limit: int = 20) -> int:
+    """Ставит read-only снимки Яндекса в общую очередь без отдельного polling-процесса."""
+
+    if not dashboard_insights_enabled():
+        return 0
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT marketplace.id, marketplace.workspace_id
+            FROM seller.marketplace_connections AS marketplace
+            LEFT JOIN seller.marketplace_dashboard_snapshots AS snapshot
+              ON snapshot.connection_id=marketplace.id
+            WHERE marketplace.status='active' AND marketplace.provider_code='yandex_market'
+              AND COALESCE(snapshot.next_refresh_at, now()) <= now()
+            ORDER BY COALESCE(snapshot.next_refresh_at, marketplace.created_at), marketplace.id
+            FOR UPDATE OF marketplace SKIP LOCKED
+            LIMIT %s
+            """,
+            (max(1, min(int(limit), 100)),),
+        )
+        rows = cursor.fetchall()
+        queued = 0
+        for connection_id, workspace_id in rows:
+            delay_seconds = dashboard_refresh_interval_seconds() + stable_dashboard_jitter_seconds(int(connection_id))
+            cursor.execute(
+                """
+                INSERT INTO seller.marketplace_dashboard_snapshots(
+                    connection_id, workspace_id, next_refresh_at
+                ) VALUES (%s, %s, now() + (%s * interval '1 second'))
+                ON CONFLICT (connection_id) DO UPDATE SET
+                    workspace_id=EXCLUDED.workspace_id,
+                    next_refresh_at=EXCLUDED.next_refresh_at,
+                    updated_at=now()
+                """,
+                (int(connection_id), int(workspace_id), delay_seconds),
+            )
+            cursor.execute(
+                """
+                INSERT INTO seller.marketplace_sync_jobs(workspace_id, connection_id, sync_kind)
+                VALUES (%s, %s, 'dashboard')
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                (int(workspace_id), int(connection_id)),
+            )
+            if cursor.fetchone():
+                queued += 1
+    connection.commit()
+    return queued
+
+
 def enqueue_due_marketplace_order_jobs(connection, limit: int = 20) -> int:
     """Ставит резервную синхронизацию заказов запущенных магазинов в общую очередь."""
 
@@ -131,7 +195,7 @@ def is_transient_sync_error(exc: Exception) -> bool:
         upstream_status = re.search(r"\bHTTP\s+(\d{3})\b", detail)
         if upstream_status:
             status_code = int(upstream_status.group(1))
-            return status_code == 429 or status_code >= 500
+            return status_code in {420, 429} or status_code >= 500
         return int(exc.status_code) in {429, 502, 503, 504}
     return isinstance(exc, (psycopg.Error, TimeoutError, ConnectionError, OSError))
 
@@ -366,6 +430,9 @@ def run_worker() -> int:
                 scheduled_orders = enqueue_due_marketplace_order_jobs(lock_connection)
                 if scheduled_orders:
                     print(f"Scheduled marketplace order polls: {scheduled_orders}", flush=True)
+                scheduled_dashboard = enqueue_due_dashboard_jobs(lock_connection)
+                if scheduled_dashboard:
+                    print(f"Scheduled marketplace dashboard refreshes: {scheduled_dashboard}", flush=True)
                 recovered = recover_stale_jobs(lock_connection)
                 if recovered:
                     print(f"Recovered stale sync jobs: {recovered}", flush=True)
@@ -373,7 +440,7 @@ def run_worker() -> int:
                 if not job:
                     if not any((
                         processed_fulfillments, processed_webhooks, processed_outbound, processed_stock,
-                        processed_ozon_outbound, processed_ozon_stock,
+                        processed_ozon_outbound, processed_ozon_stock, scheduled_orders, scheduled_dashboard,
                     )):
                         time.sleep(poll_seconds())
                     continue

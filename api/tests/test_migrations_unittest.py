@@ -9,6 +9,20 @@ from scripts.run_migrations import split_sql_statements
 
 
 class MigrationFilesTests(unittest.TestCase):
+    def test_marketplace_dashboard_keeps_orders_unique_and_snapshots_workspace_scoped(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260830_01_marketplace_dashboard.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("PRIMARY KEY (connection_id, external_order_id)", joined)
+        self.assertIn("prices,payment,value", joined)
+        self.assertIn("prices,cashback,value", joined)
+        self.assertIn("prices,subsidy,value", joined)
+        self.assertNotIn("prices,delivery,value", joined)
+        self.assertIn("workspace_id bigint NOT NULL", joined)
+        self.assertIn("unassigned_reviews_count", joined)
+        self.assertIn("'catalog', 'orders', 'dashboard'", joined)
+
     def test_order_activity_events_are_workspace_scoped_and_do_not_backfill_history(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260828_02_order_activity_events.sql"

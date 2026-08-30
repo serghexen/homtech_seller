@@ -14,6 +14,7 @@ from domains.marketplace_connections_api import mount_marketplace_connection_rou
 from domains.marketplace_launch_api import mount_marketplace_launch_routes
 from domains.marketplace_fulfillments_api import mount_marketplace_fulfillment_routes
 from domains.marketplace_catalog_actions_api import mount_marketplace_catalog_action_routes
+from domains.marketplace_dashboard_api import mount_marketplace_dashboard_routes
 from domains.marketplace_key_pools_api import mount_marketplace_key_pool_routes
 from domains.marketplace_key_reveals_api import mount_marketplace_key_reveal_routes
 from domains.marketplace_read_api import mount_marketplace_read_routes
@@ -23,7 +24,7 @@ from domains.workspace_entitlements import WorkspaceAccess, read_workspace_acces
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.78")
+app = FastAPI(title="HomTech Seller API", version="0.0.79")
 
 
 def cors_origins() -> list[str]:
@@ -322,6 +323,15 @@ mount_marketplace_catalog_action_routes(
 
 # Подключает снимки каталога и заказов после авторизации, сохраняя их внутри отдельного Seller workspace.
 mount_marketplace_read_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+# Главная читает локальные суммы заказов и фоновые read-only снимки обращений покупателей.
+mount_marketplace_dashboard_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

@@ -20,7 +20,9 @@ export function syncActivityState(jobs, monitorError = '') {
 function syncKind(jobs) {
   const kinds = new Set(jobs.map((job) => job.sync_kind).filter(Boolean))
   if (kinds.size !== 1) return 'data'
-  return kinds.has('catalog') ? 'catalog' : 'orders'
+  if (kinds.has('catalog')) return 'catalog'
+  if (kinds.has('dashboard')) return 'dashboard'
+  return 'orders'
 }
 
 export function syncActivityTitle(jobs, state) {
@@ -29,16 +31,19 @@ export function syncActivityTitle(jobs, state) {
     running: {
       catalog: 'Обновляем каталог',
       orders: 'Обновляем заказы',
+      dashboard: 'Обновляем показатели',
       data: 'Обновляем данные',
     },
     succeeded: {
       catalog: 'Каталог обновлён',
       orders: 'Заказы обновлены',
+      dashboard: 'Показатели обновлены',
       data: 'Данные обновлены',
     },
     failed: {
       catalog: 'Не удалось обновить каталог',
       orders: 'Не удалось обновить заказы',
+      dashboard: 'Не удалось обновить показатели',
       data: 'Обновление завершилось с ошибкой',
     },
   }

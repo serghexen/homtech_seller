@@ -11,8 +11,14 @@ from fastapi import HTTPException
 
 from domains.fulfillment_service import observe_order_fulfillments
 from domains.marketplace_catalog_service import fetch_marketplace_catalog, fetch_marketplace_stocks, ozon_stock_snapshot
+from domains.marketplace_dashboard_service import sync_dashboard_connection
 from domains.marketplace_orders_service import fetch_marketplace_orders
-from domains.marketplace_read_api import catalog_payload_with_stock, normalize_catalog_item, normalize_order_items
+from domains.marketplace_read_api import (
+    catalog_payload_with_stock,
+    normalize_catalog_item,
+    normalize_marketplace_order_summary,
+    normalize_order_items,
+)
 
 
 def credentials_secret() -> str:
@@ -176,6 +182,45 @@ def save_order_snapshots(
         for item in normalize_order_items(provider_code, raw_payload)
     ]
     with connection.cursor() as cursor:
+        for raw_payload in rows:
+            if not isinstance(raw_payload, dict):
+                continue
+            summary = normalize_marketplace_order_summary(provider_code, raw_payload)
+            if summary is None:
+                continue
+            cursor.execute(
+                """
+                INSERT INTO seller.marketplace_orders(
+                    connection_id, external_order_id, provider_status, provider_substatus,
+                    normalized_status, created_at, updated_at, sales_amount, currency_code,
+                    is_fake, raw_payload, synced_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                ON CONFLICT (connection_id, external_order_id) DO UPDATE SET
+                    provider_status=EXCLUDED.provider_status,
+                    provider_substatus=EXCLUDED.provider_substatus,
+                    normalized_status=EXCLUDED.normalized_status,
+                    created_at=COALESCE(EXCLUDED.created_at, seller.marketplace_orders.created_at),
+                    updated_at=COALESCE(EXCLUDED.updated_at, seller.marketplace_orders.updated_at),
+                    sales_amount=EXCLUDED.sales_amount,
+                    currency_code=EXCLUDED.currency_code,
+                    is_fake=EXCLUDED.is_fake,
+                    raw_payload=EXCLUDED.raw_payload,
+                    synced_at=now()
+                """,
+                (
+                    connection_id,
+                    summary["external_order_id"],
+                    summary["provider_status"],
+                    summary["provider_substatus"],
+                    summary["normalized_status"],
+                    summary["created_at"],
+                    summary["updated_at"],
+                    summary["sales_amount"],
+                    summary["currency_code"],
+                    summary["is_fake"],
+                    json.dumps(raw_payload, ensure_ascii=False),
+                ),
+            )
         for item, raw_payload in normalized_rows:
             if provider_code == "ozon":
                 # Политики Seller привязаны к Ozon product_id, тогда как заказ несёт offer_id/SKU.
@@ -235,6 +280,9 @@ def mark_connection_success(
     connection, connection_id: int, *, sync_kind: str, sync_started_at: datetime,
 ) -> None:
     # Watermark заказов продвигается в той же транзакции, что и сохранённый снимок.
+    if sync_kind == "dashboard":
+        # У этого снимка собственная наблюдаемость: сбой не должен помечать магазин неисправным целиком.
+        return
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -259,6 +307,21 @@ def record_connection_error(
     # Ошибка задания сохраняется отдельно: неуспешная транзакция снимка уже откатилась.
     with psycopg.connect(database_url()) as connection:
         with connection.cursor() as cursor:
+            if sync_kind == "dashboard":
+                cursor.execute(
+                    """
+                    INSERT INTO seller.marketplace_dashboard_snapshots(
+                        connection_id, workspace_id, last_attempt_at, next_refresh_at, last_error
+                    )
+                    SELECT id, workspace_id, now(), now(), %s
+                    FROM seller.marketplace_connections
+                    WHERE id=%s
+                    ON CONFLICT (connection_id) DO UPDATE SET
+                        last_attempt_at=now(), last_error=EXCLUDED.last_error, updated_at=now()
+                    """,
+                    (message[:1000], connection_id),
+                )
+                return
             cursor.execute(
                 """
                 UPDATE seller.marketplace_connections
@@ -282,6 +345,8 @@ def execute_sync_job(
             synced_items = sync_catalog_connection(connection, connection_row)
         elif sync_kind == "orders":
             synced_items = sync_orders_connection(connection, connection_row, sync_started_at=sync_started_at)
+        elif sync_kind == "dashboard":
+            synced_items = sync_dashboard_connection(connection, connection_row)
         else:
             raise RuntimeError(f"Unsupported sync kind: {sync_kind}")
         mark_connection_success(

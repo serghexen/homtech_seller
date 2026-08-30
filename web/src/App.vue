@@ -43,13 +43,16 @@ const workspaceAccess = ref(null)
 const isRestoringSession = ref(true)
 const connections = ref([])
 const connectionsLoading = ref(false)
+const dashboardItems = ref([])
+const dashboardLoading = ref(false)
+const dashboardError = ref('')
 const connectionActionId = ref(null)
 const selectedLaunchConnection = ref(null)
 const launchReadiness = ref(null)
 const launchReadinessLoading = ref(false)
 const launchActionLoading = ref(false)
 const launchError = ref('')
-const activeSection = ref('stores')
+const activeSection = ref('home')
 const catalogItems = ref([])
 const catalogTotal = ref(0)
 const catalogActiveTotal = ref(0)
@@ -128,6 +131,7 @@ let ordersRequestSequence = 0
 let orderSearchTimer = null
 let orderActivityCursor = null
 let orderActivityTimer = null
+let dashboardRefreshTimer = null
 let orderActivityRequestActive = false
 let orderToastSequence = 0
 const orderToastTimers = new Map()
@@ -181,6 +185,32 @@ function providerName(providerCode) {
 function providerLogo(providerCode) {
   // Использует локальные фирменные логотипы без обращения к внешним ресурсам.
   return providerCode === 'yandex_market' ? yandexMarketLogo : ozonLogo
+}
+
+function dashboardMoney(item, value) {
+  if (value === null || value === undefined || value === '') return '—'
+  const amount = Number(value)
+  if (!Number.isFinite(amount)) return '—'
+  const currency = ['RUR', 'RUB'].includes(item.currency_code) ? 'RUB' : item.currency_code
+  if (!currency) return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(amount)
+  try {
+    return new Intl.NumberFormat('ru-RU', {
+      style: 'currency', currency, minimumFractionDigits: 0, maximumFractionDigits: 2,
+    }).format(amount)
+  } catch {
+    return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(amount)} ${currency}`
+  }
+}
+
+function subscriptionDaysLabel(item) {
+  if (item.subscription_unlimited) return 'Без срока'
+  const days = item.subscription_days_remaining
+  if (days === null || days === undefined) return '—'
+  if (days === 0) return 'Истекает сегодня'
+  const mod100 = days % 100
+  const mod10 = days % 10
+  const word = mod100 >= 11 && mod100 <= 14 ? 'дней' : mod10 === 1 ? 'день' : mod10 >= 2 && mod10 <= 4 ? 'дня' : 'дней'
+  return `${days} ${word}`
 }
 
 function hasProductInstruction(item) {
@@ -914,6 +944,7 @@ async function refreshSnapshotsAfterSync(jobs) {
   const requests = []
   if (kinds.has('catalog') && hasConnections.value) requests.push(loadCatalog())
   if (kinds.has('orders') && hasConnections.value) requests.push(loadOrders())
+  if ((kinds.has('orders') || kinds.has('dashboard')) && hasConnections.value) requests.push(loadDashboard())
   await Promise.allSettled(requests)
   await loadConnections()
 }
@@ -1107,6 +1138,37 @@ async function loadConnections() {
   }
 }
 
+async function loadDashboard() {
+  // HTTP читает только локальный снимок; внешние API обновляет общий worker по расписанию.
+  if (!user.value) return
+  dashboardLoading.value = true
+  dashboardError.value = ''
+  try {
+    const result = await apiRequest('/marketplaces/dashboard')
+    dashboardItems.value = Array.isArray(result.items) ? result.items : []
+  } catch (requestError) {
+    dashboardError.value = requestError.message || 'Не удалось загрузить показатели магазинов'
+  } finally {
+    dashboardLoading.value = false
+  }
+}
+
+function clearDashboardRefreshTimer() {
+  if (dashboardRefreshTimer) window.clearTimeout(dashboardRefreshTimer)
+  dashboardRefreshTimer = null
+}
+
+function scheduleDashboardRefresh() {
+  clearDashboardRefreshTimer()
+  if (!user.value || activeSection.value !== 'home') return
+  dashboardRefreshTimer = window.setTimeout(async () => {
+    dashboardRefreshTimer = null
+    if (!user.value || activeSection.value !== 'home') return
+    await loadDashboard()
+    scheduleDashboardRefresh()
+  }, 60_000)
+}
+
 async function loadCatalog() {
   // Загружает страницу сохранённого каталога без нового обращения к маркетплейсу на каждый поиск.
   if (!user.value || !hasConnections.value) return
@@ -1161,10 +1223,15 @@ async function changeSection(section) {
   // Переключает рабочий раздел и загружает его локальный снимок только при первом открытии или возврате.
   if (section !== 'catalog') clearCatalogSearchTimer()
   if (section !== 'orders') clearOrderSearchTimer()
+  clearDashboardRefreshTimer()
   activeSection.value = section
   error.value = ''
   notice.value = ''
   if (!hasConnections.value) return
+  if (section === 'home') {
+    await loadDashboard()
+    scheduleDashboardRefresh()
+  }
   if (section === 'catalog') await loadCatalog()
   if (section === 'orders') {
     unreadOrdersCount.value = 0
@@ -1377,6 +1444,8 @@ async function submit() {
     workspaceAccess.value = result.access
     form.password = ''
     await loadConnections()
+    await loadDashboard()
+    scheduleDashboardRefresh()
     await restoreActiveSyncJobs()
     startOrderActivityMonitor()
   } catch (requestError) {
@@ -1394,6 +1463,9 @@ async function logout() {
     user.value = null
     workspaceAccess.value = null
     connections.value = []
+    dashboardItems.value = []
+    dashboardError.value = ''
+    clearDashboardRefreshTimer()
     catalogItems.value = []
     orders.value = []
     catalogRequestSequence += 1
@@ -1408,7 +1480,7 @@ async function logout() {
     syncActivityVisible.value = false
     stopOrderActivityMonitor()
     selectedConnectionId.value = null
-    activeSection.value = 'stores'
+    activeSection.value = 'home'
     form.password = ''
     mode.value = 'login'
   } catch (requestError) {
@@ -1518,6 +1590,8 @@ async function saveConnection() {
     })
     closeConnectionModal()
     await loadConnections()
+    await loadDashboard()
+    if (activeSection.value === 'home') scheduleDashboardRefresh()
     await restoreActiveSyncJobs()
   } catch (requestError) {
     connectionError.value = requestError.message || 'Не удалось подключить магазин'
@@ -1535,6 +1609,8 @@ async function toggleConnection(connection) {
   try {
     await apiRequest(`/marketplaces/connections/${connection.id}/${shouldEnable ? 'enable' : 'disable'}`, { method: 'POST' })
     await loadConnections()
+    await loadDashboard()
+    if (activeSection.value === 'home') scheduleDashboardRefresh()
     notice.value = shouldEnable ? `Магазин «${connection.display_name}» снова подключён` : `Магазин «${connection.display_name}» отключён. Данные сохранены.`
   } catch (requestError) {
     error.value = requestError.message || (shouldEnable ? 'Не удалось подключить магазин снова' : 'Не удалось отключить магазин')
@@ -1551,6 +1627,8 @@ onMounted(async () => {
     user.value = result.user
     workspaceAccess.value = result.access
     await loadConnections()
+    await loadDashboard()
+    scheduleDashboardRefresh()
     await restoreActiveSyncJobs()
     startOrderActivityMonitor()
   } catch {
@@ -1565,6 +1643,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleOrderActivityVisibility)
   clearCatalogSearchTimer()
   clearOrderSearchTimer()
+  clearDashboardRefreshTimer()
   clearSyncActivityDismissTimer()
   stopOrderFulfillmentMonitor()
   stopStockPublicationMonitor()
@@ -1580,6 +1659,44 @@ onBeforeUnmount(() => {
 
     <header class="app-header">
       <div class="app-brand"><img :src="homtechLogo" alt="HomTech" /><span>Seller</span></div>
+      <nav v-if="user" class="seller-nav" aria-label="Разделы Seller">
+        <button
+          class="seller-nav__item"
+          :class="{ 'seller-nav__item--active': activeSection === 'home' }"
+          type="button"
+          :aria-current="activeSection === 'home' ? 'page' : undefined"
+          @click="changeSection('home')"
+        >
+          Главная
+        </button>
+        <button
+          class="seller-nav__item"
+          :class="{ 'seller-nav__item--active': activeSection === 'stores' }"
+          type="button"
+          :aria-current="activeSection === 'stores' ? 'page' : undefined"
+          @click="changeSection('stores')"
+        >
+          Магазины
+        </button>
+        <button
+          class="seller-nav__item"
+          :class="{ 'seller-nav__item--active': activeSection === 'catalog' }"
+          type="button"
+          :aria-current="activeSection === 'catalog' ? 'page' : undefined"
+          @click="changeSection('catalog')"
+        >
+          Каталог
+        </button>
+        <button
+          class="seller-nav__item"
+          :class="{ 'seller-nav__item--active': activeSection === 'orders' }"
+          type="button"
+          :aria-current="activeSection === 'orders' ? 'page' : undefined"
+          @click="changeSection('orders')"
+        >
+          <span>Заказы</span><small v-if="unreadOrdersCount" class="seller-nav__badge">{{ unreadOrdersCount > 99 ? '99+' : unreadOrdersCount }}</small>
+        </button>
+      </nav>
       <div v-if="user" class="app-account">
         <div
           v-if="workspaceAccess"
@@ -1614,14 +1731,6 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="user" class="seller-dashboard" aria-live="polite">
-      <nav class="seller-nav" aria-label="Разделы Seller">
-        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'stores' }" type="button" @click="changeSection('stores')">Магазины</button>
-        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'catalog' }" type="button" @click="changeSection('catalog')">Каталог</button>
-        <button class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'orders' }" type="button" @click="changeSection('orders')">
-          <span>Заказы</span><small v-if="unreadOrdersCount" class="seller-nav__badge">{{ unreadOrdersCount > 99 ? '99+' : unreadOrdersCount }}</small>
-        </button>
-      </nav>
-
       <TransitionGroup name="order-toast" tag="aside" class="order-toast-stack" aria-live="polite" aria-label="Новые заказы">
         <article v-for="toast in orderToasts" :key="toast.id" class="order-toast" role="status" @click="openOrderActivityToast(toast)">
           <div class="order-toast__mark" aria-hidden="true">
@@ -1662,6 +1771,57 @@ onBeforeUnmount(() => {
           <button v-else class="sync-activity__close" type="button" aria-label="Закрыть уведомление" @click="dismissSyncActivity">×</button>
         </aside>
       </Transition>
+
+      <div v-if="activeSection === 'home'" class="dashboard-heading dashboard-heading--home">
+        <div>
+          <p class="kicker">СЕГОДНЯ В SELLER</p>
+          <h1>Главная</h1>
+          <p>Продажи и обращения покупателей по каждому подключённому магазину.</p>
+        </div>
+        <p class="dashboard-heading__note">Суммы считаются по заказам: оплата, кешбэк и субсидия. Доставка не включена.</p>
+      </div>
+      <p v-if="activeSection === 'home' && dashboardError" class="form-error">{{ dashboardError }}</p>
+      <div v-if="activeSection === 'home' && dashboardLoading" class="empty-state">Загружаем показатели магазинов…</div>
+      <div v-else-if="activeSection === 'home' && !dashboardItems.length" class="section-gate home-empty" aria-live="polite">
+        <span class="section-gate__mark" aria-hidden="true">+</span>
+        <p class="kicker">ПЕРВЫЙ ШАГ</p>
+        <h1>Подключите магазин</h1>
+        <p>После первой синхронизации здесь появятся продажи, отзывы, сообщения и срок подписки.</p>
+        <button class="primary-button" type="button" @click="openConnectionModal">Подключить магазин</button>
+      </div>
+      <div v-else-if="activeSection === 'home'" class="store-dashboard-grid">
+        <article v-for="item in dashboardItems" :key="item.connection_id" class="store-dashboard-card" :class="{ 'store-dashboard-card--disabled': item.status === 'disabled' }">
+          <header class="store-dashboard-card__head">
+            <div class="market-mark" :class="`market-mark--${item.provider_code}`"><img :src="providerLogo(item.provider_code)" alt="" /></div>
+            <div><p>{{ providerName(item.provider_code) }}</p><h2>{{ item.store_name }}</h2></div>
+            <span v-if="item.status === 'disabled'" class="store-dashboard-card__state">Отключён</span>
+          </header>
+          <div class="store-dashboard-card__sales">
+            <div><span>Продаж за день</span><strong>{{ dashboardMoney(item, item.sales_today) }}</strong></div>
+            <div><span>Продаж за месяц</span><strong>{{ dashboardMoney(item, item.sales_month) }}</strong></div>
+          </div>
+          <dl class="store-dashboard-card__attention">
+            <div>
+              <dt><span class="metric-dot metric-dot--review" aria-hidden="true"></span>Отзывы требуют ответа</dt>
+              <dd>{{ item.pending_reviews ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt><span class="metric-dot metric-dot--chat" aria-hidden="true"></span>Новые сообщения</dt>
+              <dd>{{ item.pending_chats ?? '—' }}</dd>
+            </div>
+            <div>
+              <dt><span class="metric-dot metric-dot--subscription" aria-hidden="true"></span>До окончания подписки</dt>
+              <dd>{{ subscriptionDaysLabel(item) }}</dd>
+            </div>
+          </dl>
+          <footer>
+            <span v-if="item.provider_code !== 'yandex_market'">Показатели Ozon пока недоступны без финансовых методов</span>
+            <span v-else-if="item.insights_error" class="store-dashboard-card__error" :title="item.insights_error">Отзывы и сообщения временно не обновились</span>
+            <span v-else-if="!item.insights_last_successful_sync_at">Отзывы и сообщения собираются</span>
+            <span v-else>Данные обновляются автоматически</span>
+          </footer>
+        </article>
+      </div>
 
       <div v-if="activeSection === 'stores'" class="dashboard-heading">
         <div>
@@ -2026,9 +2186,9 @@ onBeforeUnmount(() => {
 .app-shell { position: relative; min-height: 100vh; padding: 28px clamp(24px, 4vw, 72px) 72px; overflow: hidden; background: radial-gradient(circle at 0 38%, rgba(33,76,211,.2), transparent 32%), radial-gradient(circle at 100% 26%, rgba(241,152,87,.1), transparent 34%), #0a1025; }
 .app-shell__glow { position: absolute; width: 43vw; aspect-ratio: 1; border: 1px solid rgba(114,135,185,.14); border-radius: 50%; pointer-events: none; } .app-shell__glow--left { bottom: -27vw; left: -17vw; } .app-shell__glow--right { top: -34vw; right: -11vw; }
 .app-version { position: fixed; z-index: 0; right: clamp(20px,3vw,50px); bottom: 22px; margin: 0; color: rgba(148,163,199,.42); font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 10px; font-weight: 700; letter-spacing: .16em; pointer-events: none; user-select: none; }
-.app-header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; min-height: 92px; padding: 18px 25px; border: 1px solid rgba(144,160,204,.25); border-radius: 25px; background: rgba(13,20,43,.88); }
+.app-header { position: relative; z-index: 1; display: flex; align-items: center; gap: clamp(18px,2.5vw,46px); min-height: 92px; padding: 18px 25px; border: 1px solid rgba(144,160,204,.25); border-radius: 25px; background: rgba(13,20,43,.88); }
 .app-brand { display: flex; align-items: center; gap: 14px; } .app-brand img { width: clamp(160px,17vw,235px); max-height: 45px; object-fit: contain; } .app-brand span { padding-left: 14px; border-left: 1px solid rgba(144,160,204,.32); color: #b9c4dc; font-weight: 750; }
-.app-account { display: flex; align-items: stretch; gap: 5px; padding: 5px; border: 1px solid rgba(145,161,204,.2); border-radius: 20px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(2,7,22,.14); }
+.app-account { display: flex; align-items: stretch; gap: 5px; margin-left: auto; padding: 5px; border: 1px solid rgba(145,161,204,.2); border-radius: 20px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(2,7,22,.14); }
 .order-popup-toggle { position: relative; display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #8290ae; background: rgba(31,40,70,.72); transition: color .18s,border-color .18s,background .18s,transform .18s; } .order-popup-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .order-popup-toggle:hover { color: #eef3ff; border-color: rgba(112,140,222,.5); transform: translateY(-1px); } .order-popup-toggle--enabled { color: #74ebcc; border-color: rgba(80,230,193,.34); background: linear-gradient(145deg,rgba(18,65,72,.62),rgba(17,34,61,.82)); } .order-popup-toggle__badge { position: absolute; top: -5px; right: -5px; display: grid; min-width: 18px; height: 18px; place-items: center; padding: 0 4px; border: 2px solid #0b1229; border-radius: 999px; color: #08142a; background: #56e4bd; font-size: 9px; font-weight: 900; }
 .plan-badge { position: relative; display: flex; min-width: 105px; height: 46px; align-items: center; gap: 10px; padding: 6px 14px 6px 11px; overflow: hidden; border: 1px solid rgba(112,143,238,.34); border-radius: 14px; color: #d8e2ff; background: linear-gradient(135deg,rgba(30,51,112,.66),rgba(18,28,58,.82)); box-shadow: inset 0 1px rgba(255,255,255,.035); }
 .plan-badge::after { content: ''; position: absolute; right: -19px; bottom: -29px; width: 58px; aspect-ratio: 1; border: 1px solid rgba(128,153,229,.12); border-radius: 50%; pointer-events: none; }
@@ -2041,11 +2201,22 @@ onBeforeUnmount(() => {
 .plan-badge__copy strong { color: currentColor; font-size: 14px; font-weight: 750; letter-spacing: -.01em; }
 .profile-button, .seller-nav__item, .secondary-button { border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; } .profile-button { display: inline-flex; height: 46px; align-items: center; gap: 12px; padding: 0 16px; font-size: 13px; transition: border-color .18s,background .18s,transform .18s; } .profile-button__name { color: #eef2ff; font-weight: 750; } .profile-button__divider { width: 1px; height: 18px; flex: 0 0 auto; background: rgba(151,167,207,.3); } .profile-button > span:last-child { color: #aab5cf; font-weight: 600; transition: color .18s; } .profile-button:hover { border-color: rgba(112,140,222,.5); background: rgba(38,50,86,.88); transform: translateY(-1px); } .profile-button:hover > span:last-child { color: #e4eaff; }
 .session-loader { position: relative; z-index: 1; display: grid; width: max-content; max-width: 100%; place-items: center; margin: 18vh auto 0; padding: 22px 28px 20px; border: 1px solid rgba(144,160,204,.25); border-radius: 22px; background: linear-gradient(140deg,rgba(22,33,62,.96),rgba(10,15,34,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
-.seller-dashboard { position: relative; z-index: 1; width: min(100%,1760px); margin: 42px auto 0; } .seller-nav { display: flex; width: max-content; max-width: 100%; gap: 9px; padding: 7px; border: 1px solid rgba(149,164,203,.27); border-radius: 19px; background: rgba(10,17,37,.74); } .seller-nav__item { display: inline-flex; min-height: 46px; align-items: center; justify-content: center; gap: 7px; padding: 0 20px; font-size: 15px; line-height: 1; } .seller-nav__item--active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); }
+.seller-dashboard { position: relative; z-index: 1; width: min(100%,1760px); margin: 0 auto; } .seller-nav { display: flex; width: max-content; max-width: 100%; gap: 7px; padding: 6px; border: 1px solid rgba(149,164,203,.24); border-radius: 18px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025); } .seller-nav__item { display: inline-flex; min-height: 46px; align-items: center; justify-content: center; gap: 7px; padding: 0 18px; font-size: 14px; line-height: 1; transition: color .18s,border-color .18s,background .18s,transform .18s; } .seller-nav__item:hover:not(.seller-nav__item--active) { color: #eef3ff; border-color: rgba(112,140,222,.5); background: rgba(38,50,86,.88); transform: translateY(-1px); } .seller-nav__item--active { color: #fff; border-color: rgba(75,115,255,.68); background: linear-gradient(115deg, var(--brand-blue), var(--brand-blue-bright)); box-shadow: 0 8px 22px rgba(20,62,195,.2); }
 .seller-nav__badge { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 6px; border-radius: 999px; color: #072136 !important; background: #58e5bd; font-size: 10px; line-height: 1; font-weight: 900; }
 .order-toast-stack { position: fixed; z-index: 80; top: 118px; right: clamp(18px,3vw,48px); display: grid; width: min(390px,calc(100vw - 32px)); gap: 10px; pointer-events: none; } .order-toast { position: relative; display: grid; grid-template-columns: 48px minmax(0,1fr) 28px; align-items: center; gap: 12px; padding: 14px; overflow: hidden; border: 1px solid rgba(77,225,190,.46); border-radius: 18px; color: #eef6ff; background: linear-gradient(145deg,rgba(15,42,62,.98),rgba(10,19,42,.99)); box-shadow: 0 18px 55px rgba(2,9,27,.48),inset 0 1px rgba(255,255,255,.04); cursor: pointer; pointer-events: auto; } .order-toast::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: #54e3bd; box-shadow: 0 0 20px rgba(84,227,189,.6); } .order-toast__mark { display: grid; width: 48px; height: 48px; place-items: center; overflow: hidden; border: 1px solid rgba(111,145,232,.34); border-radius: 14px; color: #67ecc8; background: rgba(22,43,83,.84); font-size: 13px; font-weight: 900; } .order-toast__mark img { width: 34px; height: 34px; object-fit: contain; } .order-toast__copy { min-width: 0; } .order-toast__copy > span { color: #63dfbf; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .order-toast__copy strong { display: block; overflow: hidden; margin-top: 3px; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; } .order-toast__copy p { overflow: hidden; margin: 4px 0 0; color: #aebbd5; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; } .order-toast > button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 9px; color: #8997b5; background: rgba(105,124,172,.1); font-size: 19px; } .order-toast > button:hover { color: #fff; background: rgba(105,124,172,.22); } .order-toast-enter-active,.order-toast-leave-active { transition: opacity .22s ease,transform .22s ease; } .order-toast-enter-from,.order-toast-leave-to { opacity: 0; transform: translateX(22px) scale(.98); } .order-toast-move { transition: transform .22s ease; }
 .sync-activity { position: relative; display: grid; grid-template-columns: 64px minmax(0,1fr) auto; align-items: center; gap: 15px; margin-top: 18px; padding: 11px 15px 11px 12px; overflow: hidden; border: 1px solid rgba(92,126,226,.34); border-radius: 20px; background: linear-gradient(115deg,rgba(21,36,77,.92),rgba(13,21,46,.92)); box-shadow: 0 18px 45px rgba(4,10,29,.2),inset 0 1px rgba(255,255,255,.025); } .sync-activity::after { content: ''; position: absolute; right: 13%; bottom: -90px; width: 210px; aspect-ratio: 1; border: 1px solid rgba(96,128,222,.12); border-radius: 50%; pointer-events: none; } .sync-activity--succeeded { border-color: rgba(80,230,193,.36); background: linear-gradient(115deg,rgba(18,53,62,.82),rgba(13,25,47,.93)); } .sync-activity--failed { border-color: rgba(255,150,155,.4); background: linear-gradient(115deg,rgba(67,31,48,.76),rgba(19,23,48,.94)); } .sync-activity__visual { position: relative; z-index: 1; display: grid; width: 64px; height: 64px; place-items: center; border-radius: 17px; background: rgba(8,15,34,.48); } .sync-activity__result { color: var(--success); border: 1px solid rgba(80,230,193,.26); background: rgba(80,230,193,.08); } .sync-activity--failed .sync-activity__result { color: #ffaaa8; border-color: rgba(255,150,155,.28); background: rgba(255,150,155,.08); } .sync-activity__result svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; } .sync-activity__copy { position: relative; z-index: 1; min-width: 0; } .sync-activity__copy > span { display: block; margin-bottom: 3px; color: #7894ff; font-size: 9px; font-weight: 900; letter-spacing: .13em; } .sync-activity--succeeded .sync-activity__copy > span { color: #58dcb8; } .sync-activity--failed .sync-activity__copy > span { color: #ff9fa4; } .sync-activity__copy strong { display: block; color: #f2f5ff; font-size: 15px; } .sync-activity__copy p { overflow: hidden; margin: 3px 0 0; color: #aeb9d4; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; } .sync-activity__live { position: relative; z-index: 1; padding: 7px 10px; border: 1px solid rgba(115,144,235,.24); border-radius: 999px; color: #b8c5e3; background: rgba(26,39,76,.52); font-size: 10px; font-weight: 800; white-space: nowrap; } .sync-activity__close { position: relative; z-index: 1; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid rgba(149,164,203,.27); border-radius: 11px; color: #c3cde3; background: rgba(21,31,58,.62); font-size: 23px; line-height: 1; } .sync-activity + .dashboard-heading,.sync-activity + .snapshot-view { margin-top: 28px; } .sync-activity-enter-active,.sync-activity-leave-active { transition: opacity .18s ease,transform .18s ease; } .sync-activity-enter-from,.sync-activity-leave-to { opacity: 0; transform: translateY(-6px); }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 46px 0 27px; } .dashboard-heading h1, .connection-modal h1 { margin: 8px 0 10px; font-size: clamp(35px,4vw,52px); letter-spacing: -.065em; } .dashboard-heading p:not(.kicker) { max-width: 630px; margin: 0; color: #aeb9d4; line-height: 1.55; } .kicker { margin: 0; color: #7290ff; font-size: 12px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
+.dashboard-heading--home { align-items: end; } .dashboard-heading .dashboard-heading__note { max-width: 390px; padding-left: 17px; border-left: 2px solid rgba(80,230,193,.38); color: #8f9bb8; font-size: 12px; }
+.home-empty { margin-top: 0; }
+.store-dashboard-grid { display: grid; grid-template-columns: repeat(3,minmax(290px,1fr)); gap: 20px; }
+.store-dashboard-card { position: relative; display: grid; min-height: 390px; grid-template-rows: auto auto 1fr auto; gap: 22px; padding: 25px; overflow: hidden; border: 1px solid rgba(126,151,217,.28); border-radius: 25px; background: linear-gradient(145deg,rgba(24,38,76,.97),rgba(11,18,42,.97)); box-shadow: inset 0 1px rgba(255,255,255,.035),0 18px 44px rgba(2,8,29,.14); }
+.store-dashboard-card::after { content: ''; position: absolute; top: -90px; right: -76px; width: 190px; aspect-ratio: 1; border: 1px solid rgba(97,132,236,.13); border-radius: 50%; pointer-events: none; }
+.store-dashboard-card--disabled { filter: saturate(.62); opacity: .72; }
+.store-dashboard-card__head { position: relative; z-index: 1; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; align-items: center; gap: 13px; } .store-dashboard-card__head .market-mark { width: 48px; height: 48px; border-radius: 14px; } .store-dashboard-card__head p { margin: 0 0 3px; color: #8f9dbb; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; } .store-dashboard-card__head h2 { overflow: hidden; margin: 0; color: #f4f7ff; font-size: 20px; letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; } .store-dashboard-card__state { padding: 5px 8px; border: 1px solid rgba(156,169,201,.25); border-radius: 999px; color: #9aa6bf; font-size: 9px; font-weight: 850; text-transform: uppercase; }
+.store-dashboard-card__sales { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; } .store-dashboard-card__sales > div { min-width: 0; padding: 15px; border: 1px solid rgba(115,144,227,.19); border-radius: 16px; background: rgba(7,15,37,.42); } .store-dashboard-card__sales span { display: block; margin-bottom: 8px; color: #8f9dbb; font-size: 10px; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; } .store-dashboard-card__sales strong { display: block; overflow: hidden; color: #f7f9ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: clamp(18px,1.7vw,25px); letter-spacing: -.055em; text-overflow: ellipsis; white-space: nowrap; }
+.store-dashboard-card__attention { display: grid; align-content: start; margin: 0; border-top: 1px solid rgba(145,164,205,.17); } .store-dashboard-card__attention > div { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 14px; min-height: 48px; border-bottom: 1px solid rgba(145,164,205,.17); } .store-dashboard-card__attention dt { display: flex; min-width: 0; align-items: center; gap: 9px; color: #b2bdd5; font-size: 13px; } .store-dashboard-card__attention dd { margin: 0; color: #eef2ff; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 14px; font-weight: 800; text-align: right; }
+.metric-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #7894ff; box-shadow: 0 0 0 4px rgba(120,148,255,.09); } .metric-dot--review { background: #ffc75a; box-shadow: 0 0 0 4px rgba(255,199,90,.09); } .metric-dot--chat { background: #58e5bd; box-shadow: 0 0 0 4px rgba(88,229,189,.09); }
+.store-dashboard-card footer { color: #7f8da9; font-size: 11px; line-height: 1.45; } .store-dashboard-card__error { color: #ffaaa8; }
 .primary-button { min-height: 52px; padding: 0 20px; border: 0; border-radius: 14px; color: #fff; background: linear-gradient(135deg,var(--brand-blue),var(--brand-blue-bright)); font-weight: 850; box-shadow: 0 13px 32px rgba(32,77,220,.28); transition: transform .2s, filter .2s; } .primary-button:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.08); }
 .connection-grid { display: grid; grid-template-columns: repeat(3,minmax(255px,1fr)); gap: 20px; } .connection-card, .connection-add-card { min-height: 320px; padding: 26px; border: 1px solid rgba(135,157,207,.24); border-radius: 25px; background: linear-gradient(145deg,rgba(20,31,60,.95),rgba(12,18,42,.93)); } .connection-card--disabled { border-color: rgba(135,157,207,.16); background: linear-gradient(145deg,rgba(18,27,51,.82),rgba(11,16,36,.86)); } .connection-card--disabled > :not(footer) { opacity: .66; } .connection-card--error { border-color: rgba(255,150,155,.34); } .connection-card { display: grid; gap: 14px; } .connection-card__head, .connection-card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; } .connection-card h2 { margin: 0; font-size: 24px; letter-spacing: -.045em; } .connection-card p { margin: 5px 0 0; color: #aeb9d4; } .connection-card .connection-card__activity { min-height: 36px; margin: 0; color: #9eabc7; font-size: 12px; line-height: 1.45; } .connection-card .connection-card__activity--error { color: #ffaaa8; }
 .market-mark { display: inline-grid; width: 43px; height: 43px; place-items: center; flex: 0 0 auto; overflow: hidden; border: 1px solid rgba(255,255,255,.17); border-radius: 12px; background: #fff; box-shadow: 0 7px 18px rgba(0,0,0,.16); } .market-mark img { display: block; width: 100%; height: 100%; object-fit: cover; } .market-mark--ozon img { transform: scale(1.32); } .market-mark--yandex_market img { transform: scale(1.03); } .connection-status { color: var(--success); font-size: 12px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; } .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px rgba(80,230,193,.1); } .connection-status--disabled { color: #aeb9d4; } .connection-status--error { color: #ff969b; } .connection-status--error::before { box-shadow: 0 0 0 5px rgba(255,150,155,.1); }
@@ -2068,7 +2239,8 @@ onBeforeUnmount(() => {
 .snapshot-card__head > .order-card__actions { display: flex; min-width: auto; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 7px; margin-left: auto; }
 .order-card-live-move { transition: transform .42s cubic-bezier(.22,.78,.24,1); } .order-card-live-enter-active { position: relative; overflow: hidden; animation: order-card-arrive .52s cubic-bezier(.18,.82,.28,1) both; } .order-card-live-enter-active::after { content: ''; position: absolute; inset: 0; border: 1px solid rgba(82,229,190,.64); border-radius: inherit; background: linear-gradient(105deg,transparent 18%,rgba(86,229,191,.11) 48%,transparent 76%); pointer-events: none; animation: order-card-signal .82s ease-out both; } .order-card-live-leave-active { transition: opacity .18s ease,transform .18s ease; } .order-card-live-leave-to { opacity: 0; transform: scale(.985); } @keyframes order-card-arrive { 0% { opacity: 0; transform: translateY(-14px) scale(.985); filter: saturate(.75); } 58% { opacity: 1; transform: translateY(2px) scale(1.002); } 100% { opacity: 1; transform: none; filter: none; } } @keyframes order-card-signal { 0% { opacity: 0; transform: translateX(-24%); } 30% { opacity: 1; } 100% { opacity: 0; transform: translateX(24%); } }
 .catalog-state-switch { display: inline-flex; width: fit-content; gap: 5px; margin: 1px 0 3px; padding: 5px; border: 1px solid rgba(139,158,208,.25); border-radius: 16px; background: rgba(11,19,44,.58); } .catalog-state-switch button { display: flex; min-height: 45px; align-items: center; gap: 9px; padding: 0 18px; border: 1px solid transparent; border-radius: 12px; color: #aeb9d3; background: transparent; font: inherit; font-size: 14px; font-weight: 850; } .catalog-state-switch button:hover { color: #eef3ff; background: rgba(45,62,104,.38); } .catalog-state-switch button.active { color: #fff; border-color: rgba(98,130,255,.72); background: linear-gradient(135deg,#2255e8,#4a72ff); box-shadow: 0 9px 22px rgba(28,70,210,.22); } .catalog-state-switch small { min-width: 26px; padding: 3px 7px; border-radius: 999px; color: #aebbd9; background: rgba(123,143,194,.13); font-size: 11px; text-align: center; } .catalog-state-switch button.active small { color: #fff; background: rgba(7,21,71,.2); } .snapshot-archive-label { display: inline-flex; margin-left: 8px; padding: 2px 7px; border: 1px solid rgba(116,141,207,.28); border-radius: 999px; color: #9cadcf; font-size: 9px; font-weight: 850; letter-spacing: .03em; text-transform: uppercase; vertical-align: 1px; }
-@media (max-width:900px) { .connection-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .plan-badge { min-width: 0; height: 42px; gap: 7px; padding: 6px 10px; } .plan-badge__copy small { display: none; } .plan-badge__copy strong { font-size: 12px; } .profile-button { height: 42px; gap: 0; padding: 0 12px; white-space: nowrap; } .profile-button__name,.profile-button__divider { display: none; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 26px; } .seller-nav { width: 100%; gap: 4px; } .seller-nav__item { flex: 1; padding: 0 9px; font-size: 13px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .connection-grid, .snapshot-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
+@media (max-width:1180px) { .app-header { flex-wrap: wrap; } .app-header .seller-nav { order: 3; width: 100%; } .app-header .seller-nav__item { flex: 1; } }
+@media (max-width:900px) { .connection-grid,.store-dashboard-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .dashboard-heading .dashboard-heading__note { max-width: 560px; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { gap: 10px; min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .plan-badge { min-width: 0; height: 42px; gap: 7px; padding: 6px 10px; } .plan-badge__copy small { display: none; } .plan-badge__copy strong { font-size: 12px; } .profile-button { height: 42px; gap: 0; padding: 0 12px; white-space: nowrap; } .profile-button__name,.profile-button__divider { display: none; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 0; } .seller-nav { width: 100%; gap: 3px; } .seller-nav__item { flex: 1; min-width: 0; padding: 0 6px; font-size: 11px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .dashboard-heading .dashboard-heading__note { padding-left: 13px; } .connection-grid, .snapshot-grid,.store-dashboard-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .store-dashboard-card { min-height: 370px; padding: 20px; } .store-dashboard-card__sales strong { font-size: 19px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
 @media (max-width:660px) { .order-popup-toggle { width: 42px; height: 42px; } .seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }

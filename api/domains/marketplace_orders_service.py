@@ -202,11 +202,14 @@ def _fetch_yandex_market_orders(
     *, business_id: int, campaign_id: int, token: str,
     synced_after: datetime | None = None, synced_before: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    # Первый запуск читает 30 дней DBS-заказов, следующие — изменения после успешного watermark.
+    # Первый запуск читает минимум 30 дней и весь текущий месяц для карточки главной.
     period_to = _as_utc(synced_before, default=datetime.now(timezone.utc))
     if synced_after is None:
         creation_to = period_to.date() + timedelta(days=1)
-        creation_from = creation_to - timedelta(days=ORDER_INITIAL_BACKFILL_DAYS)
+        creation_from = min(
+            creation_to - timedelta(days=ORDER_INITIAL_BACKFILL_DAYS),
+            period_to.date().replace(day=1),
+        )
         date_filters = [
             {"creationDateFrom": chunk_from.date().isoformat(), "creationDateTo": chunk_to.date().isoformat()}
             for chunk_from, chunk_to in _split_period(

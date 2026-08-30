@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from domains.local_auth import AuthenticatedUser
 
 
-SyncKind = Literal["catalog", "orders"]
+SyncKind = Literal["catalog", "orders", "dashboard"]
 
 
 class MarketplaceSyncJobCreateIn(BaseModel):
@@ -105,17 +105,18 @@ def mount_marketplace_sync_job_routes(
         return seller_user
 
     def enqueue_jobs(sync_kind: SyncKind, payload: MarketplaceSyncJobCreateIn, user: AuthenticatedUser) -> MarketplaceSyncJobListOut:
-        # Создаёт не более одного активного задания вида catalog/orders на магазин.
+        # Создаёт не более одного активного задания каждого вида на магазин.
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
             connection_filter = "AND id=%s" if payload.connection_id else ""
+            provider_filter = "AND provider_code='yandex_market'" if sync_kind == "dashboard" else ""
             params = [seller_user.workspace_id, *([payload.connection_id] if payload.connection_id else [])]
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""
                     SELECT id
                     FROM seller.marketplace_connections
-                    WHERE workspace_id=%s AND status='active' {connection_filter}
+                    WHERE workspace_id=%s AND status='active' {provider_filter} {connection_filter}
                     ORDER BY created_at, id
                     """,
                     params,
@@ -172,6 +173,13 @@ def mount_marketplace_sync_job_routes(
         user: AuthenticatedUser = Depends(current_user),
     ) -> MarketplaceSyncJobListOut:
         return enqueue_jobs("orders", payload, user)
+
+    @app.post("/marketplaces/dashboard/sync", response_model=MarketplaceSyncJobListOut, status_code=202)
+    def enqueue_dashboard_sync(
+        payload: MarketplaceSyncJobCreateIn,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> MarketplaceSyncJobListOut:
+        return enqueue_jobs("dashboard", payload, user)
 
     @app.get("/marketplaces/sync-jobs", response_model=MarketplaceSyncJobListOut)
     def list_sync_jobs(
