@@ -213,6 +213,7 @@ class MarketplaceDashboardTests(unittest.TestCase):
         source = inspect.getsource(mount_marketplace_dashboard_routes)
         self.assertIn("WHERE marketplace.workspace_id=%s", source)
         self.assertIn("snapshot.workspace_id=marketplace.workspace_id", source)
+        self.assertIn("order_row.created_at >= %s", source)
         self.assertNotIn("fetch_yandex", source)
 
     def test_sales_periods_and_subscription_use_moscow_calendar_days(self) -> None:

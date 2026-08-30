@@ -88,6 +88,14 @@ def parse_job_ids(value: str) -> list[int]:
     return result
 
 
+def list_jobs_scope(requested_ids: list[int], requested_by_user_id: int) -> tuple[str, list[Any]]:
+    """При восстановлении показывает только ручные задания текущего пользователя."""
+
+    if requested_ids:
+        return "AND job.id=ANY(%s)", [requested_ids]
+    return "AND job.requested_by_user_id=%s", [int(requested_by_user_id)]
+
+
 def mount_marketplace_sync_job_routes(
     app: FastAPI,
     *,
@@ -190,13 +198,13 @@ def mount_marketplace_sync_job_routes(
         requested_ids = parse_job_ids(job_ids)
         with psycopg.connect(database_url()) as connection:
             seller_user = workspace_for_user(connection, user)
-            where_ids = "AND job.id=ANY(%s)" if requested_ids else ""
-            params = [seller_user.workspace_id, *([requested_ids] if requested_ids else [])]
+            jobs_scope, scope_params = list_jobs_scope(requested_ids, seller_user.id)
+            params = [seller_user.workspace_id, *scope_params]
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""
                     {JOB_SELECT}
-                    WHERE job.workspace_id=%s {where_ids}
+                    WHERE job.workspace_id=%s {jobs_scope}
                     ORDER BY job.created_at DESC, job.id DESC
                     LIMIT 100
                     """,

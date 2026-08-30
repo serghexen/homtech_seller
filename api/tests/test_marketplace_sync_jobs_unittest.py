@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 from fastapi import HTTPException
 
 from domains.marketplace_orders_service import MarketplacePaginationError
-from domains.marketplace_sync_jobs_api import parse_job_ids
+from domains.marketplace_sync_jobs_api import list_jobs_scope, parse_job_ids
 from domains.marketplace_sync_service import (
     execute_sync_job,
     save_order_snapshots,
@@ -147,6 +147,15 @@ class MarketplaceSyncJobsTests(unittest.TestCase):
         for value in ("0", "-1", "one", "1,,2"):
             with self.subTest(value=value), self.assertRaises(HTTPException):
                 parse_job_ids(value)
+
+    def test_sync_restore_excludes_automatic_background_jobs(self) -> None:
+        query, params = list_jobs_scope([], requested_by_user_id=41)
+        self.assertEqual(query, "AND job.requested_by_user_id=%s")
+        self.assertEqual(params, [41])
+
+        targeted_query, targeted_params = list_jobs_scope([7, 8], requested_by_user_id=41)
+        self.assertEqual(targeted_query, "AND job.id=ANY(%s)")
+        self.assertEqual(targeted_params, [[7, 8]])
 
     def test_retry_backoff_is_exponential_and_capped(self) -> None:
         self.assertEqual([retry_delay_seconds(attempt) for attempt in (1, 2, 3, 4)], [15, 30, 60, 120])

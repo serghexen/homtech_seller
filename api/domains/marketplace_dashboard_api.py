@@ -106,6 +106,7 @@ def mount_marketplace_dashboard_routes(
                             max(NULLIF(order_row.currency_code, '')) AS currency_code
                         FROM seller.marketplace_orders AS order_row
                         WHERE order_row.connection_id=marketplace.id
+                          AND order_row.created_at >= %s
                           AND order_row.sales_amount IS NOT NULL
                           AND order_row.is_fake=false
                           AND order_row.normalized_status <> 'cancelled'
@@ -116,7 +117,7 @@ def mount_marketplace_dashboard_routes(
                     WHERE marketplace.workspace_id=%s
                     ORDER BY marketplace.created_at, marketplace.id
                     """,
-                    (day_start, month_start, seller_user.workspace_id),
+                    (day_start, month_start, month_start, seller_user.workspace_id),
                 )
                 rows = cursor.fetchall()
 

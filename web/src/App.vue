@@ -13,6 +13,7 @@ import ReviewsView from './components/ReviewsView.vue'
 import StoreLaunchModal from './components/StoreLaunchModal.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
+import { shouldShowDashboardSkeleton } from './utils/dashboard.js'
 import { isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
 import {
   groupNewOrderEvents,
@@ -134,6 +135,7 @@ let orderSearchTimer = null
 let orderActivityCursor = null
 let orderActivityTimer = null
 let dashboardRefreshTimer = null
+let dashboardRequestSequence = 0
 let orderActivityRequestActive = false
 let orderToastSequence = 0
 const orderToastTimers = new Map()
@@ -966,7 +968,9 @@ async function refreshSnapshotsAfterSync(jobs) {
   const requests = []
   if (kinds.has('catalog') && hasConnections.value) requests.push(loadCatalog())
   if (kinds.has('orders') && hasConnections.value) requests.push(loadOrders())
-  if ((kinds.has('orders') || kinds.has('dashboard')) && hasConnections.value) requests.push(loadDashboard())
+  if ((kinds.has('orders') || kinds.has('dashboard')) && hasConnections.value) {
+    requests.push(loadDashboard({ silent: dashboardItems.value.length > 0 }))
+  }
   await Promise.allSettled(requests)
   await loadConnections()
 }
@@ -1160,18 +1164,22 @@ async function loadConnections() {
   }
 }
 
-async function loadDashboard() {
+async function loadDashboard({ silent = false } = {}) {
   // HTTP читает только локальный снимок; внешние API обновляет общий worker по расписанию.
   if (!user.value) return
-  dashboardLoading.value = true
+  const requestId = ++dashboardRequestSequence
+  if (!silent && !dashboardItems.value.length) dashboardLoading.value = true
   dashboardError.value = ''
   try {
     const result = await apiRequest('/marketplaces/dashboard')
+    if (requestId !== dashboardRequestSequence) return
     dashboardItems.value = Array.isArray(result.items) ? result.items : []
   } catch (requestError) {
-    dashboardError.value = requestError.message || 'Не удалось загрузить показатели магазинов'
+    if (requestId === dashboardRequestSequence) {
+      dashboardError.value = requestError.message || 'Не удалось загрузить показатели магазинов'
+    }
   } finally {
-    dashboardLoading.value = false
+    if (requestId === dashboardRequestSequence) dashboardLoading.value = false
   }
 }
 
@@ -1186,7 +1194,7 @@ function scheduleDashboardRefresh() {
   dashboardRefreshTimer = window.setTimeout(async () => {
     dashboardRefreshTimer = null
     if (!user.value || activeSection.value !== 'home') return
-    await loadDashboard()
+    await loadDashboard({ silent: true })
     scheduleDashboardRefresh()
   }, 60_000)
 }
@@ -1251,7 +1259,7 @@ async function changeSection(section) {
   notice.value = ''
   if (!hasConnections.value) return
   if (section === 'home') {
-    await loadDashboard()
+    await loadDashboard({ silent: dashboardItems.value.length > 0 })
     scheduleDashboardRefresh()
   }
   if (section === 'catalog') await loadCatalog()
@@ -1804,7 +1812,7 @@ onBeforeUnmount(() => {
         <p class="dashboard-heading__note">Суммы считаются из данных заказов, без вызова финансовых методов маркетплейсов.</p>
       </div>
       <p v-if="activeSection === 'home' && dashboardError" class="form-error">{{ dashboardError }}</p>
-      <div v-if="activeSection === 'home' && dashboardLoading" class="empty-state">Загружаем показатели магазинов…</div>
+      <div v-if="activeSection === 'home' && shouldShowDashboardSkeleton(dashboardLoading, dashboardItems.length)" class="empty-state">Загружаем показатели магазинов…</div>
       <div v-else-if="activeSection === 'home' && !dashboardItems.length" class="section-gate home-empty" aria-live="polite">
         <span class="section-gate__mark" aria-hidden="true">+</span>
         <p class="kicker">ПЕРВЫЙ ШАГ</p>
