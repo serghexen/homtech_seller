@@ -54,6 +54,8 @@ class WorkspaceBalanceOut(BaseModel):
     currency: str = "RUB"
     topups_enabled: bool
     demo_mode: bool
+    min_topup_amount: int
+    max_topup_amount: int
 
 
 class WorkspaceTopupCreateIn(BaseModel):
@@ -486,6 +488,7 @@ def mount_tbank_payment_routes(
         return WorkspaceBalanceOut(
             available_amount=int(row[0]), reserved_amount=int(row[1]), currency=str(row[2]),
             topups_enabled=topups_enabled() and configured, demo_mode=demo_mode(),
+            min_topup_amount=min_topup_amount(), max_topup_amount=max_topup_amount(),
         )
 
     @app.post("/billing/topups", response_model=WorkspaceTopupOut, status_code=201)

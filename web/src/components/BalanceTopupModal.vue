@@ -22,7 +22,10 @@ const amountKopecks = computed(() => {
   if (!/^\d+(?:\.\d{0,2})?$/.test(normalized)) return 0
   return Math.round(Number(normalized) * 100)
 })
-const validAmount = computed(() => amountKopecks.value >= 10_000 && amountKopecks.value <= 10_000_000)
+const minAmount = computed(() => Number(props.balance?.min_topup_amount || 10_000))
+const maxAmount = computed(() => Number(props.balance?.max_topup_amount || 10_000_000))
+const validAmount = computed(() => amountKopecks.value >= minAmount.value && amountKopecks.value <= maxAmount.value)
+const limitsLabel = computed(() => `От ${formatAmountLimit(minAmount.value)} до ${formatAmountLimit(maxAmount.value)} ₽`)
 const formattedBalance = computed(() => formatRubles(props.balance?.available_amount || 0))
 const isFinished = computed(() => ['confirmed', 'rejected', 'expired', 'cancelled', 'failed'].includes(topup.value?.state))
 const statusLabel = computed(() => ({
@@ -38,6 +41,10 @@ const statusLabel = computed(() => ({
 function formatRubles(kopecks) {
   return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 2 })
     .format(Number(kopecks || 0) / 100)
+}
+
+function formatAmountLimit(kopecks) {
+  return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(kopecks || 0) / 100)
 }
 
 function chooseAmount(value) {
@@ -69,7 +76,7 @@ async function createTopup() {
     return
   }
   if (!validAmount.value) {
-    error.value = 'Введите сумму от 100 до 100 000 ₽'
+    error.value = `Введите сумму ${limitsLabel.value.toLowerCase()}`
     return
   }
   busy.value = true
@@ -174,7 +181,7 @@ onBeforeUnmount(() => {
                   {{ new Intl.NumberFormat('ru-RU').format(value) }} ₽
                 </button>
               </div>
-              <p id="topup-limits" class="topup-hint">От 100 до 100 000 ₽ · QR действует 15 минут</p>
+              <p id="topup-limits" class="topup-hint">{{ limitsLabel }} · QR действует 15 минут</p>
               <p v-if="!balance?.topups_enabled" class="topup-disabled">
                 Контур готов, но платежи выключены. Добавьте тестовые реквизиты Т-Банка в `.env` и включите kill switch.
               </p>

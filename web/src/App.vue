@@ -75,7 +75,7 @@ const orderToasts = ref([])
 const unreadOrdersCount = ref(0)
 const selectedConnectionId = ref(null)
 const isBalanceTopupOpen = ref(false)
-const workspaceBalance = ref({ available_amount: 0, reserved_amount: 0, currency: 'RUB', topups_enabled: false, demo_mode: true })
+const workspaceBalance = ref({ available_amount: 0, reserved_amount: 0, currency: 'RUB', topups_enabled: false, demo_mode: true, min_topup_amount: 10_000, max_topup_amount: 10_000_000 })
 const catalogSearch = ref('')
 const orderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
 const appliedOrderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
@@ -1536,7 +1536,7 @@ async function logout() {
     stopOrderActivityMonitor()
     selectedConnectionId.value = null
     isBalanceTopupOpen.value = false
-    workspaceBalance.value = { available_amount: 0, reserved_amount: 0, currency: 'RUB', topups_enabled: false, demo_mode: true }
+    workspaceBalance.value = { available_amount: 0, reserved_amount: 0, currency: 'RUB', topups_enabled: false, demo_mode: true, min_topup_amount: 10_000, max_topup_amount: 10_000_000 }
     activeSection.value = 'home'
     form.password = ''
     mode.value = 'login'
