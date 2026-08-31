@@ -4,6 +4,8 @@ import { apiRequest } from './api'
 import homtechLogo from './assets/homtech-wordmark.png'
 import ozonLogo from './assets/ozon-logo.png'
 import yandexMarketLogo from './assets/yandex-market-logo.png'
+import sbpSign from './assets/sbp-sign.png'
+import BalanceTopupModal from './components/BalanceTopupModal.vue'
 import HamsterLoader from './components/HamsterLoader.vue'
 import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
 import OrderFulfillmentAction from './components/OrderFulfillmentAction.vue'
@@ -72,6 +74,8 @@ const orderPopupsEnabled = ref(true)
 const orderToasts = ref([])
 const unreadOrdersCount = ref(0)
 const selectedConnectionId = ref(null)
+const isBalanceTopupOpen = ref(false)
+const workspaceBalance = ref({ available_amount: 0, reserved_amount: 0, currency: 'RUB', topups_enabled: false, demo_mode: true })
 const catalogSearch = ref('')
 const orderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
 const appliedOrderFilters = reactive({ query: '', status: '', date_from: '', date_to: '' })
@@ -1493,6 +1497,7 @@ async function submit() {
     const result = await apiRequest(path, { method: 'POST', body: JSON.stringify(body) })
     user.value = result.user
     form.password = ''
+    await loadWorkspaceBalance()
     await loadConnections()
     await loadDashboard()
     scheduleDashboardRefresh()
@@ -1530,12 +1535,28 @@ async function logout() {
     syncActivityVisible.value = false
     stopOrderActivityMonitor()
     selectedConnectionId.value = null
+    isBalanceTopupOpen.value = false
+    workspaceBalance.value = { available_amount: 0, reserved_amount: 0, currency: 'RUB', topups_enabled: false, demo_mode: true }
     activeSection.value = 'home'
     form.password = ''
     mode.value = 'login'
   } catch (requestError) {
     error.value = requestError.message || 'Не удалось выйти из аккаунта'
   }
+}
+
+async function loadWorkspaceBalance() {
+  if (!user.value) return
+  try {
+    workspaceBalance.value = await apiRequest('/billing/balance')
+  } catch {
+    // Баланс не мешает работе с магазинами, если платёжный контур временно недоступен.
+  }
+}
+
+async function openBalanceTopup() {
+  isBalanceTopupOpen.value = true
+  await loadWorkspaceBalance()
 }
 
 function resetConnectionForm(providerCode = 'ozon') {
@@ -1675,6 +1696,7 @@ onMounted(async () => {
   try {
     const result = await apiRequest('/auth/me')
     user.value = result.user
+    await loadWorkspaceBalance()
     await loadConnections()
     await loadDashboard()
     scheduleDashboardRefresh()
@@ -1746,6 +1768,15 @@ onBeforeUnmount(() => {
         </button>
       </nav>
       <div v-if="user" class="app-account">
+        <button
+          class="balance-topup-toggle"
+          type="button"
+          aria-label="Пополнить общий баланс через СБП"
+          title="Пополнить общий баланс через СБП"
+          @click="openBalanceTopup"
+        >
+          <img :src="sbpSign" alt="" />
+        </button>
         <button
           class="order-popup-toggle"
           :class="{ 'order-popup-toggle--enabled': orderPopupsEnabled }"
@@ -2255,6 +2286,13 @@ onBeforeUnmount(() => {
         </form>
       </section>
     </div>
+
+    <BalanceTopupModal
+      :open="isBalanceTopupOpen"
+      :balance="workspaceBalance"
+      @close="isBalanceTopupOpen = false"
+      @balance-updated="loadWorkspaceBalance"
+    />
   </main>
 </template>
 
@@ -2267,6 +2305,7 @@ onBeforeUnmount(() => {
 .app-header { position: relative; z-index: 1; display: flex; align-items: center; gap: clamp(18px,2.5vw,46px); min-height: 92px; padding: 18px 25px; border: 1px solid rgba(144,160,204,.25); border-radius: 25px; background: rgba(13,20,43,.88); }
 .app-brand { display: flex; align-items: center; gap: 14px; } .app-brand img { width: clamp(160px,17vw,235px); max-height: 45px; object-fit: contain; } .app-brand span { padding-left: 14px; border-left: 1px solid rgba(144,160,204,.32); color: #b9c4dc; font-weight: 750; }
 .app-account { display: flex; align-items: stretch; gap: 5px; margin-left: auto; padding: 5px; border: 1px solid rgba(145,161,204,.2); border-radius: 20px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(2,7,22,.14); }
+.balance-topup-toggle { display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; overflow: hidden; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; background: #f5f1e8; transition: border-color .18s,box-shadow .18s,transform .18s; }.balance-topup-toggle img { width: 29px; height: 24px; object-fit: contain; transform: scale(2); }.balance-topup-toggle:hover { border-color: rgba(245,241,232,.72); box-shadow: 0 8px 22px rgba(0,0,0,.22); transform: translateY(-1px); }
 .order-popup-toggle { position: relative; display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #8290ae; background: rgba(31,40,70,.72); transition: color .18s,border-color .18s,background .18s,transform .18s; } .order-popup-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .order-popup-toggle:hover { color: #eef3ff; border-color: rgba(112,140,222,.5); transform: translateY(-1px); } .order-popup-toggle--enabled { color: #74ebcc; border-color: rgba(80,230,193,.34); background: linear-gradient(145deg,rgba(18,65,72,.62),rgba(17,34,61,.82)); } .order-popup-toggle__badge { position: absolute; top: -5px; right: -5px; display: grid; min-width: 18px; height: 18px; place-items: center; padding: 0 4px; border: 2px solid #0b1229; border-radius: 999px; color: #08142a; background: #56e4bd; font-size: 9px; font-weight: 900; }
 .profile-button, .logout-button, .seller-nav__item, .secondary-button { border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; }
 .profile-button { display: inline-flex; height: 46px; min-width: 0; align-items: center; gap: 9px; padding: 0 14px 0 10px; font-size: 13px; }
@@ -2333,7 +2372,7 @@ onBeforeUnmount(() => {
 @media (max-width:900px) { .connection-grid,.store-dashboard-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .dashboard-heading .dashboard-heading__note { max-width: 560px; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { gap: 10px; min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .profile-button,.logout-button { height: 42px; } .profile-button { width: 42px; padding: 0; justify-content: center; } .profile-button__name { display: none; } .logout-button { padding: 0 11px; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 0; } .seller-nav { width: 100%; gap: 3px; } .seller-nav__item { flex: 1; min-width: 0; padding: 0 6px; font-size: 11px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .dashboard-heading .dashboard-heading__note { padding-left: 13px; } .connection-grid, .snapshot-grid,.store-dashboard-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .store-dashboard-card { min-height: 370px; padding: 20px; } .store-dashboard-card__sales strong { font-size: 19px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
-@media (max-width:660px) { .order-popup-toggle { width: 42px; height: 42px; } .seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }
+@media (max-width:660px) { .balance-topup-toggle,.order-popup-toggle { width: 42px; height: 42px; } .balance-topup-toggle img { width: 27px; height: 22px; }.seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }
 @media (max-width:660px) { .reviews-modal-backdrop { align-items:stretch; padding:0; } .reviews-modal { max-height:100vh; padding:16px; border:0; border-radius:0; } }
 @media (prefers-reduced-motion:reduce) { .order-card-live-move,.order-card-live-enter-active,.order-card-live-enter-active::after,.order-card-live-leave-active { animation: none; transition: none; } }
 </style>

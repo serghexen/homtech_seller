@@ -19,6 +19,7 @@ from domains.ozon_outbound import build_ozon_outbound_processor
 from domains.ozon_review_replies import build_ozon_review_reply_processor
 from domains.ozon_stock_outbound import build_ozon_stock_outbound_processor
 from domains.supplier_fulfillment import build_supplier_fulfillment_processor
+from domains.tbank_payments import build_tbank_reconciliation_processor
 from domains.yandex_market_webhook_processor import build_yandex_market_webhook_processor
 from domains.yandex_market_webhooks_api import webhook_processing_enabled
 from domains.yandex_market_outbound import build_yandex_outbound_processor
@@ -68,6 +69,10 @@ def review_reply_batch_size() -> int:
 
 def fulfillment_batch_size() -> int:
     return max(1, min(int(os.getenv("SELLER_FULFILLMENT_BATCH_SIZE", "5")), 50))
+
+
+def tbank_reconciliation_batch_size() -> int:
+    return max(1, min(int(os.getenv("SELLER_TBANK_RECONCILIATION_BATCH_SIZE", "5")), 50))
 
 
 def stock_outbound_batch_size() -> int:
@@ -396,9 +401,13 @@ def run_worker() -> int:
     fulfillment = build_supplier_fulfillment_processor(database_url=database_url, psycopg=psycopg)
     review_replies = build_yandex_review_reply_processor(database_url=database_url, psycopg=psycopg)
     ozon_review_replies = build_ozon_review_reply_processor(database_url=database_url, psycopg=psycopg)
+    tbank_reconciliation = build_tbank_reconciliation_processor(database_url=database_url, psycopg=psycopg)
     print("Seller worker started", flush=True)
     while not stopping:
         try:
+            reconciled_topups = tbank_reconciliation.process_pending(tbank_reconciliation_batch_size())
+            if reconciled_topups:
+                print(f"Reconciled T-Bank topups: {reconciled_topups}", flush=True)
             recovered_fulfillments = fulfillment.recover_stale()
             if recovered_fulfillments:
                 print(f"Recovered fulfillment leases: {recovered_fulfillments}", flush=True)
@@ -468,7 +477,7 @@ def run_worker() -> int:
                 job = claim_next_job(lock_connection)
                 if not job:
                     if not any((
-                        processed_fulfillments, processed_review_replies, processed_ozon_review_replies,
+                        reconciled_topups, processed_fulfillments, processed_review_replies, processed_ozon_review_replies,
                         processed_webhooks,
                         processed_outbound, processed_stock,
                         processed_ozon_outbound, processed_ozon_stock, scheduled_orders, scheduled_dashboard,

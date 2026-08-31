@@ -21,10 +21,11 @@ from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_reviews_api import mount_marketplace_review_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 from domains.supplier_hub_api import mount_supplier_hub_routes
+from domains.tbank_payments import mount_tbank_payment_routes
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.85")
+app = FastAPI(title="HomTech Seller API", version="0.0.86")
 
 
 def cors_origins() -> list[str]:
@@ -356,6 +357,15 @@ mount_yandex_market_webhook_routes(
 
 # Диагностика Hub не раскрывает секреты, а каталог поставщика доступен только тарифу Pro.
 mount_supplier_hub_routes(
+    app,
+    database_url=database_url,
+    psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+# Баланс принадлежит workspace, а публичный webhook принимает только подписанные события Т-Банка.
+mount_tbank_payment_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,

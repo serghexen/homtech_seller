@@ -9,6 +9,19 @@ from scripts.run_migrations import split_sql_statements
 
 
 class MigrationFilesTests(unittest.TestCase):
+    def test_workspace_balance_is_account_scoped_and_topups_are_idempotent(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260831_01_workspace_balance.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("workspace_id bigint PRIMARY KEY", joined)
+        self.assertIn("CREATE TABLE IF NOT EXISTS seller.workspace_balance_ledger", joined)
+        self.assertIn("business_key text NOT NULL UNIQUE", joined)
+        self.assertIn("event_fingerprint text NOT NULL UNIQUE", joined)
+        self.assertIn("reconcile_lock_token uuid", joined)
+        self.assertIn("connection_id bigint", joined)
+        self.assertNotIn("connection_id bigint NOT NULL", joined)
+
     def test_yandex_reviews_are_workspace_scoped_and_replies_start_disabled(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260830_02_yandex_reviews.sql"
