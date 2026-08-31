@@ -4,7 +4,6 @@ import { apiRequest } from './api'
 import homtechLogo from './assets/homtech-wordmark.png'
 import ozonLogo from './assets/ozon-logo.png'
 import yandexMarketLogo from './assets/yandex-market-logo.png'
-import sbpSign from './assets/sbp-sign.png'
 import BalanceTopupModal from './components/BalanceTopupModal.vue'
 import HamsterLoader from './components/HamsterLoader.vue'
 import CatalogArchiveConfirm from './components/CatalogArchiveConfirm.vue'
@@ -177,6 +176,12 @@ const catalogEmptyMessage = computed(() => catalogEmptyStateMessage({
 const appliedOrderFilterCount = computed(() => ['status', 'date_from', 'date_to'].filter((key) => appliedOrderFilters[key]).length)
 const canManageCatalog = computed(() => ['owner', 'operator'].includes(user.value?.role_code))
 const canManageSupplier = computed(() => selectedCatalogItem.value?.supplier_mapping_allowed === true)
+const workspaceBalanceLabel = computed(() => new Intl.NumberFormat('ru-RU', {
+  style: 'currency',
+  currency: workspaceBalance.value?.currency || 'RUB',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+}).format(Number(workspaceBalance.value?.available_amount || 0) / 100))
 function switchMode(nextMode) {
   // Переключает сценарий входа без потери введённого email и показывает только нужные поля.
   mode.value = nextMode
@@ -1771,11 +1776,21 @@ onBeforeUnmount(() => {
         <button
           class="balance-topup-toggle"
           type="button"
-          aria-label="Пополнить общий баланс через СБП"
-          title="Пополнить общий баланс через СБП"
+          :aria-label="`Баланс аккаунта ${workspaceBalanceLabel}. Пополнить баланс`"
+          :title="`Баланс аккаунта ${workspaceBalanceLabel}. Нажмите, чтобы пополнить`"
           @click="openBalanceTopup"
         >
-          <img :src="sbpSign" alt="" />
+          <span class="balance-topup-toggle__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 7.5h13.5A2.5 2.5 0 0 1 20 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 2 17.5v-12A2.5 2.5 0 0 1 4.5 3H17" />
+              <path d="M20 11h-5a2 2 0 0 0 0 4h5" />
+              <path d="M15.5 13h.01" />
+            </svg>
+          </span>
+          <span class="balance-topup-toggle__copy">
+            <small>Баланс</small>
+            <strong>{{ workspaceBalanceLabel }}</strong>
+          </span>
         </button>
         <button
           class="order-popup-toggle"
@@ -2305,7 +2320,7 @@ onBeforeUnmount(() => {
 .app-header { position: relative; z-index: 1; display: flex; align-items: center; gap: clamp(18px,2.5vw,46px); min-height: 92px; padding: 18px 25px; border: 1px solid rgba(144,160,204,.25); border-radius: 25px; background: rgba(13,20,43,.88); }
 .app-brand { display: flex; align-items: center; gap: 14px; } .app-brand img { width: clamp(160px,17vw,235px); max-height: 45px; object-fit: contain; } .app-brand span { padding-left: 14px; border-left: 1px solid rgba(144,160,204,.32); color: #b9c4dc; font-weight: 750; }
 .app-account { display: flex; align-items: stretch; gap: 5px; margin-left: auto; padding: 5px; border: 1px solid rgba(145,161,204,.2); border-radius: 20px; background: rgba(8,14,32,.42); box-shadow: inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(2,7,22,.14); }
-.balance-topup-toggle { display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; overflow: hidden; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; background: #f5f1e8; transition: border-color .18s,box-shadow .18s,transform .18s; }.balance-topup-toggle img { width: 29px; height: 24px; object-fit: contain; transform: scale(2); }.balance-topup-toggle:hover { border-color: rgba(245,241,232,.72); box-shadow: 0 8px 22px rgba(0,0,0,.22); transform: translateY(-1px); }
+.balance-topup-toggle { display: flex; min-width: 132px; height: 46px; align-items: center; gap: 9px; flex: 0 0 auto; padding: 0 13px 0 7px; border: 1px solid rgba(80,230,193,.34); border-radius: 14px; color: #edf1ff; background: linear-gradient(145deg,rgba(25,48,69,.88),rgba(14,38,55,.94)); box-shadow: inset 0 1px rgba(255,255,255,.035); transition: border-color .18s,box-shadow .18s,transform .18s,background .18s; }.balance-topup-toggle__icon { display: grid; width: 32px; height: 32px; place-items: center; flex: 0 0 auto; border: 1px solid rgba(80,230,193,.28); border-radius: 10px; color: #61e5c3; background: rgba(80,230,193,.09); }.balance-topup-toggle__icon svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }.balance-topup-toggle__copy { display: grid; min-width: 0; gap: 1px; text-align: left; white-space: nowrap; }.balance-topup-toggle__copy small { color: #7f91ad; font-size: 8px; font-weight: 850; letter-spacing: .08em; line-height: 1; text-transform: uppercase; }.balance-topup-toggle__copy strong { font-size: 13px; font-variant-numeric: tabular-nums; letter-spacing: -.015em; line-height: 1.2; }.balance-topup-toggle:hover { border-color: rgba(80,230,193,.68); background: linear-gradient(145deg,rgba(29,59,79,.94),rgba(15,45,59,.98)); box-shadow: 0 8px 22px rgba(0,0,0,.22),0 0 0 3px rgba(80,230,193,.06); transform: translateY(-1px); }.balance-topup-toggle:focus-visible { outline: 3px solid rgba(80,230,193,.2); outline-offset: 2px; }
 .order-popup-toggle { position: relative; display: grid; width: 46px; height: 46px; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #8290ae; background: rgba(31,40,70,.72); transition: color .18s,border-color .18s,background .18s,transform .18s; } .order-popup-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .order-popup-toggle:hover { color: #eef3ff; border-color: rgba(112,140,222,.5); transform: translateY(-1px); } .order-popup-toggle--enabled { color: #74ebcc; border-color: rgba(80,230,193,.34); background: linear-gradient(145deg,rgba(18,65,72,.62),rgba(17,34,61,.82)); } .order-popup-toggle__badge { position: absolute; top: -5px; right: -5px; display: grid; min-width: 18px; height: 18px; place-items: center; padding: 0 4px; border: 2px solid #0b1229; border-radius: 999px; color: #08142a; background: #56e4bd; font-size: 9px; font-weight: 900; }
 .profile-button, .logout-button, .seller-nav__item, .secondary-button { border: 1px solid rgba(149,164,203,.28); border-radius: 14px; color: #dce5f9; background: rgba(31,40,70,.72); font-weight: 750; }
 .profile-button { display: inline-flex; height: 46px; min-width: 0; align-items: center; gap: 9px; padding: 0 14px 0 10px; font-size: 13px; }
@@ -2372,7 +2387,7 @@ onBeforeUnmount(() => {
 @media (max-width:900px) { .connection-grid,.store-dashboard-grid { grid-template-columns: repeat(2,minmax(255px,1fr)); } .dashboard-heading { align-items: start; flex-direction: column; } .dashboard-heading .dashboard-heading__note { max-width: 560px; } .snapshot-toolbar { grid-template-columns: minmax(0,1fr) auto; } .snapshot-search { grid-column: 1 / -1; } } @media (max-width:660px) { .app-shell { padding: 16px 16px 44px; } .app-version { right: 16px; bottom: 11px; font-size: 9px; } .app-header { gap: 10px; min-height: auto; padding: 14px; border-radius: 19px; } .app-brand img { width: 120px; } .app-brand span { display: none; } .app-account { gap: 3px; padding: 3px; border-radius: 17px; } .profile-button,.logout-button { height: 42px; } .profile-button { width: 42px; padding: 0; justify-content: center; } .profile-button__name { display: none; } .logout-button { padding: 0 11px; } .session-loader { margin-top: 18vh; } .seller-dashboard { margin-top: 0; } .seller-nav { width: 100%; gap: 3px; } .seller-nav__item { flex: 1; min-width: 0; padding: 0 6px; font-size: 11px; } .seller-nav small { display: none; } .dashboard-heading { margin: 30px 0 22px; } .dashboard-heading h1 { font-size: 40px; } .dashboard-heading .dashboard-heading__note { padding-left: 13px; } .connection-grid, .snapshot-grid,.store-dashboard-grid { grid-template-columns: 1fr; } .connection-card, .connection-add-card { min-height: 265px; } .store-dashboard-card { min-height: 370px; padding: 20px; } .store-dashboard-card__sales strong { font-size: 19px; } .snapshot-toolbar { grid-template-columns: 1fr; } .snapshot-search__row { grid-template-columns: 1fr auto; } .snapshot-search__row > input { grid-column: 1 / -1; } .filter-toggle, .sync-button { justify-self: start; } .orders-filter-row__period { flex-wrap: wrap; } .orders-filter-row__actions { width: 100%; } .auth-card { grid-template-columns: 1fr; margin-top: 58px; padding: 32px 25px; border-radius: 23px; } .auth-card__footer { grid-column: 1; flex-wrap: wrap; } .auth-card__intro h1 { font-size: 45px; } .provider-picker { grid-template-columns: 1fr; } .connection-form__actions { flex-direction: column-reverse; } .connection-form__actions .primary-button { width: 100%; } }
 @media (max-width:660px) { .catalog-state-switch { display: grid; width: 100%; grid-template-columns: 1fr 1fr; } .catalog-state-switch button { justify-content: center; padding: 0 12px; } .catalog-card__actions { gap: 5px; } }
 @media (max-width:660px) { .sync-activity { grid-template-columns: 48px minmax(0,1fr) auto; gap: 10px; padding: 10px; border-radius: 17px; } .sync-activity__visual { width: 48px; height: 48px; border-radius: 13px; } .sync-activity__visual .hamster-loader { transform: scale(.76); } .sync-activity__copy p { white-space: normal; } .sync-activity__live { display: none; } .sync-activity__close { width: 32px; height: 32px; } }
-@media (max-width:660px) { .balance-topup-toggle,.order-popup-toggle { width: 42px; height: 42px; } .balance-topup-toggle img { width: 27px; height: 22px; }.seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }
+@media (max-width:660px) { .balance-topup-toggle { min-width: 106px; height: 42px; gap: 7px; padding: 0 10px 0 5px; }.balance-topup-toggle__icon { width: 30px; height: 30px; }.balance-topup-toggle__copy small { display: none; }.balance-topup-toggle__copy strong { font-size: 12px; }.order-popup-toggle { width: 42px; height: 42px; } .seller-nav .seller-nav__badge { display: inline-grid; margin-left: 3px; } .order-toast-stack { top: 84px; right: 16px; } .order-toast { grid-template-columns: 42px minmax(0,1fr) 26px; gap: 9px; padding: 11px; border-radius: 15px; } .order-toast__mark { width: 42px; height: 42px; border-radius: 12px; } .order-toast__mark img { width: 30px; height: 30px; } }
 @media (max-width:660px) { .reviews-modal-backdrop { align-items:stretch; padding:0; } .reviews-modal { max-height:100vh; padding:16px; border:0; border-radius:0; } }
 @media (prefers-reduced-motion:reduce) { .order-card-live-move,.order-card-live-enter-active,.order-card-live-enter-active::after,.order-card-live-leave-active { animation: none; transition: none; } }
 </style>

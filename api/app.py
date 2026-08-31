@@ -25,7 +25,7 @@ from domains.tbank_payments import mount_tbank_payment_routes
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
 
-app = FastAPI(title="HomTech Seller API", version="0.0.86")
+app = FastAPI(title="HomTech Seller API", version="0.0.87")
 
 
 def cors_origins() -> list[str]:

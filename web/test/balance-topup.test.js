@@ -7,7 +7,9 @@ const modalSource = readFileSync(new URL('../src/components/BalanceTopupModal.vu
 
 test('header exposes one workspace balance action without a store selector', () => {
   assert.match(appSource, /class="balance-topup-toggle"/)
-  assert.match(appSource, /Пополнить общий баланс через СБП/)
+  assert.match(appSource, /workspaceBalanceLabel/)
+  assert.match(appSource, />Баланс</)
+  assert.match(appSource, /Пополнить баланс/)
   assert.doesNotMatch(modalSource, /selectedConnectionId|connection_id|Выберите магазин/)
 })
 
