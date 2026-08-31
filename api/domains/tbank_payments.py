@@ -23,6 +23,7 @@ from domains.local_auth import AuthenticatedUser
 
 
 FINAL_FAILURE_STATUSES = {"REJECTED", "REVERSED", "CANCELED", "DEADLINE_EXPIRED"}
+FINAL_TOPUP_STATES = {"confirmed", "rejected", "expired", "cancelled", "failed"}
 RECEIPT_TAXATIONS = {"osn", "usn_income", "usn_income_outcome", "esn", "patent"}
 RECEIPT_TAXES = {
     "none", "vat0", "vat5", "vat7", "vat10", "vat22", "vat105", "vat107", "vat110", "vat122",
@@ -285,6 +286,19 @@ def provider_state(status: str) -> str:
     return "pending"
 
 
+def should_apply_provider_state(current_state: str, incoming_state: str) -> bool:
+    """Не позволяет запоздалому промежуточному статусу откатить завершённый платёж."""
+    current = str(current_state or "").strip().lower()
+    incoming = str(incoming_state or "").strip().lower()
+    if current == "confirmed":
+        return incoming == "confirmed"
+    if incoming == "confirmed":
+        return True
+    if current in FINAL_TOPUP_STATES:
+        return incoming == current
+    return True
+
+
 def _topup_out(row) -> WorkspaceTopupOut:
     return WorkspaceTopupOut(
         id=row[0], order_id=str(row[1]), amount=int(row[2]), currency=str(row[3]), state=str(row[4]),
@@ -407,7 +421,19 @@ class TBankReconciliationProcessor:
                     "SELECT state FROM seller.workspace_balance_topups WHERE id=%s AND reconcile_lock_token=%s FOR UPDATE",
                     (claimed.id, claimed.lock_token),
                 )
-                if not cursor.fetchone():
+                current_row = cursor.fetchone()
+                if not current_row:
+                    return
+                if not should_apply_provider_state(str(current_row[0]), state):
+                    cursor.execute(
+                        """
+                        UPDATE seller.workspace_balance_topups
+                           SET next_reconcile_at=NULL, reconcile_lock_token=NULL,
+                               reconcile_locked_until=NULL, last_error='', updated_at=now()
+                         WHERE id=%s
+                        """,
+                        (claimed.id,),
+                    )
                     return
                 if state == "confirmed":
                     _credit_confirmed_topup(
@@ -688,7 +714,7 @@ def mount_tbank_payment_routes(
                 event_id = int(event_row[0])
                 cursor.execute(
                     """
-                    SELECT id, workspace_id, amount, provider_payment_id
+                    SELECT id, workspace_id, amount, provider_payment_id, state
                     FROM seller.workspace_balance_topups
                     WHERE order_id=%s AND terminal_key=%s
                     FOR UPDATE
@@ -702,7 +728,7 @@ def mount_tbank_payment_routes(
                         (event_id,),
                     )
                     return PlainTextResponse("OK")
-                topup_db_id, workspace_id, expected_amount, known_payment_id = topup
+                topup_db_id, workspace_id, expected_amount, known_payment_id, current_state = topup
                 if not payment_id or str(known_payment_id or "") not in {"", payment_id} or amount != int(expected_amount):
                     cursor.execute(
                         "UPDATE seller.tbank_payment_events SET processing_state='failed', processed_at=now(), last_error='payment identity mismatch' WHERE id=%s",
@@ -710,22 +736,23 @@ def mount_tbank_payment_routes(
                     )
                     raise HTTPException(status_code=409, detail="Payment identity mismatch")
                 state = provider_state(status)
-                if state == "confirmed":
-                    _credit_confirmed_topup(
-                        cursor, topup_id=int(topup_db_id), workspace_id=int(workspace_id),
-                        payment_id=payment_id, amount=int(expected_amount),
+                if should_apply_provider_state(str(current_state), state):
+                    if state == "confirmed":
+                        _credit_confirmed_topup(
+                            cursor, topup_id=int(topup_db_id), workspace_id=int(workspace_id),
+                            payment_id=payment_id, amount=int(expected_amount),
+                        )
+                    cursor.execute(
+                        """
+                        UPDATE seller.workspace_balance_topups
+                           SET provider_payment_id=COALESCE(provider_payment_id, %s), provider_status=%s,
+                               state=%s, confirmed_at=CASE WHEN %s='confirmed' THEN COALESCE(confirmed_at, now()) ELSE confirmed_at END,
+                               next_reconcile_at=CASE WHEN %s='pending' THEN now()+interval '1 minute' ELSE NULL END,
+                               last_error='', updated_at=now()
+                         WHERE id=%s
+                        """,
+                        (payment_id, status, state, state, state, topup_db_id),
                     )
-                cursor.execute(
-                    """
-                    UPDATE seller.workspace_balance_topups
-                       SET provider_payment_id=COALESCE(provider_payment_id, %s), provider_status=%s,
-                           state=%s, confirmed_at=CASE WHEN %s='confirmed' THEN COALESCE(confirmed_at, now()) ELSE confirmed_at END,
-                           next_reconcile_at=CASE WHEN %s='pending' THEN now()+interval '1 minute' ELSE NULL END,
-                           last_error='', updated_at=now()
-                     WHERE id=%s
-                    """,
-                    (payment_id, status, state, state, state, topup_db_id),
-                )
                 cursor.execute(
                     "UPDATE seller.tbank_payment_events SET processing_state='processed', processed_at=now() WHERE id=%s",
                     (event_id,),

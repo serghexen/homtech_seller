@@ -21,6 +21,7 @@ from domains.tbank_payments import (
     notification_token_is_valid,
     provider_state,
     qr_data_url,
+    should_apply_provider_state,
     topup_receipt,
 )
 
@@ -68,6 +69,12 @@ class TBankPaymentsTests(unittest.TestCase):
         self.assertEqual(provider_state("AUTHORIZED"), "pending")
         self.assertEqual(provider_state("REJECTED"), "rejected")
         self.assertEqual(provider_state("DEADLINE_EXPIRED"), "expired")
+
+    def test_completed_topup_cannot_regress_to_pending(self) -> None:
+        self.assertFalse(should_apply_provider_state("confirmed", "pending"))
+        self.assertFalse(should_apply_provider_state("rejected", "pending"))
+        self.assertTrue(should_apply_provider_state("pending", "confirmed"))
+        self.assertTrue(should_apply_provider_state("rejected", "confirmed"))
 
     def test_get_qr_and_demo_use_official_sbp_methods(self) -> None:
         captured = []
