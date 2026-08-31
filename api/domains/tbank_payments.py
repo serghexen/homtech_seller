@@ -23,6 +23,10 @@ from domains.local_auth import AuthenticatedUser
 
 
 FINAL_FAILURE_STATUSES = {"REJECTED", "REVERSED", "CANCELED", "DEADLINE_EXPIRED"}
+RECEIPT_TAXATIONS = {"osn", "usn_income", "usn_income_outcome", "esn", "patent"}
+RECEIPT_TAXES = {
+    "none", "vat0", "vat5", "vat7", "vat10", "vat22", "vat105", "vat107", "vat110", "vat122",
+}
 
 
 class TBankError(RuntimeError):
@@ -110,6 +114,36 @@ def tbank_settings() -> TBankSettings:
     return settings
 
 
+def topup_receipt(*, amount: int) -> dict[str, Any]:
+    """Формирует чек ФФД 1.2 для услуги пополнения баланса."""
+    email = str(os.getenv("TBANK_RECEIPT_EMAIL", "")).strip().lower()
+    taxation = str(os.getenv("TBANK_RECEIPT_TAXATION", "")).strip().lower()
+    tax = str(os.getenv("TBANK_RECEIPT_TAX", "")).strip().lower()
+    if not email or len(email) > 64 or "@" not in email:
+        raise TBankError("Не задан корректный TBANK_RECEIPT_EMAIL")
+    if taxation not in RECEIPT_TAXATIONS:
+        raise TBankError("Не задан корректный TBANK_RECEIPT_TAXATION")
+    if tax not in RECEIPT_TAXES:
+        raise TBankError("Не задан корректный TBANK_RECEIPT_TAX")
+    return {
+        "FfdVersion": "1.2",
+        "Email": email,
+        "Taxation": taxation,
+        "Items": [
+            {
+                "Name": "Услуга пополнения баланса HomTech Seller",
+                "Price": amount,
+                "Quantity": 1,
+                "Amount": amount,
+                "Tax": tax,
+                "PaymentMethod": "full_payment",
+                "PaymentObject": "service",
+                "MeasurementUnit": "шт",
+            }
+        ],
+    }
+
+
 def _token_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -181,7 +215,9 @@ class TBankClient:
             raise TBankError(f"{message} ({code})" if code else message)
         return result
 
-    def init(self, *, order_id: str, amount: int, expires_at: datetime) -> dict[str, Any]:
+    def init(
+        self, *, order_id: str, amount: int, expires_at: datetime, receipt: dict[str, Any]
+    ) -> dict[str, Any]:
         return self.call(
             "Init",
             {
@@ -193,6 +229,7 @@ class TBankClient:
                 "SuccessURL": self.settings.success_url,
                 "FailURL": self.settings.fail_url,
                 "RedirectDueDate": expires_at.isoformat(timespec="seconds"),
+                "Receipt": receipt,
             },
         )
 
@@ -462,6 +499,7 @@ def mount_tbank_payment_routes(
             )
         try:
             settings = tbank_settings()
+            receipt = topup_receipt(amount=payload.amount)
         except TBankError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         order_id = f"seller_{uuid4().hex}"
@@ -484,7 +522,9 @@ def mount_tbank_payment_routes(
                 topup_id, public_id = cursor.fetchone()
         client = TBankClient(settings)
         try:
-            init_result = client.init(order_id=order_id, amount=payload.amount, expires_at=expires_at)
+            init_result = client.init(
+                order_id=order_id, amount=payload.amount, expires_at=expires_at, receipt=receipt
+            )
             payment_id = str(init_result.get("PaymentId") or "").strip()
             if not payment_id:
                 raise TBankError("Т-Банк не вернул идентификатор платежа", uncertain=True)

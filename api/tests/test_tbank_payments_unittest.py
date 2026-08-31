@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import unittest
+from datetime import datetime, timezone
 from inspect import getsource
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from domains.tbank_payments import (
     notification_token_is_valid,
     provider_state,
     qr_data_url,
+    topup_receipt,
 )
 
 
@@ -77,6 +79,52 @@ class TBankPaymentsTests(unittest.TestCase):
 
         self.assertEqual(captured[0], ("GetQr", {"PaymentId": "123", "DataType": "IMAGE", "PaymentMethod": "SBP"}))
         self.assertEqual(captured[1], ("SbpPayTest", {"PaymentId": "123", "IsDeadlineExpired": True}))
+
+    def test_topup_receipt_is_ffd_12_full_payment_service(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "TBANK_RECEIPT_EMAIL": "Receipt@Example.com",
+                "TBANK_RECEIPT_TAXATION": "osn",
+                "TBANK_RECEIPT_TAX": "none",
+            },
+        ):
+            receipt = topup_receipt(amount=100_000)
+
+        self.assertEqual(receipt["FfdVersion"], "1.2")
+        self.assertEqual(receipt["Email"], "receipt@example.com")
+        self.assertEqual(receipt["Taxation"], "osn")
+        self.assertEqual(
+            receipt["Items"],
+            [
+                {
+                    "Name": "Услуга пополнения баланса HomTech Seller",
+                    "Price": 100_000,
+                    "Quantity": 1,
+                    "Amount": 100_000,
+                    "Tax": "none",
+                    "PaymentMethod": "full_payment",
+                    "PaymentObject": "service",
+                    "MeasurementUnit": "шт",
+                }
+            ],
+        )
+
+    def test_init_passes_receipt(self) -> None:
+        captured = []
+        client = TBankClient(TBankSettings("https://example.test/v2", "DEMO", "secret", "n", "s", "f", 3))
+        client.call = lambda method, payload: captured.append((method, payload)) or {"Success": True}
+        receipt = {"Email": "receipt@example.com", "Items": [{"Amount": 1_000}]}
+
+        client.init(
+            order_id="seller_order_1",
+            amount=1_000,
+            expires_at=datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc),
+            receipt=receipt,
+        )
+
+        self.assertEqual(captured[0][0], "Init")
+        self.assertIs(captured[0][1]["Receipt"], receipt)
 
     def test_routes_do_not_accept_workspace_from_client(self) -> None:
         app = FastAPI()

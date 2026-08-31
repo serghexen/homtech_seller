@@ -44,12 +44,27 @@ TBANK_SUCCESS_URL=https://seller.homtech.app/
 TBANK_FAIL_URL=https://seller.homtech.app/
 TBANK_REQUEST_TIMEOUT_SECONDS=15
 TBANK_NOTIFICATION_MAX_BODY_BYTES=65536
+TBANK_RECEIPT_EMAIL=<email получателя чека>
+TBANK_RECEIPT_TAXATION=osn
+TBANK_RECEIPT_TAX=none
 ```
 
 Сначала оставить `SELLER_TBANK_TOPUPS_ENABLED=false`, применить миграцию и
 перезапустить API/worker. После проверки конфигурации поменять значение на `true` и
 перезапустить только API/worker. Терминал с `DEMO` отправляет запросы на production URL
 Т-Банка, но не списывает реальные деньги.
+
+## Фискальный чек пополнения
+
+В `Init` передаётся `Receipt` формата ФФД 1.2. Пополнение оформляется одной
+позицией «Услуга пополнения баланса HomTech Seller»: количество `1 шт.`, сумма
+позиции равна сумме платежа, `PaymentMethod=full_payment`,
+`PaymentObject=service`, ставка берётся из `TBANK_RECEIPT_TAX`.
+
+`TBANK_RECEIPT_EMAIL` — адрес получателя чека. Реальное значение хранится только
+в серверном `.env`. `TBANK_RECEIPT_TAXATION=osn` соответствует кассе CloudKassir
+в агентской схеме «Чеков Т-Бизнеса» и должно быть повторно проверено по
+сформированному DEMO-чеку до включения production-платежей.
 
 ## TLS-сертификаты Т-Банка
 
@@ -77,7 +92,6 @@ API и worker получают Russian Trusted Root CA и Russian Trusted Sub CA
 
 ## Что сознательно отложено
 
-- `Receipt` и интеграция онлайн-кассы;
 - возврат через `Cancel` и обратное движение по балансу;
 - расходование и резервирование баланса при покупке товара у поставщика;
 - production-реквизиты и production-включатель;
