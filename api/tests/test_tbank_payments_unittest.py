@@ -101,6 +101,7 @@ class TBankPaymentsTests(unittest.TestCase):
         module_source = getsource(__import__("domains.tbank_payments", fromlist=["_"]))
 
         self.assertIn("ON CONFLICT (business_key) DO NOTHING", module_source)
+        self.assertIn("'payment_id', %s::text", module_source)
         self.assertIn('if state == "confirmed"', module_source)
         self.assertIn("workspace_id=%s", source)
 

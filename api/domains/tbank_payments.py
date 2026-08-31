@@ -271,7 +271,7 @@ def _credit_confirmed_topup(cursor, *, topup_id: int, workspace_id: int, payment
         """
         INSERT INTO seller.workspace_balance_ledger(
           workspace_id, topup_id, entry_type, amount, business_key, metadata
-        ) VALUES (%s, %s, 'topup', %s, %s, jsonb_build_object('provider', 'tbank', 'payment_id', %s))
+        ) VALUES (%s, %s, 'topup', %s, %s, jsonb_build_object('provider', 'tbank', 'payment_id', %s::text))
         ON CONFLICT (business_key) DO NOTHING
         RETURNING id
         """,
