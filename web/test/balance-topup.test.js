@@ -22,3 +22,9 @@ test('demo controls use the dedicated SBP test scenario', () => {
   assert.match(modalSource, /simulateDemo\('rejected'\)/)
   assert.match(modalSource, /simulateDemo\('deadline_expired'\)/)
 })
+
+test('pending payment keeps the QR flow compact without a duplicate result card', () => {
+  assert.match(modalSource, /'topup-modal--payment': topup/)
+  assert.match(modalSource, /v-else-if="isFinished" class="topup-result"/)
+  assert.doesNotMatch(modalSource, /v-else class="topup-result"/)
+})
