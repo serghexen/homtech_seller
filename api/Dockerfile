@@ -4,6 +4,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# T-Bank API uses the Russian Trusted CA chain, which is not included in
+# Python/certifi by default. Keep the normal Debian public CA bundle and add
+# only the two CA certificates required by T-Bank.
+COPY certs/russian_trusted_root_ca.crt /usr/local/share/ca-certificates/russian_trusted_root_ca.crt
+COPY certs/russian_trusted_sub_ca.crt /usr/local/share/ca-certificates/russian_trusted_sub_ca.crt
+RUN update-ca-certificates
+ENV TBANK_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 COPY app.py .
 COPY worker.py .
 COPY notifier.py .

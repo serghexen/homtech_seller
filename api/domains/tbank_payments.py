@@ -133,6 +133,9 @@ def notification_token_is_valid(payload: dict[str, Any], password: str) -> bool:
 
 
 def _ssl_context() -> ssl.SSLContext:
+    ca_bundle = str(os.getenv("TBANK_CA_BUNDLE", "")).strip()
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
     try:
         import certifi
 

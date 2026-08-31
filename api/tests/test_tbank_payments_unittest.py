@@ -6,6 +6,7 @@ import base64
 import hashlib
 import unittest
 from inspect import getsource
+from unittest.mock import patch
 
 from fastapi import FastAPI
 
@@ -13,6 +14,7 @@ from domains.tbank_payments import (
     TBankClient,
     TBankSettings,
     WorkspaceTopupCreateIn,
+    _ssl_context,
     make_token,
     mount_tbank_payment_routes,
     notification_token_is_valid,
@@ -22,6 +24,16 @@ from domains.tbank_payments import (
 
 
 class TBankPaymentsTests(unittest.TestCase):
+    def test_tbank_ca_bundle_can_extend_the_container_trust_store(self) -> None:
+        expected_context = object()
+        with patch.dict("os.environ", {"TBANK_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt"}), patch(
+            "domains.tbank_payments.ssl.create_default_context", return_value=expected_context
+        ) as create_context:
+            actual_context = _ssl_context()
+
+        self.assertIs(actual_context, expected_context)
+        create_context.assert_called_once_with(cafile="/etc/ssl/certs/ca-certificates.crt")
+
     def test_token_uses_sorted_root_scalars_and_ignores_nested_values(self) -> None:
         payload = {
             "TerminalKey": "DemoTerminal",
