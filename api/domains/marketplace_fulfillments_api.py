@@ -755,7 +755,11 @@ def mount_marketplace_fulfillment_routes(
                       fulfillment_id, event_type, from_status, to_status, details
                     ) VALUES (
                       %s,%s,'unknown',%s,
-                      jsonb_build_object('resolution', %s, 'user_id', %s, 'comment', %s)
+                      jsonb_build_object(
+                        'resolution', (%s)::text,
+                        'user_id', (%s)::bigint,
+                        'comment', (%s)::text
+                      )
                     )
                     """,
                     (

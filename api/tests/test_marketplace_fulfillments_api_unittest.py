@@ -104,6 +104,13 @@ class MarketplaceFulfillmentsApiTests(unittest.TestCase):
         self.assertIn("Повтор можно разрешить только пока заказ остаётся в обработке", source)
         self.assertNotIn("deliver_yandex", source)
 
+    def test_unknown_resolution_audit_parameters_have_explicit_postgres_types(self) -> None:
+        source = inspect.getsource(mount_marketplace_fulfillment_routes)
+
+        self.assertIn("'resolution', (%s)::text", source)
+        self.assertIn("'user_id', (%s)::bigint", source)
+        self.assertIn("'comment', (%s)::text", source)
+
     def test_api_never_decrypts_or_reads_codes(self) -> None:
         source = inspect.getsource(mount_marketplace_fulfillment_routes)
         self.assertNotIn("pgp_sym_decrypt", source)
