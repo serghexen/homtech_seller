@@ -14,7 +14,7 @@ import ReviewsView from './components/ReviewsView.vue'
 import StoreLaunchModal from './components/StoreLaunchModal.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
-import { shouldShowDashboardSkeleton } from './utils/dashboard.js'
+import { dashboardChatCount, shouldShowDashboardSkeleton } from './utils/dashboard.js'
 import { isOrderFulfillmentViewOnly } from './utils/orderFulfillment.js'
 import {
   groupNewOrderEvents,
@@ -1912,7 +1912,7 @@ onBeforeUnmount(() => {
             </div>
             <div>
               <span class="store-dashboard-card__attention-label"><span class="metric-dot metric-dot--chat" aria-hidden="true"></span>Новые сообщения</span>
-              <strong class="store-dashboard-card__attention-value">{{ item.pending_chats ?? '—' }}</strong>
+              <strong class="store-dashboard-card__attention-value">{{ dashboardChatCount(item) }}</strong>
             </div>
             <div>
               <span class="store-dashboard-card__attention-label"><span class="metric-dot metric-dot--subscription" aria-hidden="true"></span>Подписка · {{ item.plan_name }}</span>

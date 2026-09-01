@@ -9,6 +9,13 @@ from scripts.run_migrations import split_sql_statements
 
 
 class MigrationFilesTests(unittest.TestCase):
+    def test_bounded_yandex_chat_count_has_backward_compatible_flag(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        migration = project_root / "db" / "migrations" / "runtime" / "20260901_01_bounded_yandex_chat_count.sql"
+        joined = "\n".join(split_sql_statements(migration.read_text(encoding="utf-8")))
+
+        self.assertIn("pending_chats_capped boolean NOT NULL DEFAULT false", joined)
+
     def test_workspace_balance_is_account_scoped_and_topups_are_idempotent(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         migration = project_root / "db" / "migrations" / "runtime" / "20260831_01_workspace_balance.sql"

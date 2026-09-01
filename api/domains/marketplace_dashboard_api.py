@@ -26,6 +26,7 @@ class MarketplaceDashboardItemOut(BaseModel):
     currency_code: str = ""
     pending_reviews: int | None = None
     pending_chats: int | None = None
+    pending_chats_capped: bool = False
     insights_last_successful_sync_at: datetime | None = None
     insights_next_refresh_at: datetime | None = None
     insights_error: str = ""
@@ -60,6 +61,34 @@ def sales_period_starts(now: datetime | None = None) -> tuple[datetime, datetime
     return today.astimezone(timezone.utc), month.astimezone(timezone.utc)
 
 
+def dashboard_item_out(row: tuple) -> MarketplaceDashboardItemOut:
+    """Сопоставляет SQL-строку с API-контрактом в одном тестируемом месте."""
+
+    insights_ready = row[10] is not None
+    remaining_days = subscription_days(row[16])
+    return MarketplaceDashboardItemOut(
+        connection_id=int(row[0]),
+        provider_code=str(row[1]),
+        store_name=str(row[2]),
+        status=str(row[3]),
+        sales_today=money_text(row[4]),
+        sales_month=money_text(row[5]),
+        currency_code=str(row[6] or ("RUB" if str(row[1]) == "ozon" else "RUR")),
+        pending_reviews=int(row[7]) if insights_ready else None,
+        pending_chats=int(row[8]) if insights_ready else None,
+        pending_chats_capped=bool(row[9]) if insights_ready else False,
+        insights_last_successful_sync_at=row[10],
+        insights_next_refresh_at=row[11],
+        insights_error=str(row[12] or ""),
+        plan_code=str(row[13]),
+        plan_name=str(row[14]),
+        subscription_status=str(row[15]),
+        subscription_revision=int(row[17]),
+        subscription_days_remaining=remaining_days,
+        subscription_unlimited=bool(row[18]) and row[16] is None,
+    )
+
+
 def mount_marketplace_dashboard_routes(
     app: FastAPI,
     *,
@@ -86,6 +115,7 @@ def mount_marketplace_dashboard_routes(
                            marketplace.status,
                            sales.sales_today, sales.sales_month, COALESCE(sales.currency_code, ''),
                            snapshot.pending_reviews_count, snapshot.pending_chats_count,
+                           COALESCE(snapshot.pending_chats_capped, false),
                            snapshot.last_successful_sync_at, snapshot.next_refresh_at,
                            COALESCE(snapshot.last_error, ''),
                            COALESCE(plan.code, 'basic'), COALESCE(plan.display_name, 'Basic'),
@@ -122,30 +152,4 @@ def mount_marketplace_dashboard_routes(
                 )
                 rows = cursor.fetchall()
 
-        items: list[MarketplaceDashboardItemOut] = []
-        for row in rows:
-            insights_ready = row[9] is not None
-            remaining_days = subscription_days(row[15])
-            items.append(
-                MarketplaceDashboardItemOut(
-                    connection_id=int(row[0]),
-                    provider_code=str(row[1]),
-                    store_name=str(row[2]),
-                    status=str(row[3]),
-                    sales_today=money_text(row[4]),
-                    sales_month=money_text(row[5]),
-                    currency_code=str(row[6] or ("RUB" if str(row[1]) == "ozon" else "RUR")),
-                    pending_reviews=int(row[7]) if insights_ready else None,
-                    pending_chats=int(row[8]) if insights_ready else None,
-                    insights_last_successful_sync_at=row[9],
-                    insights_next_refresh_at=row[10],
-                    insights_error=str(row[11] or ""),
-                    plan_code=str(row[12]),
-                    plan_name=str(row[13]),
-                    subscription_status=str(row[14]),
-                    subscription_revision=int(row[16]),
-                    subscription_days_remaining=remaining_days,
-                    subscription_unlimited=bool(row[17]) and row[15] is None,
-                )
-            )
-        return MarketplaceDashboardListOut(items=items)
+        return MarketplaceDashboardListOut(items=[dashboard_item_out(row) for row in rows])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import urllib.error
@@ -16,6 +17,15 @@ from domains.marketplace_connection_verification import (
     YANDEX_MARKET_BASE_URL,
     _ssl_context,
 )
+
+
+YANDEX_PENDING_CHATS_EXACT_LIMIT = 100
+
+
+@dataclass(frozen=True)
+class YandexPagedRows:
+    rows: list[dict[str, Any]]
+    truncated: bool = False
 
 
 def dashboard_insights_enabled() -> bool:
@@ -91,7 +101,8 @@ def _next_page_token(payload: dict[str, Any]) -> str:
 
 def _paged_yandex_rows(
     *, business_id: int, token: str, resource: str, result_key: str, body: dict[str, Any], limit: int,
-) -> list[dict[str, Any]]:
+    max_rows: int | None = None,
+) -> YandexPagedRows:
     rows: list[dict[str, Any]] = []
     page_token = ""
     seen_page_tokens: set[str] = set()
@@ -107,12 +118,13 @@ def _paged_yandex_rows(
         rows.extend(_result_rows(response, result_key))
         next_token = _next_page_token(response)
         if not next_token:
-            break
+            return YandexPagedRows(rows=rows)
+        if max_rows is not None and len(rows) >= max_rows:
+            return YandexPagedRows(rows=rows[:max_rows], truncated=True)
         if next_token in seen_page_tokens:
             raise HTTPException(502, "Яндекс Маркет не продвинул постраничное чтение показателей")
         seen_page_tokens.add(next_token)
         page_token = next_token
-    return rows
 
 
 def fetch_yandex_pending_reviews(*, business_id: int, token: str) -> list[dict[str, Any]]:
@@ -124,11 +136,14 @@ def fetch_yandex_pending_reviews(*, business_id: int, token: str) -> list[dict[s
         result_key="feedbacks",
         body={"reactionStatus": "NEED_REACTION"},
         limit=50,
-    )
+    ).rows
 
 
-def fetch_yandex_pending_chats(*, business_id: int, token: str) -> list[dict[str, Any]]:
-    # Это число диалогов, ожидающих продавца, а не число отдельных непрочитанных сообщений.
+def fetch_yandex_pending_chats(
+    *, business_id: int, token: str, max_rows: int | None = None,
+) -> YandexPagedRows:
+    # Для одного магазина можно безопасно ограничить точный счётчик: UI показывает 99+.
+    # Для нескольких кампаний одного кабинета полный ответ нужен для корректной атрибуции.
     return _paged_yandex_rows(
         business_id=business_id,
         token=token,
@@ -136,6 +151,7 @@ def fetch_yandex_pending_chats(*, business_id: int, token: str) -> list[dict[str
         result_key="chats",
         body={"types": ["CHAT"], "statuses": ["NEW", "WAITING_FOR_PARTNER"]},
         limit=20,
+        max_rows=max_rows,
     )
 
 
@@ -442,6 +458,7 @@ def sync_dashboard_connection(connection, connection_row: tuple[Any, ...]) -> in
             reviews=reviews,
         )
         matched_chats = unread_messages
+        chats_capped = False
         unassigned_reviews = 0
     elif str(provider_code) == "yandex_market":
         if not str(business_id or "").isdigit() or not str(campaign_id or "").isdigit():
@@ -463,7 +480,11 @@ def sync_dashboard_connection(connection, connection_row: tuple[Any, ...]) -> in
             )
             order_ids = {str(row[0]) for row in cursor.fetchall()}
         reviews = fetch_yandex_pending_reviews(business_id=int(business_id), token=str(token))
-        chats = fetch_yandex_pending_chats(business_id=int(business_id), token=str(token))
+        chat_page = fetch_yandex_pending_chats(
+            business_id=int(business_id),
+            token=str(token),
+            max_rows=YANDEX_PENDING_CHATS_EXACT_LIMIT if only_connection else None,
+        )
         matched_review_rows = [
             review for review in reviews
             if belongs_to_connection(review_order_id(review), order_ids, only_connection=only_connection)
@@ -472,8 +493,9 @@ def sync_dashboard_connection(connection, connection_row: tuple[Any, ...]) -> in
         expected_campaigns = {str(campaign_id)}
         matched_chats = sum(
             belongs_to_connection(chat_campaign_id(chat), expected_campaigns, only_connection=only_connection)
-            for chat in chats
+            for chat in chat_page.rows
         )
+        chats_capped = chat_page.truncated
         unassigned_reviews = max(0, len(reviews) - matched_reviews)
         save_pending_reviews(
             connection,
@@ -490,16 +512,20 @@ def sync_dashboard_connection(connection, connection_row: tuple[Any, ...]) -> in
             """
             INSERT INTO seller.marketplace_dashboard_snapshots(
                 connection_id, workspace_id, pending_reviews_count, pending_chats_count,
-                unassigned_reviews_count, last_successful_sync_at, last_attempt_at,
+                pending_chats_capped, unassigned_reviews_count, last_successful_sync_at, last_attempt_at,
                 next_refresh_at, last_error
-            ) VALUES (%s, %s, %s, %s, %s, now(), now(), now() + interval '10 minutes', '')
+            ) VALUES (%s, %s, %s, %s, %s, %s, now(), now(), now() + interval '10 minutes', '')
             ON CONFLICT (connection_id) DO UPDATE SET
                 workspace_id=EXCLUDED.workspace_id,
                 pending_reviews_count=EXCLUDED.pending_reviews_count,
                 pending_chats_count=EXCLUDED.pending_chats_count,
+                pending_chats_capped=EXCLUDED.pending_chats_capped,
                 unassigned_reviews_count=EXCLUDED.unassigned_reviews_count,
                 last_successful_sync_at=now(), last_attempt_at=now(), last_error='', updated_at=now()
             """,
-            (int(connection_id), workspace_id, matched_reviews, matched_chats, unassigned_reviews),
+            (
+                int(connection_id), workspace_id, matched_reviews, matched_chats,
+                chats_capped, unassigned_reviews,
+            ),
         )
     return matched_reviews + matched_chats

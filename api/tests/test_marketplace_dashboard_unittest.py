@@ -9,11 +9,14 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from domains.marketplace_dashboard_api import (
+    dashboard_item_out,
     mount_marketplace_dashboard_routes,
     sales_period_starts,
     subscription_days,
 )
 from domains.marketplace_dashboard_service import (
+    YANDEX_PENDING_CHATS_EXACT_LIMIT,
+    YandexPagedRows,
     fetch_ozon_pending_reviews,
     fetch_ozon_unread_buyer_messages,
     fetch_yandex_pending_chats,
@@ -27,6 +30,25 @@ from fastapi import HTTPException
 
 
 class MarketplaceDashboardTests(unittest.TestCase):
+    def test_dashboard_api_maps_bounded_chat_flag_without_shifting_subscription_fields(self) -> None:
+        synced_at = datetime(2026, 9, 1, 15, 4, tzinfo=timezone.utc)
+        next_refresh_at = datetime(2026, 9, 1, 15, 15, tzinfo=timezone.utc)
+
+        item = dashboard_item_out((
+            7, "yandex_market", "Store", "active",
+            Decimal("10"), Decimal("20"), "RUR",
+            3, 100, True, synced_at, next_refresh_at, "",
+            "pro", "Pro", "active", None, 4, True,
+        ))
+
+        self.assertEqual(item.pending_chats, 100)
+        self.assertTrue(item.pending_chats_capped)
+        self.assertEqual(item.insights_last_successful_sync_at, synced_at)
+        self.assertEqual(item.insights_next_refresh_at, next_refresh_at)
+        self.assertEqual(item.plan_code, "pro")
+        self.assertEqual(item.subscription_revision, 4)
+        self.assertTrue(item.subscription_unlimited)
+
     def test_yandex_sales_include_subsidy_but_not_delivery(self) -> None:
         summary = normalize_marketplace_order_summary(
             "yandex_market",
@@ -169,13 +191,37 @@ class MarketplaceDashboardTests(unittest.TestCase):
     def test_chat_reader_counts_only_dialogs_waiting_for_partner(self, request_json) -> None:
         request_json.return_value = {"result": {"chats": [{"id": 1}], "paging": {}}}
 
-        rows = fetch_yandex_pending_chats(business_id=77, token="secret")
+        result = fetch_yandex_pending_chats(business_id=77, token="secret")
 
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(result.rows), 1)
+        self.assertFalse(result.truncated)
         self.assertEqual(
             request_json.call_args.kwargs["payload"],
             {"types": ["CHAT"], "statuses": ["NEW", "WAITING_FOR_PARTNER"]},
         )
+
+    @patch("domains.marketplace_dashboard_service._request_json")
+    def test_single_store_chat_reader_stops_at_display_cap(self, request_json) -> None:
+        request_json.side_effect = [
+            {
+                "result": {
+                    "chats": [{"chatId": page * 20 + item} for item in range(20)],
+                    "paging": {"nextPageToken": f"page-{page + 1}"},
+                }
+            }
+            for page in range(5)
+        ]
+
+        result = fetch_yandex_pending_chats(
+            business_id=77,
+            token="secret",
+            max_rows=YANDEX_PENDING_CHATS_EXACT_LIMIT,
+        )
+
+        self.assertEqual(len(result.rows), 100)
+        self.assertTrue(result.truncated)
+        self.assertEqual(request_json.call_count, 5)
+        self.assertIn("pageToken=page-4", request_json.call_args.args[0])
 
     @patch("domains.marketplace_dashboard_service.fetch_yandex_pending_chats")
     @patch("domains.marketplace_dashboard_service.fetch_yandex_pending_reviews")
@@ -187,10 +233,10 @@ class MarketplaceDashboardTests(unittest.TestCase):
             {"identifiers": {"orderId": "another"}},
             {"identifiers": {}},
         ]
-        fetch_chats.return_value = [
+        fetch_chats.return_value = YandexPagedRows(rows=[
             {"context": {"campaignId": 149}},
             {"context": {"campaignId": 150}},
-        ]
+        ])
         cursor = MagicMock()
         cursor.fetchone.side_effect = [(9,), (2,)]
         cursor.fetchall.return_value = [("mine",)]
@@ -203,11 +249,42 @@ class MarketplaceDashboardTests(unittest.TestCase):
         )
 
         self.assertEqual(count, 2)
+        fetch_chats.assert_called_once_with(business_id=216, token="token", max_rows=None)
         snapshot_call = next(
             call for call in cursor.execute.call_args_list
             if "INSERT INTO seller.marketplace_dashboard_snapshots" in call.args[0]
         )
-        self.assertEqual(snapshot_call.args[1], (7, 9, 1, 1, 2))
+        self.assertEqual(snapshot_call.args[1], (7, 9, 1, 1, False, 2))
+
+    @patch("domains.marketplace_dashboard_service.fetch_yandex_pending_chats")
+    @patch("domains.marketplace_dashboard_service.fetch_yandex_pending_reviews", return_value=[])
+    def test_single_campaign_persists_bounded_chat_count(self, _fetch_reviews, fetch_chats) -> None:
+        fetch_chats.return_value = YandexPagedRows(
+            rows=[{"context": {"campaignId": 149}}] * YANDEX_PENDING_CHATS_EXACT_LIMIT,
+            truncated=True,
+        )
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [(9,), (1,)]
+        cursor.fetchall.return_value = []
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        count = sync_dashboard_connection(
+            connection,
+            (7, "yandex_market", "Store", "", "216", "149", "token", None),
+        )
+
+        self.assertEqual(count, YANDEX_PENDING_CHATS_EXACT_LIMIT)
+        fetch_chats.assert_called_once_with(
+            business_id=216,
+            token="token",
+            max_rows=YANDEX_PENDING_CHATS_EXACT_LIMIT,
+        )
+        snapshot_call = next(
+            call for call in cursor.execute.call_args_list
+            if "INSERT INTO seller.marketplace_dashboard_snapshots" in call.args[0]
+        )
+        self.assertEqual(snapshot_call.args[1], (7, 9, 0, 100, True, 0))
 
     def test_dashboard_api_is_workspace_scoped_and_does_not_call_yandex(self) -> None:
         source = inspect.getsource(mount_marketplace_dashboard_routes)
