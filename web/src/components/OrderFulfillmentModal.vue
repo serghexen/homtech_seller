@@ -61,7 +61,7 @@ const statusPresentation = computed(() => {
   return {
     not_prepared: { label: 'Не подготовлена', tone: 'idle', copy: 'Ключи к заказу ещё не закреплены.' },
     pending: automationInProgress.value
-      ? { label: 'Автовыдача запущена', tone: 'active', copy: 'Seller последовательно проверяет поставщика, пул и остальные настроенные способы.' }
+      ? { label: 'Автовыдача запущена', tone: 'active', copy: 'Seller последовательно проверяет доступные и настроенные способы выдачи.' }
       : { label: 'Ожидает подготовки', tone: 'idle', copy: 'Локальная выдача создана, комплект пока свободен.' },
     manual_required: { label: 'Нужен комплект', tone: 'warning', copy: props.detail?.last_error || 'В пуле пока нет полного комплекта.' },
     reserved: {

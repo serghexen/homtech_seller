@@ -29,7 +29,7 @@ const props = defineProps({
   supplierQuote: { type: Object, default: null },
   supplierQuoteLoading: { type: Boolean, default: false },
   supplierQuoteError: { type: String, default: '' },
-  supplierAccessEnabled: { type: Boolean, default: true },
+  supplierAccessEnabled: { type: Boolean, default: false },
   orders: { type: Array, default: () => [] },
   ordersTotal: { type: Number, default: 0 },
   ordersLoading: { type: Boolean, default: false },
@@ -180,7 +180,6 @@ const selectedSupplierNominal = computed(() => supplierNominalOptions.value.find
   (option) => option.id === String(settingsForm.supplier_nominal_id || ''),
 ) || null)
 const supplierServiceSummary = computed(() => {
-  if (!props.supplierAccessEnabled) return 'Связки с товарами поставщика доступны в Pro'
   if (selectedSupplierService.value) {
     const nominal = selectedSupplierNominal.value?.title || settingsForm.supplier_nominal_id
     return nominal ? `${selectedSupplierService.value.title} · ${nominal}` : selectedSupplierService.value.title
@@ -640,7 +639,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                   </div>
                   <div v-else-if="section.id === 'delivery'" class="product-delivery">
                     <div class="product-delivery__methods">
-                      <article class="product-delivery-method" :class="{ 'is-enabled': supplierAccessEnabled && settingsForm.supplier_issue_enabled, 'is-expanded': openDeliveryMethod === 'supplier', 'is-plan-locked': !supplierAccessEnabled }">
+                      <article v-if="supplierAccessEnabled" class="product-delivery-method" :class="{ 'is-enabled': settingsForm.supplier_issue_enabled, 'is-expanded': openDeliveryMethod === 'supplier' }">
                         <div class="product-delivery-method__head product-delivery-method__head--expandable">
                           <span class="product-delivery-method__number">01</span>
                           <button class="product-delivery-method__open" type="button" :aria-expanded="openDeliveryMethod === 'supplier'" @click="toggleDeliveryMethod('supplier')">
@@ -653,74 +652,64 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                             </span>
                             <svg class="product-delivery-method__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
                           </button>
-                          <span v-if="!supplierAccessEnabled" class="product-delivery-method__status is-pro">PRO</span>
-                          <label v-else class="product-delivery-switch" :class="{ 'is-active': settingsForm.supplier_issue_enabled, 'is-disabled': !supplierMappingComplete || !supplierCurrentPriceLabel }" title="Использовать Supplier Hub первым способом">
+                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.supplier_issue_enabled, 'is-disabled': !supplierMappingComplete || !supplierCurrentPriceLabel }" title="Использовать Supplier Hub первым способом">
                             <input v-model="settingsForm.supplier_issue_enabled" type="checkbox" :disabled="!supplierMappingComplete || !supplierCurrentPriceLabel" />
                             <span aria-hidden="true"></span>
                             <span class="sr-only">Использовать автовыдачу от поставщика</span>
                           </label>
                         </div>
                         <div v-if="openDeliveryMethod === 'supplier'" class="product-delivery-method__panel product-delivery-supplier">
-                          <section v-if="!supplierAccessEnabled" class="product-delivery-plan-lock">
-                            <span class="product-delivery-plan-lock__mark" aria-hidden="true">PRO</span>
-                            <div>
-                              <strong>Автовыдача от поставщика доступна в Pro</strong>
-                              <p>Список ключей и ручная выдача продолжают работать на Basic. Сохранённая связка не удаляется.</p>
-                            </div>
-                          </section>
-                          <template v-else>
-                            <div class="product-delivery-supplier__fields">
-                              <div class="product-delivery-supplier__service">
-                                <label for="supplier-service-search">Товар</label>
-                                <div class="supplier-combobox">
-                                  <svg class="supplier-combobox__search" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16 16 4 4" /></svg>
-                                  <input
-                                    id="supplier-service-search"
-                                    v-model="supplierSearch"
-                                    type="search"
-                                    autocomplete="off"
-                                    :placeholder="supplierServicesLoading ? 'Загружаем товары…' : 'Найдите товар или регион'"
-                                    :disabled="supplierServicesLoading"
-                                    @click="supplierPickerOpen = true"
-                                    @input="handleSupplierSearchInput"
-                                  />
-                                  <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @click.stop="clearSupplierService">×</button>
-                                  <svg class="supplier-combobox__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
-                                  <div v-if="supplierPickerOpen && !supplierServicesLoading" class="supplier-combobox__menu">
-                                    <button
-                                      v-for="service in filteredSupplierServices"
-                                      :key="service.service_id"
-                                      type="button"
-                                      :class="{ 'is-selected': Number(service.service_id) === Number(settingsForm.supplier_service_id) }"
-                                      @mousedown.prevent="selectSupplierService(service)"
-                                    >
-                                      <strong>{{ supplierServiceDisplay(service) }}</strong>
-                                      <small>{{ service.category || `Interhub · услуга #${service.service_id}` }}</small>
-                                    </button>
-                                    <p v-if="!filteredSupplierServices.length">По вашему запросу ничего не найдено</p>
-                                  </div>
+                          <div class="product-delivery-supplier__fields">
+                            <div class="product-delivery-supplier__service">
+                              <label for="supplier-service-search">Товар</label>
+                              <div class="supplier-combobox">
+                                <svg class="supplier-combobox__search" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16 16 4 4" /></svg>
+                                <input
+                                  id="supplier-service-search"
+                                  v-model="supplierSearch"
+                                  type="search"
+                                  autocomplete="off"
+                                  :placeholder="supplierServicesLoading ? 'Загружаем товары…' : 'Найдите товар или регион'"
+                                  :disabled="supplierServicesLoading"
+                                  @click="supplierPickerOpen = true"
+                                  @input="handleSupplierSearchInput"
+                                />
+                                <button v-if="settingsForm.supplier_service_id" class="supplier-combobox__clear" type="button" aria-label="Очистить выбранный товар" @click.stop="clearSupplierService">×</button>
+                                <svg class="supplier-combobox__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+                                <div v-if="supplierPickerOpen && !supplierServicesLoading" class="supplier-combobox__menu">
+                                  <button
+                                    v-for="service in filteredSupplierServices"
+                                    :key="service.service_id"
+                                    type="button"
+                                    :class="{ 'is-selected': Number(service.service_id) === Number(settingsForm.supplier_service_id) }"
+                                    @mousedown.prevent="selectSupplierService(service)"
+                                  >
+                                    <strong>{{ supplierServiceDisplay(service) }}</strong>
+                                    <small>{{ service.category || `Interhub · услуга #${service.service_id}` }}</small>
+                                  </button>
+                                  <p v-if="!filteredSupplierServices.length">По вашему запросу ничего не найдено</p>
                                 </div>
                               </div>
-                              <label v-if="supplierNominalField" class="product-delivery-supplier__nominal">
-                                <span>Номинал</span>
-                                <select v-if="supplierNominalOptions.length" v-model="settingsForm.supplier_nominal_id" @change="handleSupplierNominalChange">
-                                  <option value="" disabled>Выберите номинал</option>
-                                  <option v-for="nominal in supplierNominalOptions" :key="nominal.id" :value="nominal.id">{{ nominal.title }}</option>
-                                </select>
-                                <input v-else v-model="settingsForm.supplier_nominal_id" type="text" maxlength="128" placeholder="Укажите номинал" @change="handleSupplierNominalChange" />
-                              </label>
                             </div>
-                            <p v-if="supplierServicesError" class="supplier-inline-error">{{ supplierServicesError }}</p>
-                            <p v-if="supplierQuoteError" class="supplier-inline-error">{{ supplierQuoteError }}</p>
-                            <p v-if="supplierQuoteLoading">Актуальная цена: <strong>уточняем…</strong></p>
-                            <p v-else-if="supplierCurrentPriceLabel">Актуальная цена: <strong>{{ supplierCurrentPriceLabel }} ₽</strong></p>
-                          </template>
+                            <label v-if="supplierNominalField" class="product-delivery-supplier__nominal">
+                              <span>Номинал</span>
+                              <select v-if="supplierNominalOptions.length" v-model="settingsForm.supplier_nominal_id" @change="handleSupplierNominalChange">
+                                <option value="" disabled>Выберите номинал</option>
+                                <option v-for="nominal in supplierNominalOptions" :key="nominal.id" :value="nominal.id">{{ nominal.title }}</option>
+                              </select>
+                              <input v-else v-model="settingsForm.supplier_nominal_id" type="text" maxlength="128" placeholder="Укажите номинал" @change="handleSupplierNominalChange" />
+                            </label>
+                          </div>
+                          <p v-if="supplierServicesError" class="supplier-inline-error">{{ supplierServicesError }}</p>
+                          <p v-if="supplierQuoteError" class="supplier-inline-error">{{ supplierQuoteError }}</p>
+                          <p v-if="supplierQuoteLoading">Актуальная цена: <strong>уточняем…</strong></p>
+                          <p v-else-if="supplierCurrentPriceLabel">Актуальная цена: <strong>{{ supplierCurrentPriceLabel }} ₽</strong></p>
                         </div>
                       </article>
 
                       <article class="product-delivery-method" :class="{ 'is-enabled': settingsForm.pool_issue_enabled, 'is-expanded': openDeliveryMethod === 'pool' }">
                         <div class="product-delivery-method__head product-delivery-method__head--expandable">
-                          <span class="product-delivery-method__number">02</span>
+                          <span class="product-delivery-method__number">{{ supplierAccessEnabled ? '02' : '01' }}</span>
                           <button class="product-delivery-method__open" type="button" :aria-expanded="openDeliveryMethod === 'pool'" @click="toggleDeliveryMethod('pool')">
                             <span class="product-delivery-method__icon" aria-hidden="true">
                               <svg viewBox="0 0 24 24"><path d="M7 10a5 5 0 1 1 4.6 5" /><path d="m9 14-6 6M5 18l2 2M8 15l2 2" /></svg>
@@ -731,7 +720,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                             </span>
                             <svg class="product-delivery-method__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
                           </button>
-                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.pool_issue_enabled }" title="Использовать сохранённый пул вторым способом">
+                          <label class="product-delivery-switch" :class="{ 'is-active': settingsForm.pool_issue_enabled }" title="Использовать сохранённый список ключей">
                             <input v-model="settingsForm.pool_issue_enabled" type="checkbox" />
                             <span aria-hidden="true"></span>
                             <span class="sr-only">Использовать список ключей</span>
@@ -828,7 +817,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
                       <article class="product-delivery-method" :class="{ 'is-enabled': settingsForm.support_message_delivery_enabled, 'is-expanded': openDeliveryMethod === 'support' }">
                         <div class="product-delivery-method__head product-delivery-method__head--expandable">
-                          <span class="product-delivery-method__number">03</span>
+                          <span class="product-delivery-method__number">{{ supplierAccessEnabled ? '03' : '02' }}</span>
                           <button class="product-delivery-method__open" type="button" :aria-expanded="openDeliveryMethod === 'support'" @click="toggleDeliveryMethod('support')">
                             <span class="product-delivery-method__icon" aria-hidden="true">
                               <svg viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 3z" /><path d="M8 9h8M8 12h5" /></svg>
@@ -857,7 +846,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 
                       <article class="product-delivery-method is-manual">
                         <div class="product-delivery-method__head">
-                          <span class="product-delivery-method__number">04</span>
+                          <span class="product-delivery-method__number">{{ supplierAccessEnabled ? '04' : '03' }}</span>
                           <span class="product-delivery-method__icon" aria-hidden="true">
                             <svg viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16z" /><path d="m13 7 4 4" /></svg>
                           </span>
@@ -2362,11 +2351,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   border-color: rgba(126, 151, 217, .16);
 }
 
-.product-delivery-method.is-plan-locked {
-  border-color: rgba(88, 123, 232, .28);
-  background: linear-gradient(145deg, rgba(35, 57, 121, .1), rgba(8, 15, 34, .52));
-}
-
 .product-delivery-method__head {
   display: grid;
   grid-template-columns: 42px 36px minmax(0, 1fr) auto auto;
@@ -2483,14 +2467,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   color: #9fb1d7;
 }
 
-.product-delivery-method__status.is-pro {
-  grid-column: 3;
-  color: #aebfff;
-  border-color: rgba(91, 126, 247, .42);
-  background: rgba(42, 70, 165, .24);
-  letter-spacing: .08em;
-}
-
 .product-delivery-switch {
   position: relative;
   display: inline-flex;
@@ -2554,43 +2530,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
   --supplier-control-height: 44px;
   display: grid;
   gap: 10px;
-}
-
-.product-delivery-plan-lock {
-  display: grid;
-  grid-template-columns: 46px minmax(0, 1fr);
-  align-items: center;
-  gap: 13px;
-  padding: 14px;
-  border: 1px solid rgba(91, 126, 247, .28);
-  border-radius: 12px;
-  background: rgba(28, 47, 105, .16);
-}
-
-.product-delivery-plan-lock__mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid rgba(91, 126, 247, .46);
-  border-radius: 12px;
-  color: #b7c5ff;
-  background: rgba(45, 76, 182, .22);
-  font-size: 9px;
-  font-weight: 850;
-  letter-spacing: .08em;
-}
-
-.product-delivery-plan-lock strong {
-  color: #e3e9fb;
-  font-size: 12px;
-}
-
-.product-delivery-plan-lock p {
-  margin: 5px 0 0;
-  color: #8e9dbc;
-  font-size: 10px;
-  line-height: 1.5;
 }
 
 .product-delivery-supplier__fields {
