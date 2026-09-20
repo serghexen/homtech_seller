@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from domains.tbank_payments import (
     TBankClient,
+    TBankError,
     TBankSettings,
     WorkspaceTopupCreateIn,
     _ssl_context,
@@ -87,35 +88,75 @@ class TBankPaymentsTests(unittest.TestCase):
         self.assertEqual(captured[0], ("GetQr", {"PaymentId": "123", "DataType": "IMAGE", "PaymentMethod": "SBP"}))
         self.assertEqual(captured[1], ("SbpPayTest", {"PaymentId": "123", "IsDeadlineExpired": True}))
 
-    def test_topup_receipt_is_ffd_12_full_payment_service(self) -> None:
+    def test_topup_receipt_is_ffd_12_advance_payment(self) -> None:
+        # Проверяет согласованные реквизиты аванса, которые отправятся в кассу.
         with patch.dict(
             "os.environ",
             {
                 "TBANK_RECEIPT_EMAIL": "Receipt@Example.com",
-                "TBANK_RECEIPT_TAXATION": "osn",
-                "TBANK_RECEIPT_TAX": "none",
+                "TBANK_RECEIPT_TAXATION": "usn_income_outcome",
+                "TBANK_RECEIPT_TAX": "vat105",
             },
         ):
             receipt = topup_receipt(amount=100_000)
 
         self.assertEqual(receipt["FfdVersion"], "1.2")
         self.assertEqual(receipt["Email"], "receipt@example.com")
-        self.assertEqual(receipt["Taxation"], "osn")
+        self.assertEqual(receipt["Taxation"], "usn_income_outcome")
         self.assertEqual(
             receipt["Items"],
             [
                 {
-                    "Name": "Услуга пополнения баланса HomTech Seller",
+                    "Name": "Аванс для оплаты услуг и цифровых товаров HomTech",
                     "Price": 100_000,
                     "Quantity": 1,
                     "Amount": 100_000,
-                    "Tax": "none",
-                    "PaymentMethod": "full_payment",
-                    "PaymentObject": "service",
+                    "Tax": "vat105",
+                    "PaymentMethod": "advance",
+                    "PaymentObject": "payment",
                     "MeasurementUnit": "шт",
                 }
             ],
         )
+
+    def test_advance_receipt_preserves_gross_amount_in_bank_request(self) -> None:
+        # Расчётная ставка не должна прибавлять НДС к платежу или терять копейки.
+        captured = []
+        client = TBankClient(TBankSettings("https://example.test/v2", "DEMO", "secret", "n", "s", "f", 3))
+        client.call = lambda method, payload: captured.append((method, payload)) or {"Success": True}
+        with patch.dict("os.environ", {
+            "TBANK_RECEIPT_EMAIL": "receipt@example.com",
+            "TBANK_RECEIPT_TAXATION": "usn_income_outcome",
+            "TBANK_RECEIPT_TAX": "vat105",
+        }):
+            for amount in (1_000, 105_000, 100_001, 10_000_000):
+                with self.subTest(amount=amount):
+                    client.init(
+                        order_id=f"seller_test_{amount}", amount=amount,
+                        expires_at=datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc),
+                        receipt=topup_receipt(amount=amount),
+                    )
+                    payload = captured[-1][1]
+                    self.assertEqual(payload["Amount"], amount)
+                    self.assertEqual(sum(item["Amount"] for item in payload["Receipt"]["Items"]), amount)
+                    item = payload["Receipt"]["Items"][0]
+                    self.assertEqual(item["Price"] * item["Quantity"], amount)
+                    self.assertEqual(item["Tax"], "vat105")
+                    self.assertEqual(item["PaymentMethod"], "advance")
+                    self.assertEqual(item["PaymentObject"], "payment")
+
+    def test_receipt_rejects_missing_or_invalid_tax_configuration(self) -> None:
+        # Ошибка окружения должна остановить фискализацию, а не подставить другой налог.
+        settings = {
+            "TBANK_RECEIPT_EMAIL": "receipt@example.com",
+            "TBANK_RECEIPT_TAXATION": "usn_income_outcome",
+            "TBANK_RECEIPT_TAX": "vat105",
+        }
+        for key in ("TBANK_RECEIPT_TAXATION", "TBANK_RECEIPT_TAX"):
+            for value in ("", "invalid"):
+                with self.subTest(key=key, value=value), patch.dict("os.environ", {**settings, key: value}):
+                    with self.assertRaisesRegex(TBankError, key):
+                        topup_receipt(amount=1_000)
 
     def test_init_passes_receipt(self) -> None:
         captured = []

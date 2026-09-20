@@ -118,7 +118,7 @@ def tbank_settings() -> TBankSettings:
 
 
 def topup_receipt(*, amount: int) -> dict[str, Any]:
-    """Формирует чек ФФД 1.2 для услуги пополнения баланса."""
+    """Формирует чек приёма аванса; НДС включён в сумму пополнения."""
     email = str(os.getenv("TBANK_RECEIPT_EMAIL", "")).strip().lower()
     taxation = str(os.getenv("TBANK_RECEIPT_TAXATION", "")).strip().lower()
     tax = str(os.getenv("TBANK_RECEIPT_TAX", "")).strip().lower()
@@ -134,13 +134,13 @@ def topup_receipt(*, amount: int) -> dict[str, Any]:
         "Taxation": taxation,
         "Items": [
             {
-                "Name": "Услуга пополнения баланса HomTech Seller",
+                "Name": "Аванс для оплаты услуг и цифровых товаров HomTech",
                 "Price": amount,
                 "Quantity": 1,
                 "Amount": amount,
                 "Tax": tax,
-                "PaymentMethod": "full_payment",
-                "PaymentObject": "service",
+                "PaymentMethod": "advance",
+                "PaymentObject": "payment",
                 "MeasurementUnit": "шт",
             }
         ],
