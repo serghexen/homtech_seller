@@ -61,7 +61,7 @@ class YandexStockOutboundTests(unittest.TestCase):
         source = inspect.getsource(YandexStockOutboundProcessor._claim_and_prepare)
         self.assertIn("market.stock_outbound_enabled=true", source)
         self.assertIn("{\"submitted\", \"delivered\"}", source)
-        self.assertIn("FOR UPDATE OF job SKIP LOCKED", source)
+        self.assertIn("FOR UPDATE OF job, market SKIP LOCKED", source)
 
     def test_processor_accepts_manual_jobs_without_fake_fulfillment(self) -> None:
         source = inspect.getsource(YandexStockOutboundProcessor._claim_and_prepare)
@@ -83,7 +83,7 @@ class YandexStockOutboundTests(unittest.TestCase):
     def test_stale_put_can_be_requeued_safely(self) -> None:
         source = inspect.getsource(YandexStockOutboundProcessor.recover_stale)
         self.assertIn("state IN ('preparing','sending')", source)
-        self.assertIn("state='queued'", source)
+        self.assertIn("ELSE 'queued' END", source)
 
 
 if __name__ == "__main__":

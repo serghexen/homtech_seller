@@ -24,6 +24,7 @@ from domains.yandex_market_webhook_processor import build_yandex_market_webhook_
 from domains.yandex_market_webhooks_api import webhook_processing_enabled
 from domains.yandex_market_outbound import build_yandex_outbound_processor
 from domains.yandex_market_stock_outbound import build_yandex_stock_outbound_processor
+from domains.yandex_daily_stock import enqueue_due_daily_stock
 from domains.yandex_review_replies import build_yandex_review_reply_processor
 
 
@@ -465,6 +466,9 @@ def run_worker() -> int:
             if processed_webhooks:
                 print(f"Processed Yandex webhook events: {processed_webhooks}", flush=True)
             with psycopg.connect(database_url()) as lock_connection:
+                scheduled_daily_stock = enqueue_due_daily_stock(lock_connection)
+                if scheduled_daily_stock:
+                    print(f"Scheduled daily Yandex stock jobs: {scheduled_daily_stock}", flush=True)
                 scheduled_orders = enqueue_due_marketplace_order_jobs(lock_connection)
                 if scheduled_orders:
                     print(f"Scheduled marketplace order polls: {scheduled_orders}", flush=True)

@@ -99,6 +99,11 @@ class MarketplaceCatalogItemOut(BaseModel):
     stock_synced_at: datetime | None = None
     stock_settings_available: bool = False
     sales_metrics_available: bool = False
+    daily_stock_enabled: bool = False
+    stock_last_success_at: datetime | None = None
+    stock_last_error: str = ""
+    stock_next_run_at: datetime | None = None
+    stock_queue_delay_seconds: int = 0
     manual_stock_limit: int | None = None
     published_stock: int | None = None
     activation_instruction: str = ""
@@ -754,15 +759,19 @@ def mount_marketplace_read_routes(
                              THEN local_settings.sales_limit ELSE settings.sales_limit END,
                            CASE
                              WHEN local_settings.connection_id IS NOT NULL THEN
-                               CASE WHEN local_settings.sales_limit_day=CURRENT_DATE
+                               CASE WHEN local_settings.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
                                  THEN local_settings.sales_limit_daily_extra ELSE 0 END
-                             ELSE CASE WHEN settings.sales_limit_day=CURRENT_DATE
+                             ELSE CASE WHEN settings.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
                                THEN COALESCE(settings.sales_limit_daily_extra, 0) ELSE 0 END
                            END,
-                           CASE WHEN local_settings.connection_id IS NOT NULL
+                           CASE WHEN connection.provider_code='yandex_market'
+                             THEN (now() AT TIME ZONE 'Europe/Moscow')::date
+                             WHEN local_settings.connection_id IS NOT NULL
                              THEN local_settings.sales_limit_day ELSE settings.sales_limit_day END,
-                           settings.sales_limit_revision, settings.sales_limit_used,
-                           settings.sales_limit_reserved, settings.sales_limit_remaining,
+                           settings.sales_limit_revision,
+                           CASE WHEN connection.provider_code='yandex_market' THEN daily.used ELSE settings.sales_limit_used END,
+                           CASE WHEN connection.provider_code='yandex_market' THEN daily.reserved ELSE settings.sales_limit_reserved END,
+                           settings.sales_limit_remaining,
                            settings.sales_limit_exhausted_at, settings.archived_by_sales_limit,
                            settings.source_updated_at, settings.imported_at,
                            local_settings.updated_at, item.is_archived,
@@ -776,7 +785,14 @@ def mount_marketplace_read_routes(
                            COALESCE(policy.supplier_issue_enabled, false),
                            COALESCE(supplier.enabled, false), supplier.service_id,
                            COALESCE(supplier.nominal_id, ''), supplier.max_amount,
-                           supplier.quoted_amount, supplier.quoted_at
+                           supplier.quoted_amount, supplier.quoted_at,
+                           connection.yandex_daily_stock_enabled AND connection.stock_outbound_enabled,
+                           stock_history.last_success_at, COALESCE(stock_latest.last_error,''),
+                           LEAST(stock_history.next_run_at, CASE WHEN connection.yandex_daily_stock_enabled
+                             AND connection.stock_outbound_enabled AND
+                             CASE WHEN local_settings.connection_id IS NOT NULL THEN local_settings.sales_limit ELSE settings.sales_limit END IS NOT NULL
+                             THEN connection.next_daily_stock_at END),
+                           GREATEST(0,EXTRACT(EPOCH FROM now()-stock_history.next_run_at))::integer
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     LEFT JOIN seller.yandex_product_settings_snapshot AS settings
@@ -788,6 +804,20 @@ def mount_marketplace_read_routes(
                     LEFT JOIN seller.product_fulfillment_policies AS policy
                       ON policy.connection_id=item.connection_id
                      AND policy.external_product_id=item.external_product_id
+                    LEFT JOIN LATERAL seller.yandex_daily_sales(connection.workspace_id,item.connection_id,item.external_product_id) daily ON true
+                    LEFT JOIN LATERAL (
+                      SELECT max(succeeded_at) AS last_success_at,
+                             min(next_attempt_at) FILTER (WHERE state IN ('queued','preparing','sending')) AS next_run_at
+                      FROM seller.yandex_stock_outbound_jobs
+                      WHERE workspace_id=connection.workspace_id AND connection_id=item.connection_id
+                        AND external_product_id=item.external_product_id
+                    ) stock_history ON connection.provider_code='yandex_market'
+                    LEFT JOIN LATERAL (
+                      SELECT last_error FROM seller.yandex_stock_outbound_jobs
+                      WHERE workspace_id=connection.workspace_id AND connection_id=item.connection_id
+                        AND external_product_id=item.external_product_id
+                      ORDER BY updated_at DESC,id DESC LIMIT 1
+                    ) stock_latest ON connection.provider_code='yandex_market'
                     LEFT JOIN LATERAL (
                       SELECT mapping.enabled, mapping.service_id, mapping.nominal_id,
                              mapping.max_amount, mapping.quoted_amount, mapping.quoted_at
@@ -825,7 +855,10 @@ def mount_marketplace_read_routes(
                 primary_image=catalog_primary_image(provider_code, row[8]),
                 marketplace_url=catalog_marketplace_url(provider_code, row[8], sku=str(row[5] or "")),
                 stock_settings_available=has_settings,
-                sales_metrics_available=has_imported_settings,
+                sales_metrics_available=provider_code == "yandex_market",
+                daily_stock_enabled=provider_code == "yandex_market" and bool(row[37]) and row[14] is not None,
+                stock_last_success_at=row[38], stock_last_error=str(row[39] or ""),
+                stock_next_run_at=row[40], stock_queue_delay_seconds=int(row[41] or 0),
                 manual_stock_limit=int(row[11]) if has_settings else None,
                 published_stock=int(row[12]) if row[12] is not None else None,
                 activation_instruction=str(row[13] or "") if has_settings else "",
@@ -833,9 +866,10 @@ def mount_marketplace_read_routes(
                 sales_limit_daily_extra=int(row[15]) if has_settings else None,
                 sales_limit_day=row[16] if has_settings else None,
                 sales_limit_revision=int(row[17]) if has_imported_settings else None,
-                sales_limit_used=int(row[18]) if has_imported_settings else None,
-                sales_limit_reserved=int(row[19]) if has_imported_settings else None,
-                sales_limit_remaining=int(row[20]) if row[20] is not None else None,
+                sales_limit_used=int(row[18] or 0) if provider_code == "yandex_market" else None,
+                sales_limit_reserved=int(row[19] or 0) if provider_code == "yandex_market" else None,
+                sales_limit_remaining=(max(0, int(row[14]) + int(row[15] or 0) - int(row[18] or 0) - int(row[19] or 0))
+                                       if provider_code == "yandex_market" and row[14] is not None else None),
                 sales_limit_exhausted_at=row[21] if has_imported_settings else None,
                 archived_by_sales_limit=bool(row[22]) if has_imported_settings else False,
                 settings_source_updated_at=row[23] if has_imported_settings else None,
@@ -1013,12 +1047,12 @@ def mount_marketplace_read_routes(
                       sales_limit, sales_limit_daily_extra, sales_limit_day, activation_instruction,
                       support_message, support_message_delivery_enabled, support_message_overridden,
                       pool_issue_enabled, updated_by_user_id
-                    ) VALUES (%s,%s,%s,%s,%s,CURRENT_DATE,%s,%s,%s,true,%s,%s)
+                    ) VALUES (%s,%s,%s,%s,%s,(now() AT TIME ZONE 'Europe/Moscow')::date,%s,%s,%s,true,%s,%s)
                     ON CONFLICT (connection_id, external_product_id) DO UPDATE SET
                       manual_stock_limit=EXCLUDED.manual_stock_limit,
                       sales_limit=EXCLUDED.sales_limit,
                       sales_limit_daily_extra=EXCLUDED.sales_limit_daily_extra,
-                      sales_limit_day=CURRENT_DATE,
+                      sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date,
                       activation_instruction=EXCLUDED.activation_instruction,
                       support_message=EXCLUDED.support_message,
                       support_message_delivery_enabled=EXCLUDED.support_message_delivery_enabled,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -55,7 +56,7 @@ def calculate_effective_stock(
     seller_used: int,
     seller_reserved: int,
 ) -> int:
-    """Повторяет CRM: заданный остаток ограничивается оставшейся дневной квотой."""
+    """Ограничивает заданный остаток оставшейся дневной квотой."""
 
     target = max(0, int(manual_stock or 0))
     if sales_limit is None:
@@ -112,10 +113,13 @@ class YandexStockOutboundProcessor:
                 cursor.execute(
                     """
                     UPDATE seller.yandex_stock_outbound_jobs
-                    SET state='queued', lock_token=NULL, locked_until=NULL,
+                    SET state=CASE WHEN attempt_count>=max_attempts THEN 'failed' ELSE 'queued' END,
+                        failed_at=CASE WHEN attempt_count>=max_attempts THEN now() ELSE failed_at END,
+                        lock_token=NULL, locked_until=NULL,
                         next_attempt_at=now(), last_error='Worker был перезапущен; остаток будет опубликован повторно',
                         updated_at=now()
                     WHERE state IN ('preparing','sending') AND locked_until < now()
+                      AND pg_try_advisory_xact_lock(20260824, (connection_id % 2147483647)::integer)
                     """
                 )
                 recovered = cursor.rowcount
@@ -127,26 +131,28 @@ class YandexStockOutboundProcessor:
             return 0
         processed = 0
         for _index in range(max(1, min(int(limit), 50))):
-            payload = self._claim_and_prepare()
-            if payload is None:
-                break
-            processed += 1
-            try:
-                self._sender(payload)
-            except YandexStockOutboundError as exc:
-                self._finish_failure(payload, str(exc), definite=exc.definite)
-            except Exception:
-                self._finish_failure(payload, "Не удалось подтвердить публикацию остатка", definite=False)
-            else:
-                self._finish_success(payload)
+            # Keep the session advisory lock through the network call and final commit.
+            with self._psycopg.connect(self._database_url()) as lock_connection:
+                payload = self._claim_and_prepare(lock_connection)
+                if payload is None:
+                    break
+                processed += 1
+                try:
+                    self._sender(payload)
+                except YandexStockOutboundError as exc:
+                    self._finish_failure(payload, str(exc), definite=exc.definite)
+                except Exception:
+                    self._finish_failure(payload, "Не удалось подтвердить публикацию остатка", definite=False)
+                else:
+                    self._finish_success(payload)
         return processed
 
-    def _claim_and_prepare(self) -> StockOutboundPayload | None:
-        with self._psycopg.connect(self._database_url()) as connection:
+    def _claim_and_prepare(self, lock_connection) -> StockOutboundPayload | None:
+        with nullcontext(lock_connection) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT job.id
+                    SELECT job.id, market.id
                     FROM seller.yandex_stock_outbound_jobs AS job
                     LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
                     JOIN seller.marketplace_connections AS market
@@ -154,16 +160,27 @@ class YandexStockOutboundProcessor:
                     WHERE job.state='queued' AND job.next_attempt_at <= now()
                       AND job.attempt_count < job.max_attempts
                       AND market.status='active' AND market.provider_code='yandex_market'
-                      AND market.stock_outbound_enabled=true
-                    ORDER BY job.next_attempt_at, job.id
-                    FOR UPDATE OF job SKIP LOCKED
+                      AND market.stock_outbound_enabled=true AND market.workspace_id=job.workspace_id
+                      AND (market.stock_backoff_until IS NULL OR market.stock_backoff_until<=now())
+                      AND (job.orders_fresh_after IS NULL OR market.last_successful_sync_at>=job.orders_fresh_after)
+                      AND NOT EXISTS (SELECT 1 FROM seller.yandex_stock_outbound_jobs active
+                        WHERE active.connection_id=market.id AND active.state IN ('preparing','sending'))
+                    ORDER BY market.stock_last_attempt_at NULLS FIRST, job.next_attempt_at, job.id
+                    FOR UPDATE OF job, market SKIP LOCKED
                     LIMIT 1
                     """
                 )
                 row = cursor.fetchone()
                 if not row:
                     return None
-                job_id = int(row[0])
+                job_id, claimed_connection_id = int(row[0]), int(row[1])
+                cursor.execute("SELECT pg_try_advisory_lock(20260824, %s)",
+                               (claimed_connection_id % 2147483647,))
+                if not cursor.fetchone()[0]:
+                    cursor.execute("UPDATE seller.yandex_stock_outbound_jobs SET next_attempt_at=now()+interval '2 seconds' WHERE id=%s", (job_id,))
+                    connection.commit()
+                    return None
+                cursor.execute("UPDATE seller.marketplace_connections SET stock_last_attempt_at=now() WHERE id=%s", (claimed_connection_id,))
                 cursor.execute(
                     """
                     UPDATE seller.yandex_stock_outbound_jobs
@@ -199,16 +216,13 @@ class YandexStockOutboundProcessor:
                              WHEN local_settings.connection_id IS NULL
                                       AND imported.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
                              THEN imported.sales_limit_daily_extra ELSE 0 END,
-                           CASE WHEN imported.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
-                             THEN imported.sales_limit_used ELSE 0 END,
-                           CASE WHEN imported.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
-                             THEN imported.sales_limit_reserved ELSE 0 END,
-                           CASE WHEN imported.sales_limit_day=(now() AT TIME ZONE 'Europe/Moscow')::date
-                             THEN imported.imported_at
-                             ELSE ((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow') END,
                            COALESCE(policy.supplier_issue_enabled, false),
                            COALESCE(policy.pool_issue_enabled, local_settings.pool_issue_enabled, false),
-                           COALESCE(pool_stock.free_count, 0)
+                           COALESCE(pool_stock.free_count, 0), market.workspace_id,
+                           market.yandex_daily_stock_enabled, market.launch_state,
+                           EXISTS (SELECT 1 FROM seller.catalog_items item
+                             WHERE item.connection_id=market.id AND item.external_product_id=job.external_product_id
+                               AND item.is_present AND NOT item.is_archived)
                     FROM seller.yandex_stock_outbound_jobs AS job
                     LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
                     JOIN seller.marketplace_connections AS market
@@ -245,13 +259,17 @@ class YandexStockOutboundProcessor:
                 configured_manual_stock = row[8] if job_kind == "manual" else row[10]
                 configured_stock = stock_target_base(
                     manual_stock=int(configured_manual_stock) if configured_manual_stock is not None else None,
-                    supplier_issue_enabled=bool(row[16]),
-                    pool_issue_enabled=bool(row[17]),
-                    pool_free_count=int(row[18] or 0),
+                    supplier_issue_enabled=bool(row[13]),
+                    pool_issue_enabled=bool(row[14]),
+                    pool_free_count=int(row[15] or 0),
                 )
                 validation_error = ""
                 if not yandex_stock_outbound_enabled() or str(row[5]) != "active" or not bool(row[6]):
                     validation_error = "Публикация остатков выключена"
+                elif not bool(row[19]):
+                    validation_error = "Карточка отсутствует или архивирована"
+                elif job_kind in {"daily", "reconcile"} and (not bool(row[17]) or str(row[18]) != "running"):
+                    validation_error = "Ежедневное обновление остатков магазина выключено"
                 elif job_kind == "fulfillment" and str(row[3]) not in {"submitted", "delivered"}:
                     validation_error = "Остаток публикуется только после подтверждённой отправки"
                 elif not product_id or configured_stock is None:
@@ -265,26 +283,14 @@ class YandexStockOutboundProcessor:
                 if validation_error:
                     self._finish_failure_before_send(connection, job_id, lock_token, validation_error)
                     return None
-                cutoff = row[15]
                 cursor.execute(
-                    """
-                    SELECT
-                      COALESCE(SUM(requested_quantity) FILTER (
-                        WHERE status='delivered' AND delivered_at >= %s
-                      ), 0),
-                      COALESCE(SUM(requested_quantity) FILTER (
-                        WHERE status IN ('reserved','sending','submitted','unknown')
-                          AND created_at >= %s
-                      ), 0)
-                    FROM seller.order_fulfillments
-                    WHERE connection_id=%s AND offer_id=%s
-                    """,
-                    (cutoff, cutoff, connection_id, product_id),
+                    "SELECT used, reserved FROM seller.yandex_daily_sales(%s,%s,%s)",
+                    (int(row[16]), connection_id, product_id),
                 )
                 seller_used, seller_reserved = (int(value or 0) for value in cursor.fetchone())
                 target_stock = calculate_effective_stock(
                     int(configured_stock), int(row[11]) if row[11] is not None else None, int(row[12] or 0),
-                    int(row[13] or 0), int(row[14] or 0), seller_used, seller_reserved,
+                    0, 0, seller_used, seller_reserved,
                 )
                 cursor.execute(
                     """
@@ -348,6 +354,11 @@ class YandexStockOutboundProcessor:
                         WHERE id=%s
                         """,
                         (stock_retry_delay_seconds(int(row[0])), message[:1000], payload.job_id),
+                    )
+                if not definite:
+                    cursor.execute(
+                        "UPDATE seller.marketplace_connections SET stock_backoff_until=now()+(%s * interval '1 second') WHERE id=%s",
+                        (stock_retry_delay_seconds(int(row[0])), payload.connection_id),
                     )
                 cursor.execute(
                     """

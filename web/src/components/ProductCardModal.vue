@@ -79,7 +79,7 @@ const hasSalesLimit = computed(() => settingsForm.sales_limit_enabled)
 const limitMetrics = computed(() => [
   { label: 'Продано', value: hasSalesMetrics.value ? Math.max(0, Number(props.item.sales_limit_used) || 0) : '—' },
   { label: 'В резерве', value: hasSalesMetrics.value ? Math.max(0, Number(props.item.sales_limit_reserved) || 0) : '—' },
-  { label: 'Осталось по снимку', value: hasSalesMetrics.value && props.item.sales_limit_remaining !== null ? Math.max(0, Number(props.item.sales_limit_remaining) || 0) : '—' },
+  { label: 'Осталось сегодня', value: hasSalesMetrics.value && props.item.sales_limit_remaining !== null ? Math.max(0, Number(props.item.sales_limit_remaining) || 0) : '—' },
 ])
 const limitHeadline = computed(() => {
   if (!hasSalesLimit.value) return 'Без ограничений'
@@ -607,8 +607,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                     <section class="stock-limit">
                       <div class="stock-limit__heading">
                         <div><span>Состояние лимита</span><strong>{{ limitHeadline }}</strong></div>
-                        <span class="stock-limit__badge">Локальная настройка</span>
+                        <span class="stock-limit__badge">{{ item.daily_stock_enabled ? 'Автообновление · МСК' : 'Локальная настройка' }}</span>
                       </div>
+                      <p v-if="item.daily_stock_enabled" class="stock-limit__metrics-note">Новый день — по Москве. Остаток восстанавливается автоматически с учётом продаж и незавершённых заказов.</p>
+                      <p v-if="item.stock_last_success_at" class="stock-limit__metrics-note">Опубликовано: {{ new Date(item.stock_last_success_at).toLocaleString('ru-RU') }}</p>
+                      <p v-if="item.stock_next_run_at" class="stock-limit__metrics-note">Следующее обновление: {{ new Date(item.stock_next_run_at).toLocaleString('ru-RU') }}<template v-if="item.stock_queue_delay_seconds > 60"> · задержка {{ Math.ceil(item.stock_queue_delay_seconds / 60) }} мин.</template></p>
+                      <p v-if="item.stock_last_error" class="stock-limit__metrics-note">Ошибка публикации: {{ item.stock_last_error }}</p>
                       <label class="stock-limit__extra">
                         <span>Дополнительно сегодня</span>
                         <input v-model.number="settingsForm.sales_limit_daily_extra" type="number" min="0" max="1000000" step="1" inputmode="numeric" />
