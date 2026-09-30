@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 import io
 import json
 import unittest
@@ -52,13 +53,57 @@ class OzonOutboundTests(unittest.TestCase):
         self.assertFalse(raised.exception.definite)
 
     @patch("domains.ozon_outbound.urllib.request.urlopen")
-    def test_done_response_is_treated_as_already_accepted(self, urlopen) -> None:
+    def test_done_response_requires_reconciliation(self, urlopen) -> None:
         urlopen.side_effect = urllib.error.HTTPError(
             "url", 409, "done", {}, io.BytesIO(b'{"message":"posting is done"}'),
         )
         with self.assertRaises(OzonOutboundError) as raised:
             send_ozon_digital_codes(payload())
-        self.assertTrue(raised.exception.accepted)
+        self.assertFalse(raised.exception.accepted)
+        self.assertFalse(raised.exception.definite)
+
+    @patch("domains.ozon_outbound.urllib.request.urlopen")
+    def test_two_skus_are_uploaded_together(self, urlopen):
+        second = replace(payload(), job_id=2, fulfillment_id=8, sku=9922, codes=("CODE-3",))
+        group = replace(payload(), siblings=(second,))
+        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps({
+            "exemplars_by_sku": [
+                {"sku": 9922, "received_qty": 1, "rejected_qty": 0},
+                {"sku": 9911, "received_qty": 2, "rejected_qty": 0},
+            ]}).encode()
+        send_ozon_digital_codes(group)
+        entries = json.loads(urlopen.call_args.args[0].data)["exemplars_by_sku"]
+        self.assertEqual([(e["sku"], e["exemplar_qty"]) for e in entries], [(9911, 2), (9922, 1)])
+        self.assertEqual(urlopen.call_count, 1)
+
+    @patch("domains.ozon_outbound.urllib.request.urlopen")
+    def test_partial_or_malformed_acceptance_never_releases_keys(self, urlopen):
+        for result in [
+            {}, {"exemplars_by_sku": [{"sku": 9911, "received_qty": 1, "rejected_qty": 1}]},
+            {"exemplars_by_sku": [{"sku": 9911, "received_qty": 2}]},
+            {"exemplars_by_sku": [None]},
+        ]:
+            with self.subTest(result=result):
+                urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(result).encode()
+                with self.assertRaises(OzonOutboundError) as raised:
+                    send_ozon_digital_codes(payload())
+                self.assertFalse(raised.exception.definite)
+
+    @patch("domains.ozon_outbound.urllib.request.urlopen")
+    def test_400_diagnostics_redact_all_codes_and_credentials(self, urlopen):
+        second = replace(payload(), codes=("CODE-3",))
+        urlopen.side_effect = urllib.error.HTTPError("url", 400, "bad request", {}, io.BytesIO(
+            json.dumps({"message": "invalid CODE-1 CODE-2 CODE-3 token", "details": "secret"}).encode()))
+        with self.assertRaises(OzonOutboundError) as raised:
+            send_ozon_digital_codes(replace(payload(), siblings=(second,)))
+        self.assertTrue(raised.exception.definite)
+        self.assertIn("invalid", str(raised.exception))
+        for secret in ("CODE-1", "CODE-2", "CODE-3", "token", "secret"):
+            self.assertNotIn(secret, str(raised.exception))
+
+    def test_payload_repr_does_not_disclose_keys_or_credentials(self):
+        self.assertNotIn("CODE-1", repr(payload()))
+        self.assertNotIn("'token'", repr(payload()))
 
     def test_processor_records_sending_before_http_and_never_blindly_retries(self) -> None:
         source = inspect.getsource(OzonOutboundProcessor)

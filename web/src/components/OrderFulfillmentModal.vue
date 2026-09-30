@@ -94,7 +94,9 @@ const preparedCount = computed(() => props.detail?.delivery_source === 'support_
 const outboundPresentation = computed(() => {
   if (props.detail?.fulfillment_status === 'delivered') return `${marketplaceName.value} подтвердил доставку. Зарезервированный комплект окончательно списан из пула.`
   return ({
-  queued: 'Отправка ожидает worker. Пока она не началась, её можно отменить.',
+  queued: props.detail?.provider_code === 'ozon'
+    ? 'Отправка ожидает готовности всех позиций этого отправления. Подготовьте и подтвердите отправку каждой позиции; Seller передаст весь комплект одним запросом. До начала отправку можно отменить.'
+    : 'Отправка ожидает worker. Пока она не началась, её можно отменить.',
   preparing: 'Worker проверяет комплект и инструкцию перед внешним запросом.',
   sending: 'Запрос выполняется. Автоматический откат и повтор уже запрещены.',
   submitted: `${marketplaceName.value} принял комплект. Ожидаем подтверждение заказа при следующей сверке.`,
@@ -156,7 +158,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
               <div>
                 <small>{{ detail.store_name }} · {{ marketplaceName }}</small>
                 <h3>{{ detail.title || order.title || 'Товар без названия' }}</h3>
-                <p>SKU: <strong>{{ detail.offer_id || order.offer_id || order.sku || '—' }}</strong></p>
+                <p>SKU: <strong>{{ order.sku || detail.offer_id || order.offer_id || '—' }}</strong></p>
                 <p v-if="detail.fulfillment_deadline_at">Код ожидается до: <strong>{{ formatDeadline(detail.fulfillment_deadline_at) }}</strong></p>
               </div>
             </section>
