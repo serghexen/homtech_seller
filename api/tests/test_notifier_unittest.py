@@ -70,6 +70,25 @@ class NotifierTests(unittest.TestCase):
         self.assertIn("Количество: 2", text)
         self.assertIn("откройте заказ в Seller", text)
 
+    def test_stock_check_time_is_moscow_hours_and_minutes(self) -> None:
+        # Проверяем UTC, явный часовой пояс и переход через полночь.
+        cases = [
+            ("2026-10-06 07:00:22.873969+00:00", "10:00 МСК"),
+            ("2026-10-06T07:00:22Z", "10:00 МСК"),
+            ("2026-10-06T10:00:59+03:00", "10:00 МСК"),
+            ("2026-10-06T23:59:59+00:00", "02:59 МСК"),
+            ("2026-10-06T07:00:22", "10:00 МСК"),
+            (None, "нет данных"),
+            ("invalid", "нет данных"),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                text = notifier.notification_text("supplier_stock", {
+                    "action": "sent", "observation": "zero", "target_stock": 0,
+                    "checked_at": value,
+                })
+                self.assertEqual(text.splitlines()[-1], "Проверка: " + expected)
+
     def test_retry_backoff_is_bounded(self) -> None:
         self.assertEqual(notifier.retry_delay_seconds(1), 15)
         self.assertEqual(notifier.retry_delay_seconds(2), 30)

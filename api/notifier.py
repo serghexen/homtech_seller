@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -115,6 +116,17 @@ def status_title(status: str) -> str:
     return labels.get(str(status or "").strip().lower(), "Обрабатывается")
 
 
+def stock_check_time(value: Any) -> str:
+    # Показываем время снимка по Москве; отсутствующее время не заменяем текущим.
+    try:
+        checked_at = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return "нет данных"
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    return checked_at.astimezone(timezone(timedelta(hours=3))).strftime("%H:%M") + " МСК"
+
+
 def notification_text(event_type: str, payload: dict[str, Any]) -> str:
     if event_type == "supplier_stock":
         # Служебное событие наличия не притворяется ошибкой заказа; ключи и сырой ответ не выводятся.
@@ -138,7 +150,7 @@ def notification_text(event_type: str, payload: dict[str, Any]) -> str:
             f"Магазин: {str(payload.get('store_name') or '—')[:160]}",
             f"Товар: {str(payload.get('offer_id') or '—')[:200]}",
             labels.get(payload.get('observation'), 'Состояние наличия изменилось'),result,
-            f"Проверка: {str(payload.get('checked_at') or 'нет данных')[:80]}"])
+            f"Проверка: {stock_check_time(payload.get('checked_at'))}"])
     if event_type == "resolved":
         heading = "✅ Проблема решена"
     elif event_type == "cancelled":
