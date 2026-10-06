@@ -295,8 +295,9 @@ def claim_delivery(connection, lease_seconds: int) -> ClaimedDelivery | None:
               WHERE delivery.state IN ('queued','retry') AND delivery.available_at <= now()
                 AND recipient.is_active=true AND recipient.workspace_id=event.workspace_id
                 AND (event.event_type<>'supplier_stock' OR (
-                  event.payload->>'action' IN ('sent','error','common_warning','common_restored')
-                  AND (event.payload->>'action' IN ('common_warning','common_restored') OR event.payload->>'observation'<>'available' OR event.payload->>'transition'='restored')
+                  event.payload->>'action'='sent'
+                  AND ((event.payload->>'transition'='blocked' AND event.payload->>'target_stock'='0')
+                    OR (event.payload->>'transition'='restored' AND event.payload->>'target_stock' ~ '^[1-9][0-9]*$'))
                   AND EXISTS (
                   SELECT 1 FROM seller.marketplace_connections c
                   JOIN seller.product_fulfillment_policies p ON p.connection_id=c.id AND p.supplier_issue_enabled

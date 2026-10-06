@@ -111,12 +111,13 @@ def notify(cursor, workspace, connection_id, product_id, key, payload):
         FROM seller.marketplace_connections c
         WHERE s.workspace_id=%s AND s.connection_id=%s AND s.external_product_id=%s
           AND c.id=s.connection_id AND c.workspace_id=s.workspace_id
-          AND c.supplier_stock_notifications_enabled
-          AND (c.supplier_stock_notifications_until IS NULL OR c.supplier_stock_notifications_until>now())
-          AND s.notice_key<>%s RETURNING s.observation,s.checked_at,c.display_name''',
+          AND s.notice_key<>%s RETURNING s.observation,s.checked_at,c.display_name,
+            c.supplier_stock_notifications_enabled,
+            c.supplier_stock_notifications_until IS NULL OR c.supplier_stock_notifications_until>now()''',
         (key,workspace,connection_id,product_id,key))
     row = cursor.fetchone()
-    if not row:
+    # Даже при выключенном Telegram подтверждение погашается и не всплывает после включения.
+    if not row or not row[3] or not row[4]:
         return
     payload = {**payload, 'connection_id':connection_id,'offer_id':product_id,
                'store_name':row[2], 'observation':row[0], 'checked_at':str(row[1] or '')}
@@ -126,22 +127,27 @@ def notify(cursor, workspace, connection_id, product_id, key, payload):
 
 
 def publication_notice(cursor, connection_id, product_id, *, target=None, error=False):
-    # «Отправлено» появляется только после успешного PUT; повтор одной ошибки уведомление не дублирует.
-    if not enabled():
+    # Сообщаем только подтверждённый переход: ошибка PUT оставляет ожидание успешного повтора.
+    if not enabled() or error:
         return
     cursor.execute('''SELECT s.workspace_id,s.revision,s.blocked,s.notice_key FROM seller.product_supplier_stock_state s
         JOIN seller.marketplace_connections c ON c.id=s.connection_id AND c.workspace_id=s.workspace_id
         WHERE s.connection_id=%s AND s.external_product_id=%s''', (connection_id,product_id))
     row = cursor.fetchone()
-    if row:
-        # Исходное наличие не является восстановлением; сообщаем только о блокировке или её снятии.
-        recovery = ':recovery:' in str(row[3] or '')
-        if not row[2] and not recovery:
-            return
-        action = 'error' if error else 'sent'
-        key = f'{row[1]}:recovery:error' if recovery and error else f'{row[1]}:restored' if recovery else f'{row[1]}:{action}'
-        notify(cursor,int(row[0]),connection_id,product_id,key,
-               {'action':action,'target_stock':target,'transition':'restored' if recovery else 'blocked'})
+    if not row:
+        return
+    notice_key = str(row[3] or '')
+    recovery = ':recovery:' in notice_key
+    pending_block = notice_key.endswith(':blocked:pending')
+    # Обычный ручной/суточный PUT и смена причины внутри блока не являются новым переходом.
+    if row[2] and pending_block and target == 0:
+        transition, key = 'blocked', f'{row[1]}:sent'
+    elif not row[2] and recovery and target is not None and target > 0:
+        transition, key = 'restored', f'{row[1]}:restored'
+    else:
+        return
+    notify(cursor,int(row[0]),connection_id,product_id,key,
+           {'action':'sent','target_stock':target,'transition':transition})
 
 
 class SupplierStockController:
@@ -258,17 +264,8 @@ class SupplierStockController:
         return state if mapping else None
 
     def common_notice(self, cur, workspace, cid, warnings, active_count):
-        # Один общий сбой даёт одно сообщение на магазин, а не сотни одинаковых сообщений по карточкам.
+        # Общие предупреждения остаются в состоянии магазина и UI, без сообщений об остатках в Telegram.
         key = ':'.join(sorted(set(warnings))) if warnings else ''
         cur.execute('''UPDATE seller.marketplace_connections SET supplier_stock_notice_key=%s
-            WHERE id=%s AND workspace_id=%s AND supplier_stock_notice_key<>%s
-            RETURNING supplier_stock_notifications_enabled,
-              supplier_stock_notifications_until IS NULL OR supplier_stock_notifications_until>now(),display_name''',
+            WHERE id=%s AND workspace_id=%s AND supplier_stock_notice_key<>%s''',
             (key,cid,workspace,key))
-        row = cur.fetchone()
-        if row and row[0] and row[1] and active_count:
-            payload = {'connection_id':cid,'store_name':row[2], 'offer_id':'',
-                       'observation':warnings[0] if warnings else 'available',
-                       'action':'common_warning' if warnings else 'common_restored','affected_count':len(warnings)}
-            cur.execute('''INSERT INTO seller.telegram_notification_events(workspace_id,event_type,event_key,payload)
-                VALUES (%s,'supplier_stock',%s,%s::jsonb)''', (workspace,'common:'+key,json.dumps(payload,ensure_ascii=False)))

@@ -286,3 +286,80 @@ class SupplierStockIntegrationTests(unittest.TestCase):
                 c.execute("INSERT INTO seller.telegram_notification_events(workspace_id,event_type,event_key,payload) VALUES (%s,'supplier_stock',%s,%s::jsonb)",(w,action,json.dumps({'connection_id':a,'offer_id':'sku','observation':'available','action':action})))
             notifier.materialize_deliveries(c)
             self.assertIsNone(notifier.claim_delivery(c,90))
+
+
+    def test_disabled_notifications_consume_success_without_replay_on_enable(self):
+        # Подтверждённые при выключенном боте остатки не превращаются в стартовую рассылку.
+        from domains.supplier_stock_control import publication_notice
+        w,a=self.stores[0]
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute('UPDATE seller.marketplace_connections SET supplier_stock_notifications_enabled=false WHERE id=%s AND workspace_id=%s',(a,w))
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),0)
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute('UPDATE seller.marketplace_connections SET supplier_stock_notifications_enabled=true WHERE id=%s AND workspace_id=%s',(a,w))
+            with c.cursor() as cur: publication_notice(cur,a,'sku',target=0)
+        self.refresh(a,self.snapshot(0))
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),0)
+        self.refresh(a,self.snapshot(8));self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events WHERE payload->>'transition'='restored'"),1)
+
+    def test_reason_change_and_manual_zero_do_not_repeat_confirmed_block(self):
+        # Смена причины zero → unavailable при прежнем блоке не порождает второе сообщение.
+        from domains.supplier_stock_control import publication_notice
+        w,a=self.stores[0]
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
+        changed=self.snapshot(0);changed['items'][0]['status']='unavailable'
+        self.refresh(a,changed)
+        with psycopg.connect(TEST_DSN) as c:
+            with c.cursor() as cur: publication_notice(cur,a,'sku',target=0)
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),1)
+
+    def test_errors_and_general_warning_stay_silent_until_confirmed_transition(self):
+        # Ошибка отправки и сбой снимка не уведомляют, успешный повтор даёт одно событие.
+        from domains.supplier_stock_control import publication_notice
+        w,a=self.stores[0]
+        self.refresh(a,self.snapshot(0))
+        with psycopg.connect(TEST_DSN) as c:
+            with c.cursor() as cur: publication_notice(cur,a,'sku',target=0,error=True)
+        self.refresh(a,self.snapshot(0,'common'))
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),0)
+        self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),1)
+        self.refresh(a,self.snapshot(0))
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),1)
+
+    def test_recovery_at_zero_due_to_quota_waits_for_positive_publication(self):
+        # Наличие поставщика без реального положительного PUT ещё не является восстановлением продажи.
+        from domains.supplier_stock_control import publication_notice
+        w,a=self.stores[0]
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute("UPDATE seller.product_card_settings SET manual_stock_limit=0 WHERE connection_id=%s AND external_product_id='sku'",(a,))
+        self.refresh(a,self.snapshot(5));self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),1)
+        with psycopg.connect(TEST_DSN) as c:
+            with c.cursor() as cur:
+                publication_notice(cur,a,'sku',target=5)
+                publication_notice(cur,a,'sku',target=5)
+        self.assertEqual(self.value('SELECT count(*) FROM seller.telegram_notification_events'),2)
+
+    def test_each_transition_has_one_delivery_per_chat_and_old_warnings_are_filtered(self):
+        # Два разрешённых чата получают по одной доставке; повторы и старые предупреждения не проходят.
+        import notifier,json
+        w,a=self.stores[0]
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
+        self.refresh(a,self.snapshot(0))
+        with psycopg.connect(TEST_DSN) as c:
+            for chat in (123,456):
+                c.execute('INSERT INTO seller.telegram_notification_recipients(workspace_id,chat_id) VALUES (%s,%s)',(w,chat))
+            for action in ('queued','error','common_warning','common_restored'):
+                payload={'connection_id':a,'offer_id':'sku','observation':'zero','transition':'blocked','target_stock':0,'action':action}
+                c.execute("INSERT INTO seller.telegram_notification_events(workspace_id,event_type,event_key,payload) VALUES (%s,'supplier_stock',%s,%s::jsonb)",(w,action,json.dumps(payload)))
+            notifier.materialize_deliveries(c)
+            self.assertEqual(notifier.materialize_deliveries(c),0)
+            deliveries=[notifier.claim_delivery(c,90),notifier.claim_delivery(c,90)]
+            self.assertEqual({d.chat_id for d in deliveries},{123,456})
+            self.assertTrue(all(d.payload['action']=='sent' for d in deliveries))
+            self.assertEqual(len({d.event_id for d in deliveries}),1)
+            self.assertIsNone(notifier.claim_delivery(c,90))
