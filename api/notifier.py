@@ -294,7 +294,10 @@ def claim_delivery(connection, lease_seconds: int) -> ClaimedDelivery | None:
               JOIN seller.telegram_notification_events AS event ON event.id=delivery.event_id
               WHERE delivery.state IN ('queued','retry') AND delivery.available_at <= now()
                 AND recipient.is_active=true AND recipient.workspace_id=event.workspace_id
-                AND (event.event_type<>'supplier_stock' OR EXISTS (
+                AND (event.event_type<>'supplier_stock' OR (
+                  event.payload->>'action' IN ('sent','error','common_warning','common_restored')
+                  AND (event.payload->>'action' IN ('common_warning','common_restored') OR event.payload->>'observation'<>'available' OR event.payload->>'transition'='restored')
+                  AND EXISTS (
                   SELECT 1 FROM seller.marketplace_connections c
                   JOIN seller.product_fulfillment_policies p ON p.connection_id=c.id AND p.supplier_issue_enabled
                   WHERE c.id=(event.payload->>'connection_id')::bigint AND c.workspace_id=event.workspace_id
@@ -305,7 +308,7 @@ def claim_delivery(connection, lease_seconds: int) -> ClaimedDelivery | None:
                     AND (COALESCE(event.payload->>'offer_id','')='' OR p.external_product_id=event.payload->>'offer_id')
                     AND EXISTS(SELECT 1 FROM seller.product_supplier_mappings m
                       WHERE m.connection_id=c.id AND m.external_product_id=p.external_product_id
-                        AND m.enabled AND m.provider_code='interhub' AND m.nominal_id<>'')))
+                        AND m.enabled AND m.provider_code='interhub' AND m.nominal_id<>''))))
               ORDER BY CASE WHEN event.event_type='supplier_stock' THEN 1 ELSE 0 END, delivery.available_at, delivery.id
               FOR UPDATE OF delivery SKIP LOCKED
               LIMIT 1

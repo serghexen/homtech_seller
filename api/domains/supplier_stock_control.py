@@ -129,14 +129,19 @@ def publication_notice(cursor, connection_id, product_id, *, target=None, error=
     # «Отправлено» появляется только после успешного PUT; повтор одной ошибки уведомление не дублирует.
     if not enabled():
         return
-    cursor.execute('''SELECT s.workspace_id,s.revision FROM seller.product_supplier_stock_state s
+    cursor.execute('''SELECT s.workspace_id,s.revision,s.blocked,s.notice_key FROM seller.product_supplier_stock_state s
         JOIN seller.marketplace_connections c ON c.id=s.connection_id AND c.workspace_id=s.workspace_id
         WHERE s.connection_id=%s AND s.external_product_id=%s''', (connection_id,product_id))
     row = cursor.fetchone()
     if row:
+        # Исходное наличие не является восстановлением; сообщаем только о блокировке или её снятии.
+        recovery = ':recovery:' in str(row[3] or '')
+        if not row[2] and not recovery:
+            return
         action = 'error' if error else 'sent'
-        notify(cursor,int(row[0]),connection_id,product_id,f'{row[1]}:{action}',
-               {'action':action,'target_stock':target})
+        key = f'{row[1]}:recovery:error' if recovery and error else f'{row[1]}:restored' if recovery else f'{row[1]}:{action}'
+        notify(cursor,int(row[0]),connection_id,product_id,key,
+               {'action':action,'target_stock':target,'transition':'restored' if recovery else 'blocked'})
 
 
 class SupplierStockController:
@@ -238,8 +243,17 @@ class SupplierStockController:
             queued = cur.rowcount > 0
             if queued and not blocked:
                 cur.execute("INSERT INTO seller.marketplace_sync_jobs(workspace_id,connection_id,sync_kind) VALUES (%s,%s,'orders') ON CONFLICT DO NOTHING",(workspace,cid))
-        if changed and mapping and state not in {'common_error','unknown','stale'} and (publish or not previous or previous['observation'] not in {'common_error','unknown','stale'}):
-            notify(cur,workspace,cid,product,f'{rev}:observed',{'action':'queued' if queued else 'unchanged'})
+        if publish and mapping:
+            # Запоминаем восстановление до PUT, но не отправляем промежуточные сообщения об очереди.
+            if not blocked and previous and previous['blocked']:
+                notice_key = f'{rev}:recovery:pending'
+            elif blocked:
+                notice_key = f'{rev}:blocked:pending'
+            else:
+                notice_key = ''
+            cur.execute('''UPDATE seller.product_supplier_stock_state SET notice_key=%s
+                WHERE workspace_id=%s AND connection_id=%s AND external_product_id=%s''',
+                (notice_key,workspace,cid,product))
 
         return state if mapping else None
 

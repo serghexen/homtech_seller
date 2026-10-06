@@ -153,7 +153,7 @@ class SupplierStockIntegrationTests(unittest.TestCase):
         # Даже уже подготовленное уведомление не уходит по выключенной карточке.
         import notifier
         w,a=self.stores[0]
-        self.refresh(a,self.snapshot(0))
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
         with psycopg.connect(TEST_DSN) as c:
             c.execute("INSERT INTO seller.telegram_notification_recipients(workspace_id,chat_id) VALUES (%s,123)",(w,))
             notifier.materialize_deliveries(c)
@@ -245,7 +245,7 @@ class SupplierStockIntegrationTests(unittest.TestCase):
         # Новый заказ не ждёт сотни старых информационных уведомлений об остатках.
         import notifier
         w,a=self.stores[0]
-        self.refresh(a,self.snapshot(0))
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
         with psycopg.connect(TEST_DSN) as c:
             c.execute("INSERT INTO seller.telegram_notification_recipients(workspace_id,chat_id) VALUES (%s,123)",(w,))
             notifier.materialize_deliveries(c)
@@ -256,3 +256,33 @@ class SupplierStockIntegrationTests(unittest.TestCase):
             delivery=notifier.claim_delivery(c,90)
             self.assertIsNotNone(delivery)
             self.assertEqual(delivery.event_type,'manual_required')
+
+    def test_only_confirmed_zero_and_recovery_notify_not_initial_availability(self):
+        # Первый положительный снимок и постановка в очередь не засоряют Telegram.
+        w,a=self.stores[0]
+        self.refresh(a,self.snapshot(5));self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events"),0)
+        self.refresh(a,self.snapshot(0))
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events"),0)
+        self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events WHERE payload->>'transition'='blocked' AND payload->>'action'='sent'"),1)
+        self.refresh(a,self.snapshot(5))
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events"),1)
+        self.due();self.processor.process_pending_jobs(20)
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events WHERE payload->>'transition'='restored' AND payload->>'action'='sent'"),1)
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events WHERE payload->>'action'='queued'"),0)
+        from domains.supplier_stock_control import publication_notice
+        with psycopg.connect(TEST_DSN) as c:
+            with c.cursor() as cur: publication_notice(cur,a,'sku',target=5)
+        self.assertEqual(self.value("SELECT count(*) FROM seller.telegram_notification_events"),2)
+
+    def test_notifier_filters_legacy_available_queue_messages(self):
+        # Даже старое событие из очереди не должно вернуть отключённый информационный спам.
+        import notifier,json
+        w,a=self.stores[0]
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute("INSERT INTO seller.telegram_notification_recipients(workspace_id,chat_id) VALUES (%s,123)",(w,))
+            for action in ('queued','sent'):
+                c.execute("INSERT INTO seller.telegram_notification_events(workspace_id,event_type,event_key,payload) VALUES (%s,'supplier_stock',%s,%s::jsonb)",(w,action,json.dumps({'connection_id':a,'offer_id':'sku','observation':'available','action':action})))
+            notifier.materialize_deliveries(c)
+            self.assertIsNone(notifier.claim_delivery(c,90))
