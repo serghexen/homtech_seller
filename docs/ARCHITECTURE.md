@@ -341,7 +341,7 @@ HTTP-запроса. Все задания получают общий lock toke
 
 ## Контроль наличия поставщика для Яндекса (подготовлен 05.10.2026)
 
-Реализация локальная; на production не включена. Seller не читает БД CRM.
+Включено на production 06.10.2026; ревизии и проверки — в `SUPPLIER_STOCK_RELEASE_20261006.md`. Seller не читает БД CRM.
 Цепочка: сохранённый часовой снимок CRM → машинный read-only API →
 Supplier Hub `/v1/providers/interhub/stock-snapshot` → Seller. Никакого
 дополнительного опроса Интерхаба, calculate, check или pay этот контроль не делает.
