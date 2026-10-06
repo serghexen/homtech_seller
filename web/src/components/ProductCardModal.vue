@@ -1,5 +1,6 @@
 <script setup>
 import { supplierStockMessage } from '../utils/supplierStock'
+import { supplierPriceDetails } from '../utils/supplierPrice.js'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import OrderFulfillmentAction from './OrderFulfillmentAction.vue'
@@ -198,21 +199,8 @@ const filteredSupplierServices = computed(() => {
     supplierServiceDisplay(right).replace(/^po_/i, ''),
   )).slice(0, 40)
 })
-const supplierCurrentPrice = computed(() => {
-  const quote = props.supplierQuote
-  const quoteMatches = quote
-    && Number(quote.service_id) === Number(settingsForm.supplier_service_id)
-    && String(quote.nominal_id || '') === String(settingsForm.supplier_nominal_id || '')
-  if (quoteMatches) return quote.amount
-  const savedMappingMatches = Number(props.item.supplier_service_id) === Number(settingsForm.supplier_service_id)
-    && String(props.item.supplier_nominal_id || '') === String(settingsForm.supplier_nominal_id || '')
-  return savedMappingMatches ? props.item.supplier_quoted_amount : null
-})
-const supplierCurrentPriceLabel = computed(() => {
-  const amount = Number(supplierCurrentPrice.value)
-  if (!Number.isFinite(amount) || amount <= 0) return ''
-  return new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)
-})
+const supplierPrice = computed(() => supplierPriceDetails(props.item, settingsForm, props.supplierQuote))
+const supplierCurrentPriceLabel = computed(() => supplierPrice.value.amountLabel)
 
 const detailFields = computed(() => [
   { label: 'Артикул продавца', value: props.item.market_sku || props.item.offer_id || props.item.external_product_id || '—' },
@@ -350,7 +338,7 @@ function handleSupplierSearchInput(event) {
 }
 
 function requestSupplierQuote() {
-  if (!props.supplierAccessEnabled || !supplierMappingComplete.value || props.supplierQuoteLoading) return
+  if (!props.supplierAccessEnabled || !supplierMappingComplete.value) return
   settingsForm.supplier_max_amount = ''
   emit('quote-supplier', {
     service_id: Number(settingsForm.supplier_service_id),
@@ -711,8 +699,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                           </div>
                           <p v-if="supplierServicesError" class="supplier-inline-error">{{ supplierServicesError }}</p>
                           <p v-if="supplierQuoteError" class="supplier-inline-error">{{ supplierQuoteError }}</p>
-                          <p v-if="supplierQuoteLoading">Актуальная цена: <strong>уточняем…</strong></p>
-                          <p v-else-if="supplierCurrentPriceLabel">Актуальная цена: <strong>{{ supplierCurrentPriceLabel }} ₽</strong></p>
+                          <p v-if="supplierQuoteLoading">Цена поставщика: <strong>уточняем…</strong></p>
+                          <template v-else>
+                            <p>{{ supplierPrice.label }}<template v-if="supplierCurrentPriceLabel">: <strong>{{ supplierCurrentPriceLabel }} ₽</strong></template></p>
+                            <p v-if="supplierPrice.timeLabel">{{ supplierPrice.timeLabel }}</p>
+                            <p v-if="supplierPrice.warning" class="supplier-inline-error">{{ supplierPrice.warning }}</p>
+                          </template>
                         </div>
                       </article>
 

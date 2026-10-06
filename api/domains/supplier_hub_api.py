@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ from domains.supplier_hub_client import (
     supplier_hub_status,
 )
 from domains.connection_entitlements import SUPPLIER_MAPPING_MANAGE, connection_allows
+from domains.supplier_price_snapshot import cached_supplier_price
 
 
 class SupplierHubStatusOut(BaseModel):
@@ -43,6 +45,19 @@ class SupplierHubQuoteOut(BaseModel):
     currency: str = "RUB"
     provider_status: int | None = None
     provider_message: str = ""
+    source: str = "provider"
+    checked_at: datetime
+
+
+class SupplierHubCachedPriceOut(BaseModel):
+    service_id: int
+    nominal_id: str
+    amount: str | None = None
+    currency: str = "RUB"
+    source: str = "crm"
+    checked_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    warning: str = ""
 
 
 def mount_supplier_hub_routes(
@@ -82,6 +97,22 @@ def mount_supplier_hub_routes(
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return SupplierHubServicesOut(items=items)
 
+    @app.get("/integrations/supplier-hub/cached-price", response_model=SupplierHubCachedPriceOut)
+    def read_supplier_cached_price(
+        connection_id: int = Query(gt=0),
+        service_id: int = Query(gt=0),
+        nominal_id: str = Query(default="", max_length=128),
+        user: Any = Depends(current_user),
+    ) -> SupplierHubCachedPriceOut:
+        # Читаем готовый снимок CRM после проверки магазина; поставщика не опрашиваем.
+        require_supplier_mapping_access(user, connection_id)
+        try:
+            snapshot = SupplierHubClient(load_supplier_hub_settings()).stock_snapshot()
+            result = cached_supplier_price(snapshot, service_id, nominal_id)
+        except (SupplierHubError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail="Не удалось получить цену из снимка CRM") from exc
+        return SupplierHubCachedPriceOut(**result)
+
     @app.post("/integrations/supplier-hub/quote", response_model=SupplierHubQuoteOut)
     def read_supplier_hub_quote(
         payload: SupplierHubQuoteIn,
@@ -108,4 +139,5 @@ def mount_supplier_hub_routes(
             currency="RUB",
             provider_status=result.get("status"),
             provider_message=str(result.get("message") or ""),
+            checked_at=datetime.now(timezone.utc),
         )

@@ -293,6 +293,7 @@ async function openProductCard(item) {
     requests.push(quoteSelectedSupplier({
       service_id: item.supplier_service_id,
       nominal_id: item.supplier_nominal_id || '',
+      cached: true,
     }))
   }
   if (['yandex_market', 'ozon'].includes(item.provider_code) && !item.archived && !isConnectionDisabled(item.connection_id)) requests.push(refreshSelectedProductStock())
@@ -350,7 +351,7 @@ async function loadSupplierServices() {
 }
 
 async function quoteSelectedSupplier(payload) {
-  // Рассчитывает одну выбранную связку. Endpoint Hub выполняет только calculate и не создаёт покупку.
+  // Открытая связка читает снимок CRM; новая связка проходит прежнюю проверку у поставщика.
   const item = selectedCatalogItem.value
   const serviceId = Number(payload?.service_id)
   const nominalId = String(payload?.nominal_id || '').trim()
@@ -359,22 +360,30 @@ async function quoteSelectedSupplier(payload) {
   const requestSequence = ++supplierQuoteSequence
   selectedSupplierQuoteLoading.value = true
   selectedSupplierQuoteError.value = ''
+  selectedSupplierQuote.value = null
   try {
-    const result = await apiRequest('/integrations/supplier-hub/quote', {
-      method: 'POST',
-      body: JSON.stringify({
-        connection_id: item.connection_id,
-        service_id: serviceId,
-        nominal_id: nominalId,
-        params: {},
-      }),
-    })
+    const query = new URLSearchParams({ connection_id: item.connection_id, service_id: serviceId, nominal_id: nominalId })
+    const result = payload.cached
+      ? await apiRequest(`/integrations/supplier-hub/cached-price?${query}`)
+      : await apiRequest('/integrations/supplier-hub/quote', {
+        method: 'POST',
+        body: JSON.stringify({
+          connection_id: item.connection_id,
+          service_id: serviceId,
+          nominal_id: nominalId,
+          params: {},
+        }),
+      })
     if (requestSequence !== supplierQuoteSequence || !selectedCatalogItem.value || `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` !== identity) return
     selectedSupplierQuote.value = {
       service_id: serviceId,
       nominal_id: nominalId,
       amount: result.amount,
       currency: result.currency || 'RUB',
+      source: result.source || 'provider',
+      checked_at: result.checked_at || null,
+      last_attempt_at: result.last_attempt_at || null,
+      warning: result.warning || '',
     }
   } catch (requestError) {
     if (requestSequence === supplierQuoteSequence && selectedCatalogItem.value && `${selectedCatalogItem.value.connection_id}:${selectedCatalogItem.value.external_product_id}` === identity) {
