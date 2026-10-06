@@ -248,7 +248,7 @@ def recover_stale_deliveries(connection) -> int:
 
 
 def materialize_deliveries(connection, limit: int = 500) -> int:
-    # Создаёт отдельную доставку на каждый workspace-чат; пересечения пользователей невозможны.
+    # Создаёт только недостающие доставки; история отправленных событий не занимает лимит новой очереди.
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -259,8 +259,10 @@ def materialize_deliveries(connection, limit: int = 500) -> int:
                 SELECT 1 FROM seller.telegram_notification_recipients AS recipient
                 WHERE recipient.workspace_id=event.workspace_id AND recipient.is_active=true
                   AND event.id > recipient.notifications_from_event_id
+                  AND NOT EXISTS (SELECT 1 FROM seller.telegram_notification_deliveries existing
+                    WHERE existing.event_id=event.id AND existing.recipient_id=recipient.id)
               )
-              ORDER BY event.id
+              ORDER BY CASE WHEN event.event_type='supplier_stock' THEN 1 ELSE 0 END, event.id
               LIMIT %s
             )
             INSERT INTO seller.telegram_notification_deliveries(event_id, recipient_id)
@@ -280,6 +282,7 @@ def materialize_deliveries(connection, limit: int = 500) -> int:
 
 
 def claim_delivery(connection, lease_seconds: int) -> ClaimedDelivery | None:
+    # Оперативные уведомления о заказах проходят раньше массовых сообщений об остатках.
     lock_token = uuid4()
     with connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
@@ -303,7 +306,7 @@ def claim_delivery(connection, lease_seconds: int) -> ClaimedDelivery | None:
                     AND EXISTS(SELECT 1 FROM seller.product_supplier_mappings m
                       WHERE m.connection_id=c.id AND m.external_product_id=p.external_product_id
                         AND m.enabled AND m.provider_code='interhub' AND m.nominal_id<>'')))
-              ORDER BY delivery.available_at, delivery.id
+              ORDER BY CASE WHEN event.event_type='supplier_stock' THEN 1 ELSE 0 END, delivery.available_at, delivery.id
               FOR UPDATE OF delivery SKIP LOCKED
               LIMIT 1
             ), claimed AS (

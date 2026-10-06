@@ -227,3 +227,32 @@ class SupplierStockIntegrationTests(unittest.TestCase):
         self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
         self.assertEqual(len(self.sent),1)
         self.assertEqual(self.sent[0].target_stock,0)
+
+    def test_notifier_moves_past_materialized_history(self):
+        # Уже созданные доставки не закрывают лимит выборки для следующей страницы событий.
+        import notifier
+        w,a=self.stores[0]
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute("INSERT INTO seller.telegram_notification_recipients(workspace_id,chat_id) VALUES (%s,123)",(w,))
+            for n in range(3):
+                c.execute("INSERT INTO seller.telegram_notification_events(workspace_id,event_type,event_key,payload) VALUES (%s,'supplier_stock',%s,'{}')",(w,str(n)))
+            self.assertEqual(notifier.materialize_deliveries(c,limit=1),1)
+            self.assertEqual(notifier.materialize_deliveries(c,limit=1),1)
+            self.assertEqual(notifier.materialize_deliveries(c,limit=1),1)
+            self.assertEqual(notifier.materialize_deliveries(c,limit=1),0)
+
+    def test_order_notification_precedes_stock_backlog(self):
+        # Новый заказ не ждёт сотни старых информационных уведомлений об остатках.
+        import notifier
+        w,a=self.stores[0]
+        self.refresh(a,self.snapshot(0))
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute("INSERT INTO seller.telegram_notification_recipients(workspace_id,chat_id) VALUES (%s,123)",(w,))
+            notifier.materialize_deliveries(c)
+        self.order(a,'urgent-order',1)
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute("INSERT INTO seller.order_fulfillments(connection_id,external_order_id,external_item_id,offer_id,requested_quantity,reservation_ref,status) VALUES (%s,'urgent-order','1','sku',1,'urgent-order','manual_required')",(a,))
+            notifier.materialize_deliveries(c,limit=1)
+            delivery=notifier.claim_delivery(c,90)
+            self.assertIsNotNone(delivery)
+            self.assertEqual(delivery.event_type,'manual_required')
