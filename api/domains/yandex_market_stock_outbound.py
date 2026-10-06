@@ -14,6 +14,7 @@ from uuid import UUID
 from domains.marketplace_connection_verification import YANDEX_MARKET_BASE_URL, _ssl_context
 from domains.marketplace_sync_service import credentials_secret
 from domains.stock_target_policy import stock_target_base
+from domains.supplier_stock_control import enabled as supplier_control_enabled, is_blocked, publication_notice
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,7 @@ class YandexStockOutboundProcessor:
                            market.yandex_daily_stock_enabled, market.launch_state,
                            EXISTS (SELECT 1 FROM seller.catalog_items item
                              WHERE item.connection_id=market.id AND item.external_product_id=job.external_product_id
-                               AND item.is_present AND NOT item.is_archived)
+                               AND item.is_present AND NOT item.is_archived), market.supplier_stock_control_enabled
                     FROM seller.yandex_stock_outbound_jobs AS job
                     LEFT JOIN seller.order_fulfillments AS fulfillment ON fulfillment.id=job.fulfillment_id
                     JOIN seller.marketplace_connections AS market
@@ -263,9 +264,14 @@ class YandexStockOutboundProcessor:
                     pool_issue_enabled=bool(row[14]),
                     pool_free_count=int(row[15] or 0),
                 )
+                # Ноль поставщика имеет приоритет над пулом, ручной кнопкой и восстановлением дневной квоты.
+                if supplier_control_enabled() and is_blocked(cursor, int(row[16]), connection_id, product_id):
+                    configured_stock = 0
                 validation_error = ""
                 if not yandex_stock_outbound_enabled() or str(row[5]) != "active" or not bool(row[6]):
                     validation_error = "Публикация остатков выключена"
+                elif job_kind == 'supplier' and (not supplier_control_enabled() or not bool(row[20]) or str(row[18]) != 'running'):
+                    validation_error = "Контроль поставщика выключен"
                 elif not bool(row[19]):
                     validation_error = "Карточка отсутствует или архивирована"
                 elif job_kind in {"daily", "reconcile"} and (not bool(row[17]) or str(row[18]) != "running"):
@@ -368,6 +374,7 @@ class YandexStockOutboundProcessor:
                     """,
                     (message[:1000], payload.connection_id, payload.external_product_id),
                 )
+                publication_notice(cursor, payload.connection_id, payload.external_product_id, error=True)
             connection.commit()
 
     def _finish_success(self, payload: StockOutboundPayload) -> None:
@@ -400,6 +407,7 @@ class YandexStockOutboundProcessor:
                     """,
                     (payload.target_stock, payload.connection_id, payload.external_product_id),
                 )
+                publication_notice(cursor, payload.connection_id, payload.external_product_id, target=payload.target_stock)
             connection.commit()
 
 

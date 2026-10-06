@@ -1,4 +1,5 @@
 <script setup>
+import { supplierStockMessage } from '../utils/supplierStock'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import OrderFulfillmentAction from './OrderFulfillmentAction.vue'
@@ -624,6 +625,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
                       <p v-if="!hasSalesMetrics" class="stock-limit__metrics-note">Статистика использования появится после получения соответствующего снимка.</p>
                     </section>
 
+                    <p v-if="supplierStockMessage(item.supplier_stock)" class="stock-limit__metrics-note" role="status">
+                      {{ supplierStockMessage(item.supplier_stock) }}
+                      <span v-if="item.supplier_stock.checked_at"> Проверка: {{ new Date(item.supplier_stock.checked_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) }} МСК.</span>
+                    </p>
                     <p class="stock-readonly__notice">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
                       После сохранения заданный остаток можно опубликовать вручную. Автоматически он также пересчитывается после подтверждённой выдачи товара; оба сценария требуют включённой синхронизации магазина.

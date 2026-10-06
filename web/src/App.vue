@@ -57,6 +57,7 @@ const launchActionLoading = ref(false)
 const launchError = ref('')
 const activeSection = ref('home')
 const catalogItems = ref([])
+const supplierStockWarnings = ref([])
 const catalogTotal = ref(0)
 const catalogActiveTotal = ref(0)
 const catalogArchivedTotal = ref(0)
@@ -1247,6 +1248,7 @@ async function loadCatalog() {
     const result = await apiRequest(`/marketplaces/catalog?${query}`)
     if (requestId !== catalogRequestSequence) return
     catalogItems.value = result.items
+    supplierStockWarnings.value = result.supplier_stock_warnings || []
     catalogTotal.value = result.total
     catalogActiveTotal.value = result.active_total
     catalogArchivedTotal.value = result.archived_total
@@ -1527,6 +1529,7 @@ async function logout() {
     closeStoreReviews()
     clearDashboardRefreshTimer()
     catalogItems.value = []
+    supplierStockWarnings.value = []
     orders.value = []
     catalogRequestSequence += 1
     clearCatalogSearchTimer()
@@ -2072,6 +2075,12 @@ onBeforeUnmount(() => {
             </div>
           </Transition>
 
+          <template v-if="activeSection === 'catalog'">
+            <p v-for="warning in supplierStockWarnings" :key="warning.connection_id" class="snapshot-count" role="status">
+              {{ warning.store_name }}: {{ warning.message }}. Массовое обнуление остатков не выполняется.
+              <span v-if="warning.last_success_at"> Снимок получен: {{ new Date(warning.last_success_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) }} МСК.</span>
+            </p>
+          </template>
           <p class="snapshot-count">Найдено: {{ activeSection === 'catalog' ? catalogTotal : ordersTotal }}</p>
           <div v-if="(activeSection === 'catalog' && catalogLoading) || (activeSection === 'orders' && ordersLoading)" class="empty-state">Загружаем локальный снимок…</div>
           <div v-else-if="activeSection === 'catalog' && !catalogItems.length" class="empty-state">

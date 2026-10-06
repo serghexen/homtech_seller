@@ -116,6 +116,29 @@ def status_title(status: str) -> str:
 
 
 def notification_text(event_type: str, payload: dict[str, Any]) -> str:
+    if event_type == "supplier_stock":
+        # Служебное событие наличия не притворяется ошибкой заказа; ключи и сырой ответ не выводятся.
+        labels = {'zero':'У поставщика остаток 0', 'item_error':'Ошибка проверки номинала',
+                  'unavailable':'Номинал недоступен', 'available':'У поставщика есть товар',
+                  'common_error':'Не удалось получить остатки поставщика', 'unknown':'Нет подтверждённых данных',
+                  'stale':'Опрос остатков задерживается'}
+        action = payload.get('action')
+        if action in {'common_warning','common_restored'}:
+            # В общем уведомлении считаем только карточки с действующей поставщицкой автовыдачей.
+            return '\n'.join(['Остатки · Яндекс Маркет',
+                f"Магазин: {str(payload.get('store_name') or '—')[:160]}",
+                'Проверка остатков восстановлена.' if action == 'common_restored' else labels.get(payload.get('observation'), 'Проблема проверки остатков'),
+                f"Затронуто карточек с автовыдачей: {int(payload.get('affected_count') or 0)}",
+                'Массовое обнуление не выполнялось.'])
+        result = {'queued':'Пересчёт остатка поставлен в очередь Яндекса.',
+                  'unchanged':'Остаток в Яндексе оставлен без изменений.',
+                  'error':'Отправка в Яндекс не подтверждена. Проверьте очередь публикаций.',
+                  'sent':f"Яндекс подтвердил приём остатка: {payload.get('target_stock', '—')}."}.get(action, '')
+        return '\n'.join(['Остатки · Яндекс Маркет',
+            f"Магазин: {str(payload.get('store_name') or '—')[:160]}",
+            f"Товар: {str(payload.get('offer_id') or '—')[:200]}",
+            labels.get(payload.get('observation'), 'Состояние наличия изменилось'),result,
+            f"Проверка: {str(payload.get('checked_at') or 'нет данных')[:80]}"])
     if event_type == "resolved":
         heading = "✅ Проблема решена"
     elif event_type == "cancelled":
@@ -268,6 +291,18 @@ def claim_delivery(connection, lease_seconds: int) -> ClaimedDelivery | None:
               JOIN seller.telegram_notification_events AS event ON event.id=delivery.event_id
               WHERE delivery.state IN ('queued','retry') AND delivery.available_at <= now()
                 AND recipient.is_active=true AND recipient.workspace_id=event.workspace_id
+                AND (event.event_type<>'supplier_stock' OR EXISTS (
+                  SELECT 1 FROM seller.marketplace_connections c
+                  JOIN seller.product_fulfillment_policies p ON p.connection_id=c.id AND p.supplier_issue_enabled
+                  WHERE c.id=(event.payload->>'connection_id')::bigint AND c.workspace_id=event.workspace_id
+                    AND c.status='active' AND c.launch_state='running'
+                    AND c.supplier_stock_control_enabled AND c.supplier_fulfillment_enabled
+                    AND c.supplier_stock_notifications_enabled
+                    AND (c.supplier_stock_notifications_until IS NULL OR c.supplier_stock_notifications_until>now())
+                    AND (COALESCE(event.payload->>'offer_id','')='' OR p.external_product_id=event.payload->>'offer_id')
+                    AND EXISTS(SELECT 1 FROM seller.product_supplier_mappings m
+                      WHERE m.connection_id=c.id AND m.external_product_id=p.external_product_id
+                        AND m.enabled AND m.provider_code='interhub' AND m.nominal_id<>'')))
               ORDER BY delivery.available_at, delivery.id
               FOR UPDATE OF delivery SKIP LOCKED
               LIMIT 1

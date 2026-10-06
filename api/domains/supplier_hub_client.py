@@ -148,6 +148,10 @@ class SupplierHubClient:
             raise SupplierHubError("Supplier Hub returned an invalid service catalog")
         return [item for item in items if isinstance(item, dict)]
 
+    def stock_snapshot(self) -> dict[str, Any]:
+        # Читает общий снимок; дополнительных calculate/detail/check/pay здесь нет.
+        return self._get("/v1/providers/interhub/stock-snapshot", authenticated=True)
+
     def balance(self) -> dict[str, Any]:
         return self._get("/v1/providers/interhub/balance", authenticated=True)
 

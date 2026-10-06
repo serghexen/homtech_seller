@@ -104,6 +104,7 @@ class MarketplaceCatalogItemOut(BaseModel):
     stock_last_error: str = ""
     stock_next_run_at: datetime | None = None
     stock_queue_delay_seconds: int = 0
+    supplier_stock: dict = Field(default_factory=dict)
     manual_stock_limit: int | None = None
     published_stock: int | None = None
     activation_instruction: str = ""
@@ -134,6 +135,7 @@ class MarketplaceCatalogItemOut(BaseModel):
 
 
 class MarketplaceCatalogListOut(BaseModel):
+    supplier_stock_warnings: list[dict] = Field(default_factory=list)
     items: list[MarketplaceCatalogItemOut]
     total: int
     page: int
@@ -792,7 +794,18 @@ def mount_marketplace_read_routes(
                              AND connection.stock_outbound_enabled AND
                              CASE WHEN local_settings.connection_id IS NOT NULL THEN local_settings.sales_limit ELSE settings.sales_limit END IS NOT NULL
                              THEN connection.next_daily_stock_at END),
-                           GREATEST(0,EXTRACT(EPOCH FROM now()-stock_history.next_run_at))::integer
+                           GREATEST(0,EXTRACT(EPOCH FROM now()-stock_history.next_run_at))::integer,
+                           CASE WHEN connection.supplier_stock_control_enabled AND COALESCE(policy.supplier_issue_enabled,false)
+                             THEN COALESCE((SELECT jsonb_build_object('blocked',st.blocked,'observation',
+                               CASE WHEN st.checked_at < now()-interval '90 minutes' THEN 'stale' ELSE st.observation END,
+                               'checked_at',st.checked_at,'updated_at',st.updated_at)
+                               FROM seller.product_supplier_stock_state st WHERE st.workspace_id=connection.workspace_id
+                                 AND st.connection_id=item.connection_id AND st.external_product_id=item.external_product_id
+                                 AND st.mapping_key=(SELECT m.id::text || ':' || m.service_id::text || ':' || m.nominal_id
+                                   FROM seller.product_supplier_mappings m WHERE m.connection_id=item.connection_id
+                                     AND m.external_product_id=item.external_product_id AND m.enabled AND m.provider_code='interhub'
+                                   ORDER BY m.priority,m.id LIMIT 1)),'{{}}'::jsonb)
+                             ELSE '{{}}'::jsonb END
                     FROM seller.catalog_items AS item
                     JOIN seller.marketplace_connections AS connection ON connection.id=item.connection_id
                     LEFT JOIN seller.yandex_product_settings_snapshot AS settings
@@ -841,6 +854,32 @@ def mount_marketplace_read_routes(
                     connection_id: access.allows(SUPPLIER_MAPPING_MANAGE)
                     for connection_id, access in connection_access.items()
                 }
+                # Предупреждение магазина не зависит от страницы или поискового фильтра карточек.
+                from domains.supplier_stock_control import enabled as supplier_control_enabled
+                supplier_warnings = []
+                if supplier_control_enabled():
+                    cursor.execute("""
+                        SELECT c.id,c.display_name,c.supplier_stock_last_success_at,
+                          CASE WHEN c.supplier_stock_last_error<>'' THEN c.supplier_stock_last_error
+                            ELSE 'Опрос остатков поставщика задерживается или данные не подтверждены' END
+                        FROM seller.marketplace_connections c
+                        WHERE c.workspace_id=%s AND (%s::bigint IS NULL OR c.id=%s)
+                          AND c.supplier_stock_control_enabled AND c.supplier_fulfillment_enabled
+                          AND c.status='active' AND c.launch_state='running' AND c.provider_code='yandex_market'
+                          AND EXISTS(SELECT 1 FROM seller.product_fulfillment_policies p
+                            JOIN seller.product_supplier_mappings m ON m.connection_id=p.connection_id
+                              AND m.external_product_id=p.external_product_id AND m.enabled AND m.nominal_id<>''
+                            WHERE p.connection_id=c.id AND p.supplier_issue_enabled)
+                          AND (c.supplier_stock_last_error<>'' OR EXISTS(
+                            SELECT 1 FROM seller.product_supplier_stock_state st
+                            JOIN seller.product_fulfillment_policies p ON p.connection_id=st.connection_id
+                              AND p.external_product_id=st.external_product_id AND p.supplier_issue_enabled
+                            WHERE st.workspace_id=c.workspace_id AND st.connection_id=c.id
+                              AND (st.observation IN ('common_error','unknown','stale') OR st.checked_at < now()-interval '90 minutes')))
+                        ORDER BY c.id
+                    """,(seller_user.workspace_id,connection_id,connection_id))
+                    supplier_warnings = [dict(zip(('connection_id','store_name','last_success_at','message'), warning))
+                                         for warning in cursor.fetchall()]
         items: list[MarketplaceCatalogItemOut] = []
         for row in rows:
             provider_code = str(row[1])
@@ -859,6 +898,7 @@ def mount_marketplace_read_routes(
                 daily_stock_enabled=provider_code == "yandex_market" and bool(row[37]) and row[14] is not None,
                 stock_last_success_at=row[38], stock_last_error=str(row[39] or ""),
                 stock_next_run_at=row[40], stock_queue_delay_seconds=int(row[41] or 0),
+                supplier_stock=row[42] if supplier_control_enabled() and len(row)>42 and isinstance(row[42],dict) else {},
                 manual_stock_limit=int(row[11]) if has_settings else None,
                 published_stock=int(row[12]) if row[12] is not None else None,
                 activation_instruction=str(row[13] or "") if has_settings else "",
@@ -887,7 +927,7 @@ def mount_marketplace_read_routes(
                 **details,
             ))
         return MarketplaceCatalogListOut(
-            items=items,
+            supplier_stock_warnings=supplier_warnings, items=items,
             total=total, page=page, page_size=page_size,
             active_total=active_total, archived_total=archived_total,
         )

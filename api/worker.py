@@ -25,6 +25,7 @@ from domains.yandex_market_webhooks_api import webhook_processing_enabled
 from domains.yandex_market_outbound import build_yandex_outbound_processor
 from domains.yandex_market_stock_outbound import build_yandex_stock_outbound_processor
 from domains.yandex_daily_stock import enqueue_due_daily_stock
+from domains.supplier_stock_control import SupplierStockController
 from domains.yandex_review_replies import build_yandex_review_reply_processor
 
 
@@ -453,6 +454,8 @@ def run_worker() -> int:
             recovered_stock = stock_outbound.recover_stale()
             if recovered_stock:
                 print(f"Recovered Yandex stock jobs: {recovered_stock}", flush=True)
+            # Ограниченный проход одного магазина не создаёт отдельные таймеры или внешний опрос поставщика.
+            SupplierStockController(database_url=database_url, psycopg=psycopg).process_once()
             processed_stock = stock_outbound.process_pending_jobs(stock_outbound_batch_size())
             if processed_stock:
                 print(f"Processed Yandex stock jobs: {processed_stock}", flush=True)
