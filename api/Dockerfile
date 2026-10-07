@@ -14,6 +14,7 @@ ENV TBANK_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 COPY app.py .
 COPY worker.py .
+COPY steam_topup_worker.py .
 COPY notifier.py .
 COPY domains ./domains
 COPY scripts ./scripts
