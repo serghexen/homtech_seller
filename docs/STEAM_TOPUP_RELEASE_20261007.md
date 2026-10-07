@@ -98,3 +98,33 @@ pg_restore --list) и source-backup с исходниками/конфигура
 max_amount=100 / budget_amount=100, включить Steam-флаги, запустить отдельный
 worker и создать одну персональную ссылку. Пользователь выполняет пополнение
 сам; затем сверяем сумму в Steam и конвертацию. Магазины ещё не подключены.
+
+
+## Включение личного пилота в 08:48 МСК
+
+По явному запросу владельца «ну давай пробуем пилот так сказать» включены
+INTERHUB_TOPUPS_ENABLED и SELLER_STEAM_TOPUPS_ENABLED. Разрешена только рабочая
+область Sergey (workspace 3), consumer seller; членство активного владельца
+user 3 проверено через user_with_workspace и owner_user_id.
+Hub max_amount=100; Seller max_amount=100, budget_amount=100. Настроен отдельный
+случайный секрет ссылок только в серверном .env, без вывода в файлы релиза/логи/Git.
+
+Перезапущены только API и worker Hub, API Seller; создан отдельный
+homtech-seller-steam-topup-worker-1 из того же проверенного API-образа
+1dcda8c3ba0cc14d57f5e96c3a2fae79a600f8b626f44a38350803e588177b05.
+Остальные контейнеры не перезапускались, проверены image/StartedAt.
+Readiness успешен; новый worker имеет доступ к read-only observability Hub.
+
+Через штатный SteamTopups.create после проверки владельца выпущена одна ссылка
+на 100 RUB в 08:48:36 МСК; бюджет зарезервирован целиком. Идентификатор ссылки
+ba815cfc-cadd-4137-a838-69421b938ac9, creation_key
+61c1687f-9fbb-4235-9cd2-785343df13df. Сам token здесь не сохраняется.
+Ссылка истекает 14.10.2026 в 08:48:36 МСК. При выпуске state=ready,
+попыток=0; в браузере сервер подтвердил сумму 100 ₽ и разрешил ввод логина.
+Агент не отправлял submit, check или pay. Финальное нажатие передано владельцу.
+
+Серверные метаданные включения: /home/adminops/releases/steam-pilot-20261007
+на Seller/Hub; там environment.before (600), containers-before.json, activation.json.
+Для остановки новых Steam-платежей сначала закрыть именно topup_permissions
+consumer seller/workspace 3 и steam_topup_settings workspace 3, не выключая общие
+покупки Hub. Начатые операции продолжают сверку прежнего результата.
