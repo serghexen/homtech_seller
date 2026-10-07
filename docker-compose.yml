@@ -63,6 +63,18 @@ services:
     mem_limit: 350m
     cpus: "0.50"
 
+  steam-topup-worker:
+    build: ./api
+    profiles: ["steam-pilot"]
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "steam_topup_worker.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 150m
+    cpus: "0.25"
+
   notifier:
     build: ./api
     restart: unless-stopped

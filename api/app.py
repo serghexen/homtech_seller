@@ -21,6 +21,7 @@ from domains.marketplace_read_api import mount_marketplace_read_routes
 from domains.marketplace_reviews_api import mount_marketplace_review_routes
 from domains.marketplace_sync_jobs_api import mount_marketplace_sync_job_routes
 from domains.supplier_hub_api import mount_supplier_hub_routes
+from domains.steam_topups import mount_steam_topup_routes
 from domains.tbank_payments import mount_tbank_payment_routes
 from domains.yandex_market_webhooks_api import mount_yandex_market_webhook_routes
 
@@ -369,6 +370,13 @@ mount_tbank_payment_routes(
     app,
     database_url=database_url,
     psycopg=psycopg,
+    current_user=current_user,
+    user_with_workspace=user_with_workspace,
+)
+
+mount_steam_topup_routes(
+    app,
+    database_url=database_url,
     current_user=current_user,
     user_with_workspace=user_with_workspace,
 )

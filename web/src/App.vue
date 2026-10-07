@@ -12,6 +12,7 @@ import OrderFulfillmentModal from './components/OrderFulfillmentModal.vue'
 import ProductCardModal from './components/ProductCardModal.vue'
 import ReviewsView from './components/ReviewsView.vue'
 import StoreLaunchModal from './components/StoreLaunchModal.vue'
+import SteamTopupPilot from './components/SteamTopupPilot.vue'
 import { catalogEmptyStateMessage } from './utils/catalog.js'
 import { connectionAccountValue, connectionLastCheckedAt } from './utils/connections.js'
 import { dashboardChatCount, shouldShowDashboardSkeleton } from './utils/dashboard.js'
@@ -1747,6 +1748,7 @@ onBeforeUnmount(() => {
     <header class="app-header">
       <div class="app-brand"><img :src="homtechLogo" alt="HomTech" /><span>Seller</span></div>
       <nav v-if="user" class="seller-nav" aria-label="Разделы Seller">
+        <button v-if="user.role_code === 'owner'" class="seller-nav__item" :class="{ 'seller-nav__item--active': activeSection === 'steam' }" type="button" @click="changeSection('steam')">Steam · пилот</button>
         <button
           class="seller-nav__item"
           :class="{ 'seller-nav__item--active': activeSection === 'home' }"
@@ -1840,6 +1842,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="user" class="seller-dashboard" aria-live="polite">
+      <SteamTopupPilot v-if="activeSection === 'steam' && user.role_code === 'owner'" />
       <TransitionGroup name="order-toast" tag="aside" class="order-toast-stack" aria-live="polite" aria-label="Новые заказы">
         <article v-for="toast in orderToasts" :key="toast.id" class="order-toast" role="status" @click="openOrderActivityToast(toast)">
           <div class="order-toast__mark" aria-hidden="true">
