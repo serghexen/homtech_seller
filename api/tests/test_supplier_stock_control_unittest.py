@@ -1,9 +1,10 @@
 """Проверки решений наличия без сети, покупок и рабочих баз."""
 import unittest
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from domains.supplier_stock_control import observation, validate_snapshot, effective_block, SupplierStockController, is_blocked
+from domains.supplier_stock_control import observation, validate_snapshot, effective_block, SupplierStockController, is_blocked, notify
 from domains.yandex_market_stock_outbound import calculate_effective_stock
 import notifier
 
@@ -69,6 +70,22 @@ class SupplierStockTests(unittest.TestCase):
         db,client=MagicMock(),MagicMock()
         c=SupplierStockController(database_url=lambda:'test',psycopg=db,client_factory=client)
         self.assertFalse(c.process_once());db.connect.assert_not_called();client.assert_not_called()
+
+    @patch('domains.supplier_stock_control.active_mapping',return_value=('1:10:20','10','20'))
+    def test_notification_captures_ids_of_authorized_mapping(self, mapping):
+        cur=MagicMock()
+        cur.fetchone.return_value=('available',self.now,'JoyCards',True,True)
+        notify(cur,1,2,'same-sku','1:restored',{'action':'sent','target_stock':5})
+        mapping.assert_called_once_with(cur,1,2,'same-sku')
+        workspace,key,raw=cur.execute.call_args.args[1]
+        payload=json.loads(raw)
+        self.assertEqual((workspace,key),(1,'1:restored'))
+        self.assertEqual((payload['connection_id'],payload['offer_id'],payload['service_id'],payload['nominal_id']),
+                         (2,'same-sku','10','20'))
+        cur.reset_mock()
+        cur.fetchone.return_value=None
+        notify(cur,1,2,'same-sku','1:restored',{'action':'sent'})
+        self.assertEqual(cur.execute.call_count,1)
 
     def test_telegram_distinguishes_request_success_failure_and_global_incident(self):
         # Получение нуля, подтверждённый PUT и неизвестный исход описываются разными сообщениями.

@@ -69,6 +69,18 @@ class SupplierStockIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.sent),before)
         self.assertFalse(self.value('SELECT blocked FROM seller.product_supplier_stock_state WHERE connection_id=%s',(a,)))
 
+    def test_notification_mapping_ids_are_scoped_to_store_and_workspace(self):
+        w,a=self.stores[0];other,b=self.stores[1]
+        with psycopg.connect(TEST_DSN) as c:
+            c.execute("UPDATE seller.product_supplier_mappings SET service_id=11,nominal_id='30' WHERE connection_id=%s",(b,))
+        self.refresh(a,self.snapshot(0));self.due();self.processor.process_pending_jobs(20)
+        second=self.snapshot(0)
+        second['items'][0].update(service_id='11',nominal_id='30')
+        self.refresh(b,second);self.due();self.processor.process_pending_jobs(20)
+        for workspace,shop,service,nominal in [(w,a,'10','20'),(other,b,'11','30')]:
+            payload=self.value("SELECT payload FROM seller.telegram_notification_events WHERE workspace_id=%s AND payload->>'connection_id'=%s",(workspace,str(shop)))
+            self.assertEqual((payload['offer_id'],payload['service_id'],payload['nominal_id']),('sku',service,nominal))
+
     def test_failure_cannot_restore_previously_blocked_card_and_no_auto_means_pool(self):
         w,a=self.stores[0]
         self.refresh(a,self.snapshot(0))

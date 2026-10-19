@@ -105,7 +105,8 @@ def is_blocked(cursor, workspace, connection_id, product_id):
 
 def notify(cursor, workspace, connection_id, product_id, key, payload):
     # Бот получает только события текущей включённой автовыдачи; повтор одного состояния не размножается.
-    if not active_mapping(cursor,workspace,connection_id,product_id):
+    mapping = active_mapping(cursor,workspace,connection_id,product_id)
+    if not mapping:
         return
     cursor.execute('''UPDATE seller.product_supplier_stock_state s SET notice_key=%s
         FROM seller.marketplace_connections c
@@ -120,6 +121,7 @@ def notify(cursor, workspace, connection_id, product_id, key, payload):
     if not row or not row[3] or not row[4]:
         return
     payload = {**payload, 'connection_id':connection_id,'offer_id':product_id,
+               'service_id':mapping[1], 'nominal_id':mapping[2],
                'store_name':row[2], 'observation':row[0], 'checked_at':str(row[1] or '')}
     cursor.execute('''INSERT INTO seller.telegram_notification_events
         (workspace_id,event_type,event_key,payload) VALUES (%s,'supplier_stock',%s,%s::jsonb)''',

@@ -17,10 +17,13 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import dict_row
 
+from domains.supplier_catalog_labels import SupplierCatalogLabels
+
 
 LOGGER = logging.getLogger("seller_notifier")
 NOTIFIER_CODE = "seller_fulfillment_alerts"
 STOP_REQUESTED = False
+SUPPLIER_CATALOG_LABELS = SupplierCatalogLabels()
 
 
 class TelegramTemporaryError(RuntimeError):
@@ -149,6 +152,8 @@ def notification_text(event_type: str, payload: dict[str, Any]) -> str:
         return '\n'.join(['Остатки · Яндекс Маркет',
             f"Магазин: {str(payload.get('store_name') or '—')[:160]}",
             f"Товар: {str(payload.get('offer_id') or '—')[:200]}",
+            f"Услуга: {str(payload.get('service_title') or ('ID ' + str(payload['service_id']) if payload.get('service_id') else '—'))[:300]}",
+            f"Номинал: {str(payload.get('nominal_title') or payload.get('nominal_id') or '—')[:200]}",
             labels.get(payload.get('observation'), 'Состояние наличия изменилось'),result,
             f"Проверка: {stock_check_time(payload.get('checked_at'))}"])
     if event_type == "resolved":
@@ -523,7 +528,8 @@ def run_cycle(settings: Settings) -> int:
         if not delivery:
             break
         try:
-            message_id = send_text(settings, delivery.chat_id, notification_text(delivery.event_type, delivery.payload))
+            payload = SUPPLIER_CATALOG_LABELS.enrich(delivery.event_type, delivery.payload)
+            message_id = send_text(settings, delivery.chat_id, notification_text(delivery.event_type, payload))
             with psycopg.connect(settings.database_url) as connection:
                 complete_delivery(connection, delivery, message_id)
             LOGGER.info("Telegram event %s was delivered to recipient %s", delivery.event_id, delivery.recipient_id)
